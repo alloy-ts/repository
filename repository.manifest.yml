@@ -1,8 +1,8 @@
 name: repository
 version: 0.0.0
-type: metadata
+type: module
 owner: alloy-ts
-description: Versioned repository for alloy-ts projects.
+description: Versioned module repository for alloy-ts projects.
 config:
   - init.defaultBranch: main
   - user.signingKey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJCszY3BbvFvz7XT2jS4Q6qjmm1uau5/ofiOJ1aWAPiq
