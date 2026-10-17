@@ -1,8 +1,8 @@
 name: repository
 version: 0.0.0
-type: metadata
+type: module
 owner: yumin-chen
-description: Versioned repository for yumin-chen projects.
+description: Versioned module repository for yumin-chen projects.
 config:
   - commit.gpgsign: true
 remote:
