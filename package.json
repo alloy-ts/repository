@@ -1,33 +1,50 @@
 {
   "name": "repository",
   "version": "0.0.0",
-  "type": "module",
   "description": "Versioned repository for yumin-chen projects.",
+  "keywords": [
+    "git",
+    "repository",
+    "scm",
+    "version-control"
+  ],
+  "license": "Unlicense",
+  "author": "Yumin Chen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://repo.chen.software/yumin-chen/repository.git"
+  },
+  "type": "module",
   "exports": {
     ".": "./dist/main.mjs",
     "./package.json": "./package.json"
   },
   "scripts": {
+    "build": "vp pack",
     "start": "node --import @oxc-node/core/register src/main.ts",
-    "test": "node --import @oxc-node/core/register --test"
+    "test": "node --import @oxc-node/core/register --test",
+    "check": "vp check",
+    "fmt": "vp fmt",
+    "lint": "vp lint",
+    "prepublishOnly": "npm run build",
+    "prepare": "vp config"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://repo.chen.software/yumin-chen/repository.git"
-  },
-  "keywords": [
-    "scm",
-    "git",
-    "repository",
-    "version-control"
-  ],
-  "author": "Yumin Chen",
-  "license": "Unlicense",
   "devDependencies": {
     "@oxc-node/core": "^0.1.7",
-    "@types/node": "^26.6.5"
+    "@types/node": "^26.6.5",
+    "vite-plus": "^1.3.0"
   },
   "peerDependencies": {
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.3.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": "11.11.0",
+      "onFail": "download"
+    }
   }
 }
