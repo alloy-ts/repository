@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Log files
+*.log
+
+# Generated artifacts
+target/
+dist/
+
