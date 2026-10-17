@@ -1,0 +1,25 @@
+{
+  "name": "repository",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Versioned repository for yumin-chen projects.",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://repo.chen.software/yumin-chen/repository.git"
+  },
+  "keywords": [
+    "scm",
+    "git",
+    "repository",
+    "version-control"
+  ],
+  "author": "Yumin Chen",
+  "license": "Unlicense"
+}
