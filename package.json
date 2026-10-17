@@ -21,5 +21,11 @@
     "version-control"
   ],
   "author": "Yumin Chen",
-  "license": "Unlicense"
+  "license": "Unlicense",
+  "devDependencies": {
+    "@types/node": "^26.6.5"
+  },
+  "peerDependencies": {
+    "typescript": "^7.0.2"
+  }
 }
