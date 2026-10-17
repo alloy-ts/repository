@@ -1,3 +1,3 @@
-# Module Repository
+# Application Repository
 
-Versioned module repository for yumin-chen projects.
+Versioned application repository for yumin-chen projects.
