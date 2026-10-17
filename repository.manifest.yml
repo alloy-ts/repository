@@ -1,0 +1,14 @@
+name: repository
+version: 0.0.0
+type: repository
+owner: alloy-ts
+description: Versioned repository for alloy-ts projects.
+config:
+  - commit.gpgsign: true
+remote:
+  - https://repo.chen.software/alloy-ts/repository
+  - https://codeberg.org/alloy-ts/repository
+  - https://github.com/alloy-ts/repository
+  - https://gitlab.com/alloy-ts/repository
+  - https://bitbucket.org/alloy-ts/repository
+  - https://dev.azure.com/alloy-ts/repository/_git/repository
