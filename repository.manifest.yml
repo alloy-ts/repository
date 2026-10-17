@@ -1,0 +1,18 @@
+name: repository
+version: 0.0.0
+type: metadata
+owner: alloy-ts
+description: Versioned repository for alloy-ts projects.
+config:
+  - user.signingKey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJCszY3BbvFvz7XT2jS4Q6qjmm1uau5/ofiOJ1aWAPiq
+  - gpg.format: ssh
+  - gpg.ssh.program: ssh-keygen
+  - gpg.ssh.allowedSignersFile: .gitsigners
+  - commit.gpgsign: true
+remote:
+  - https://repo.chen.software/alloy-ts/repository
+  - https://codeberg.org/alloy-ts/repository
+  - https://github.com/alloy-ts/repository
+  - https://gitlab.com/alloy-ts/repository
+  - https://bitbucket.org/alloy-ts/repository
+  - https://dev.azure.com/alloy-ts/repository/_git/repository
