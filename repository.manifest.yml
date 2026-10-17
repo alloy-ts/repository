@@ -1,0 +1,14 @@
+name: repository
+version: 0.0.0
+type: metadata
+owner: yumin-chen
+description: Versioned repository for yumin-chen projects.
+config:
+  - commit.gpgsign: true
+remote:
+  - https://repo.chen.software/yumin-chen/repository
+  - https://codeberg.org/yumin-chen/repository
+  - https://github.com/yumin-chen/repository
+  - https://gitlab.com/yumin-chen/repository
+  - https://bitbucket.org/yumin-chen/repository
+  - https://dev.azure.com/yumin-chen/repository/_git/repository
