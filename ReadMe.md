@@ -1,6 +1,6 @@
 # Starter Template
 
-Starter Template for TypeScript + OXC Node Runner.
+Starter Template for Rust + TypeScript via NAPI-RS, Node-API (N-API) bindings.
 
 ## Getting Started
 

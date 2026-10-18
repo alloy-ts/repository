@@ -13,6 +13,9 @@ export default defineConfig({
       resolveDepSubpath: true,
     },
   },
+  test: {
+    include: ["src/**/*.{test,spec}.ts"],
+  },
   staged: {
     "*": "vp check --fix",
   },

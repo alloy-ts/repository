@@ -20,9 +20,12 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "vp pack",
-    "start": "node --import @oxc-node/core/register src/main.ts",
-    "test": "node --import @oxc-node/core/register --test",
+    "build": "node build.ts && vp pack",
+    "build:napi": "node build.ts",
+    "build:release": "node build.ts --release",
+    "dev": "vp pack --watch",
+    "start": "vp run src/main.ts",
+    "test": "vp test && node --test test.cjs",
     "check": "vp check",
     "fmt": "vp fmt",
     "lint": "vp lint",
@@ -31,7 +34,11 @@
   },
   "devDependencies": {
     "@oxc-node/core": "^0.1.7",
+    "@emnapi/core": "^1.11.3",
+    "@emnapi/runtime": "^1.11.3",
+    "@napi-rs/cli": "^3.10.8",
     "@types/node": "^26.6.5",
+    "emnapi": "^1.11.3",
     "vite-plus": "^1.3.0"
   },
   "peerDependencies": {
@@ -39,6 +46,25 @@
   },
   "overrides": {
     "vite": "npm:@voidzero-dev/vite-plus-core@1.3.0"
+  },
+  "napi": {
+    "binaryName": "repository",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "i686-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "armv7-unknown-linux-gnueabihf",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "aarch64-linux-android",
+      "armv7-linux-androideabi",
+      "x86_64-unknown-freebsd",
+      "wasm32-wasip1-threads"
+    ]
   },
   "devEngines": {
     "packageManager": {
