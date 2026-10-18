@@ -20,9 +20,9 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "node build.ts && vp pack",
-    "build:napi": "node build.ts",
-    "build:release": "node build.ts --release",
+    "build": "napi build --platform --esm --output-dir ./dist && vp pack",
+    "build:napi": "napi build --platform --esm --output-dir ./dist",
+    "build:release": "napi build --platform --esm --output-dir ./dist --release",
     "dev": "vp pack --watch",
     "start": "vp run src/main.ts",
     "test": "vp test && node --test test.cjs",
