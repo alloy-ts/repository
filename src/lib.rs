@@ -1,4 +1,7 @@
-pub fn add(left: u64, right: u64) -> u64 {
+use napi_derive::napi;
+
+#[napi]
+pub fn add(left: u32, right: u32) -> u32 {
     left + right
 }
 
