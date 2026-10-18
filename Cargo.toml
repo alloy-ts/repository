@@ -7,6 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
+gix = "0.89.0"
 napi = { version = "3.14.2", features = ["serde-json"] }
 napi-derive = "3"
 oxc = "0.152.0"
