@@ -2,9 +2,10 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   pack: {
-    entry: ["./src/main.ts"],
+    entry: ["./dist/index.js"],
     format: "esm",
     outDir: "dist",
+    clean: false,
     exports: true,
     dts: {
       generator: "tsgo",
@@ -12,6 +13,9 @@ export default defineConfig({
     deps: {
       resolveDepSubpath: true,
     },
+  },
+  test: {
+    include: ["src/**/*.{test,spec}.ts"],
   },
   staged: {
     "*": "vp check --fix",
