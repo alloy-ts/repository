@@ -98,3 +98,32 @@ describe("Reading git logs with Repository", () => {
     expect(typeof commit.author.name).toBe("string");
   });
 });
+
+describe("Manifest remote setup helper", () => {
+  test("setupRemotesFromManifest parses manifest and configures remotes", () => {
+    const tmp = createTempDir("repo-manifest-remotes-");
+    const manifestPath = path.join(tmp, "repository.manifest.yml");
+
+    try {
+      const repo = Repository.init(tmp);
+      const manifestContent = `
+name: repository
+remote:
+  - https://repo.chen.software/yumin-chen/repository
+  - https://github.com/yumin-chen/repository
+`;
+      fs.writeFileSync(manifestPath, manifestContent, "utf8");
+
+      const names = repo.setupRemotesFromManifest(manifestPath);
+      expect(names).toEqual(["origin", "github"]);
+
+      const reloaded = Repository.open(tmp);
+      const remotes = reloaded.remotes();
+      expect(remotes.length).toBe(2);
+      expect(remotes.map((r) => r.name)).toContain("origin");
+      expect(remotes.map((r) => r.name)).toContain("github");
+    } finally {
+      cleanupDir(tmp);
+    }
+  });
+});
