@@ -564,3 +564,47 @@ describe("Repository wave-3 additions: Config Editing & Branch Helpers", () => {
     expect(repo.branchRemoteRef(mainBranch)).toBe("refs/heads/main");
   });
 });
+
+describe("P0 additions: writeCommit, writeTag, peel, openWith, initOpts", () => {
+  test("writeCommit creates a loose commit object without moving refs", () => {
+    const headCommit = repo.headCommit();
+    const newCommitId = repo.writeCommit({
+      tree: headCommit.treeId,
+      parents: [headCommit.id],
+      message: "p0 loose commit message\n",
+    });
+
+    expect(typeof newCommitId).toBe("string");
+    expect(newCommitId).toMatch(/^[0-9a-f]{40}$/);
+
+    const retrieved = repo.findCommit(newCommitId);
+    expect(retrieved.message).toBe("p0 loose commit message\n");
+    expect(retrieved.treeId).toBe(headCommit.treeId);
+  });
+
+  test("writeTag creates an annotated tag object and peel resolves it", () => {
+    const headId = repo.headId();
+    const tagObjId = repo.writeTag(
+      headId,
+      "Commit",
+      "p0_tag",
+      "p0 tag annotation\n",
+    );
+
+    expect(typeof tagObjId).toBe("string");
+    const retrievedTag = repo.findTag(tagObjId);
+    expect(retrievedTag.name).toBe("p0_tag");
+
+    const peeledId = repo.peel(tagObjId, "Commit");
+    expect(peeledId).toBe(headId);
+  });
+
+  test("openWith and initOpts construct valid repositories", () => {
+    const opened = Repository.openWith(cloneDir);
+    expect(opened.headId()).toBe(repo.headId());
+
+    const initDir = join(base, "init-opts-test");
+    const initialized = Repository.initOpts(initDir, { bare: false });
+    expect(initialized.isBare()).toBe(false);
+  });
+});

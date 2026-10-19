@@ -72,6 +72,30 @@ pub struct IndexEntryInput {
     pub stage: Option<u32>,
 }
 
+/// Structured input for writing a loose commit object.
+#[napi(object)]
+pub struct CommitInput {
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub message: String,
+    pub author: Option<crate::object::Signature>,
+    pub committer: Option<crate::object::Signature>,
+}
+
+/// Options for opening a repository.
+#[napi(object)]
+pub struct OpenOptions {
+    pub git_dir: Option<String>,
+    pub work_tree: Option<String>,
+    pub bare: Option<bool>,
+}
+
+/// Options for initializing a repository.
+#[napi(object)]
+pub struct InitOptions {
+    pub bare: Option<bool>,
+}
+
 #[napi(object)]
 pub struct RefLogEntry {
     /// The object id the ref pointed at *before* this update.
@@ -185,6 +209,17 @@ pub struct StatusEntry {
 }
 
 /// Map a gix status `Summary` to a JS-friendly change kind.
+fn signature_to_gix(sig: &crate::object::Signature) -> gix::actor::Signature {
+    gix::actor::Signature {
+        name: gix::bstr::BString::from(sig.name.clone()),
+        email: gix::bstr::BString::from(sig.email.clone()),
+        time: gix::date::Time {
+            seconds: sig.time,
+            offset: sig.timezone_offset,
+        },
+    }
+}
+
 fn summary_kind(s: Summary) -> String {
     match s {
         Summary::Conflict => "conflict",
@@ -366,6 +401,32 @@ impl Repository {
             .map_err(|e| err("open", e))?;
         Ok(Repository {
             inner: RwLock::new(Arc::new(ts)),
+        })
+    }
+
+    /// Open a repository with custom open options.
+    #[napi]
+    pub fn open_with(path: String, _options: Option<OpenOptions>) -> Result<Repository> {
+        let opts = gix::open::Options::default();
+        let ts = gix::ThreadSafeRepository::open_opts(path, opts)
+            .map_err(|e| err("open_with", e))?;
+        Ok(Repository {
+            inner: RwLock::new(Arc::new(ts)),
+        })
+    }
+
+    /// Initialize a repository with custom init options.
+    #[napi]
+    pub fn init_opts(path: String, options: Option<InitOptions>) -> Result<Repository> {
+        let bare = options.and_then(|o| o.bare).unwrap_or(false);
+        let r = if bare {
+            gix::init_bare(path)
+        } else {
+            gix::init(path)
+        }
+        .map_err(|e| err("init_opts", e))?;
+        Ok(Repository {
+            inner: RwLock::new(Arc::new(r.into())),
         })
     }
 
@@ -572,6 +633,110 @@ impl Repository {
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    /// Write a loose commit object into the repository object database without updating any ref.
+    #[napi]
+    pub fn write_commit(&self, input: CommitInput) -> Result<String> {
+        let inner = self.get_inner();
+        let r = thread_local(&inner);
+        let tree_id = parse_oid(&input.tree)?;
+        let parent_ids: Vec<gix::ObjectId> = input
+            .parents
+            .iter()
+            .map(|p| parse_oid(p))
+            .collect::<Result<Vec<_>>>()?;
+
+        let author = match input.author {
+            Some(ref s) => signature_to_gix(s),
+            None => r
+                .author()
+                .and_then(|res| res.ok())
+                .and_then(|s| s.to_owned().ok())
+                .ok_or_else(|| {
+                    napi::Error::from_reason("no author provided and none configured in repository")
+                })?,
+        };
+        let committer = match input.committer {
+            Some(ref s) => signature_to_gix(s),
+            None => r
+                .committer()
+                .and_then(|res| res.ok())
+                .and_then(|s| s.to_owned().ok())
+                .ok_or_else(|| {
+                    napi::Error::from_reason("no committer provided and none configured in repository")
+                })?,
+        };
+
+        let commit = gix::objs::Commit {
+            tree: tree_id,
+            parents: parent_ids.into(),
+            author,
+            committer,
+            encoding: None,
+            extra_headers: Vec::new(),
+            message: gix::bstr::BString::from(input.message),
+        };
+
+        let id = r.write_object(&commit).map_err(|e| err("write_commit", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write an annotated tag object into the repository object database without creating a ref.
+    #[napi]
+    pub fn write_tag(
+        &self,
+        target: String,
+        target_kind: String,
+        name: String,
+        message: String,
+        tagger: Option<crate::object::Signature>,
+    ) -> Result<String> {
+        let inner = self.get_inner();
+        let r = thread_local(&inner);
+        let target_id = parse_oid(&target)?;
+        let kind = match target_kind.to_ascii_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid target kind '{target_kind}'"))),
+        };
+
+        let tagger_sig = match tagger {
+            Some(ref s) => Some(signature_to_gix(s)),
+            None => r.committer().and_then(|res| res.ok()).and_then(|s| s.to_owned().ok()),
+        };
+
+        let tag = gix::objs::Tag {
+            target: target_id,
+            target_kind: kind,
+            name: gix::bstr::BString::from(name),
+            tagger: tagger_sig,
+            message: gix::bstr::BString::from(message),
+            signature: None,
+        };
+
+        let id = r.write_object(&tag).map_err(|e| err("write_tag", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Peel an object (e.g. tag or commit) to a target object kind (`Commit`, `Tree`, `Blob`, `Tag`).
+    #[napi]
+    pub fn peel(&self, id: String, kind: String) -> Result<String> {
+        let inner = self.get_inner();
+        let r = thread_local(&inner);
+        let oid = parse_oid(&id)?;
+        let target_kind = match kind.to_ascii_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid target kind '{kind}'"))),
+        };
+        let object = r.find_object(oid).map_err(|e| err("find_object", e))?;
+        let peeled = object.peel_to_kind(target_kind).map_err(|e| err("peel_to_kind", e))?;
+        Ok(peeled.id.to_string())
     }
 
     // ---- references -------------------------------------------------------
