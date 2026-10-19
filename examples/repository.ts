@@ -23,6 +23,14 @@ async function main() {
     console.log(`Config [${entry.key}] = ${entry.value}`);
   }
 
+  // Wave 2: Index (Staging Area)
+  console.log("\n--- Index Entries ---");
+  const indexEntries = repo.index();
+  console.log(`Index contains ${indexEntries.length} entries.`);
+  for (const entry of indexEntries.slice(0, 5)) {
+    console.log(`Index [${entry.stage}] ${entry.path} (${entry.mode}) -> ${entry.id.slice(0, 8)}`);
+  }
+
   // 2. Read git logs using repo.log(rev?, limit?, firstParent?)
   console.log("\n--- Git Log (repo.log) ---");
   const logEntries = repo.log("HEAD", 5, false);

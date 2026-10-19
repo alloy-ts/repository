@@ -29,6 +29,17 @@ pub struct ConfigEntry {
     pub value: String,
 }
 
+/// A single entry in the git index (staging area).
+#[derive(Clone)]
+#[napi(object)]
+pub struct IndexEntry {
+    pub path: String,
+    pub mode: String,
+    pub id: String,
+    pub stage: u32,
+    pub size: u32,
+}
+
 /// The primary handle to a git repository, exposed to TypeScript as a class.
 ///
 /// Internally wraps `Arc<gix::ThreadSafeRepository>` so it can be shared and offloaded to worker
@@ -242,6 +253,32 @@ impl Repository {
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    // ---- index / status --------------------------------------------------
+
+    /// Read all entries in the git index (staging area).
+    #[napi]
+    pub fn index(&self) -> Result<Vec<IndexEntry>> {
+        let r = thread_local(&self.inner);
+        let index = match r.index_or_empty() {
+            Ok(idx) => idx,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut out = Vec::new();
+        for entry in index.entries() {
+            let path_bytes = entry.path(&index);
+            let path_str = lossy(path_bytes);
+            let mode_str = format!("{:?}", entry.mode);
+            out.push(IndexEntry {
+                path: path_str,
+                mode: mode_str,
+                id: entry.id.to_string(),
+                stage: entry.stage() as u32,
+                size: entry.stat.size as u32,
+            });
+        }
+        Ok(out)
     }
 
     // ---- references -------------------------------------------------------

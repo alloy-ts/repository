@@ -251,4 +251,14 @@ describe("Repository static constructors and methods", () => {
       expect(shallowCommits === null || Array.isArray(shallowCommits)).toBe(true);
     });
   });
+
+  describe("Wave 2 API Additions", () => {
+    test("index returns entries from staging area", () => {
+      const repoPath = path.join(tmpDir, "wave2-index-repo");
+      const repo = Repository.init(repoPath, false);
+
+      const indexEntries = repo.index();
+      expect(Array.isArray(indexEntries)).toBe(true);
+    });
+  });
 });
