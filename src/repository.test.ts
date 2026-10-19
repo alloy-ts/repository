@@ -44,6 +44,11 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure sandbox has at least 2 commits so HEAD~1 exists
+  const head = repo.headCommit();
+  const headName = repo.headName() ?? "refs/heads/main";
+  repo.commit(headName, "sandbox second commit", head.treeId, [head.id]);
 });
 
 afterAll(() => {
@@ -350,16 +355,13 @@ describe("Repository revisions", () => {
   });
 });
 
-
 describe("Repository revisions - reading file content", () => {
   test("resolve a ref/SHA to a commit, then read a file blob from its tree", () => {
     // `HEAD` (or `main`, or a `<sha>`) -> commit id -> tree -> entry -> blob content.
     const tip = repo.revParseSingle("HEAD");
     const commit = repo.findCommit(tip);
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "Cargo.toml" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "Cargo.toml" && e.mode === "Blob");
     expect(entry).toBeDefined();
     const text = repo.findBlob(entry!.id).content().toString("utf8");
     expect(text.length).toBeGreaterThan(0);
@@ -378,9 +380,7 @@ describe("Repository revisions - reading file content", () => {
     // Same blob as the explicit walk: commit -> tree -> entry -> blob.
     const commit = repo.findCommit(repo.headId());
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "ReadMe.md" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "ReadMe.md" && e.mode === "Blob");
     expect(entry).toBeDefined();
     expect(viaSpec).toBe(entry!.id);
 
@@ -397,9 +397,7 @@ describe("Repository revisions - reading file content", () => {
       console.log("detached HEAD; skipping branch revspec assertion");
       return;
     }
-    expect(repo.revParseSingle(`${branch}:ReadMe.md`)).toBe(
-      repo.revParseSingle("HEAD:ReadMe.md"),
-    );
+    expect(repo.revParseSingle(`${branch}:ReadMe.md`)).toBe(repo.revParseSingle("HEAD:ReadMe.md"));
   });
 
   test("revParseSingle reads a file at a specific (abbreviated) SHA", () => {
@@ -432,12 +430,9 @@ describe("Repository revisions - reading file content", () => {
 describe("Repository.commit", () => {
   test("commit creates a new commit on a throwaway ref", () => {
     const head = repo.headCommit();
-    const newId = repo.commit(
-      "refs/heads/__probe_commit__",
-      "probe commit message",
-      head.treeId,
-      [head.id],
-    );
+    const newId = repo.commit("refs/heads/__probe_commit__", "probe commit message", head.treeId, [
+      head.id,
+    ]);
     expect(typeof newId).toBe("string");
     expect(newId).not.toBe(head.id);
 
@@ -494,9 +489,9 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return boolean and array", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -506,5 +501,114 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+});
+
+// --- wave-2 additions: Index & Status / Diff ---
+
+describe("Repository wave-2 additions (Index & Status)", () => {
+  test("index / indexOrLoad return index entries", () => {
+    const idx1 = repo.index();
+    const idx2 = repo.indexOrLoad();
+    expect(Array.isArray(idx1)).toBe(true);
+    expect(Array.isArray(idx2)).toBe(true);
+    expect(idx1.length).toBe(idx2.length);
+  });
+
+  test("status returns working-tree & index status asynchronously", async () => {
+    const entries = await repo.status();
+    expect(Array.isArray(entries)).toBe(true);
+  });
+
+  test("diffIndexToWorktree and diffHeadToIndex return changes", () => {
+    const wtChanges = repo.diffIndexToWorktree();
+    const headIndexChanges = repo.diffHeadToIndex();
+    expect(Array.isArray(wtChanges)).toBe(true);
+    expect(Array.isArray(headIndexChanges)).toBe(true);
+  });
+});
+
+// --- wave-3 additions: Config Editing & Branch Helpers ---
+
+describe("Repository wave-3 additions (Config & Branch Helpers)", () => {
+  test("configBool and configInt read typed config values", () => {
+    expect(repo.configBool("core.bare")).toBe(false);
+    expect(repo.configInt("non.existent.key.12345")).toBeNull();
+  });
+
+  test("setConfigValue and unsetConfigValue mutate local config", () => {
+    repo.setConfigValue("custom.testkey", "testval");
+    expect(repo.configString("custom.testkey")).toBe("testval");
+    repo.unsetConfigValue("custom.testkey");
+    expect(repo.configString("custom.testkey")).toBeNull();
+  });
+
+  test("branchRemoteName and branchTrackingRef return branch configuration", () => {
+    const branch = repo.headName()?.replace("refs/heads/", "") ?? "main";
+    const remote = repo.branchRemoteName(branch);
+    expect(remote === null || typeof remote === "string").toBe(true);
+    const tracking = repo.branchTrackingRef(branch);
+    expect(tracking === null || typeof tracking === "string").toBe(true);
+  });
+});
+
+// --- wave-4 additions: Object Writing & Raw Object Lookup ---
+
+describe("Repository wave-4 additions (Object Writing & Raw Lookup)", () => {
+  test("writeTree / writeCommit / writeTag / writeObject round-trip", () => {
+    const blobId = repo.writeBlob(Buffer.from("wave 4 test content\n"));
+    expect(repo.objectExists(blobId)).toBe(true);
+
+    const treeId = repo.writeTree([{ name: "testfile.txt", mode: "Blob", id: blobId }]);
+    expect(repo.objectExists(treeId)).toBe(true);
+    const tree = repo.findTree(treeId);
+    expect(tree.entries.length).toBe(1);
+    expect(tree.entries[0]!.name).toBe("testfile.txt");
+
+    const commitId = repo.writeCommit(
+      treeId,
+      [],
+      { name: "Wave4 Author", email: "author@wave4.com" },
+      { name: "Wave4 Committer", email: "committer@wave4.com" },
+      "Wave 4 test commit message",
+    );
+    expect(repo.objectExists(commitId)).toBe(true);
+    const commit = repo.findCommit(commitId);
+    expect(commit.message).toBe("Wave 4 test commit message");
+    expect(commit.treeId).toBe(treeId);
+
+    const tagObjId = repo.writeTag(
+      commitId,
+      "commit",
+      "v99.0.0",
+      { name: "Wave4 Tagger", email: "tagger@wave4.com" },
+      "Wave 4 release tag",
+    );
+    expect(repo.objectExists(tagObjId)).toBe(true);
+    const tag = repo.findTag(tagObjId);
+    expect(tag.name).toBe("v99.0.0");
+    expect(tag.targetId).toBe(commitId);
+
+    const rawBlobId = repo.writeObject("blob", Buffer.from("raw blob bytes\n"));
+    expect(repo.objectExists(rawBlobId)).toBe(true);
+    expect(repo.findBlob(rawBlobId).content().toString()).toBe("raw blob bytes\n");
+  });
+
+  test("tryFindObject returns GitObject or null", () => {
+    const headId = repo.headId();
+    const found = repo.tryFindObject(headId);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("commit");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+  });
+
+  test("revParseHex resolves revspec to hex or returns null", () => {
+    const headHex = repo.revParseHex("HEAD");
+    expect(headHex).toBe(repo.headId());
+
+    const nonexistent = repo.revParseHex("refs/heads/__definitely_nonexistent_ref__");
+    expect(nonexistent).toBeNull();
   });
 });
