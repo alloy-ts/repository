@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository, type Tree, type TreeEntry } from "../dist/index.js";
+import { Repository, type Tree, type TreeEntry } from "./main.ts";
 
 /**
  * Full-surface test for `Repository`.
@@ -174,10 +174,10 @@ describe("Repository objects", () => {
 
 describe("Repository references", () => {
   test("references() lists branches/tags; HEAD is reachable via findReference", () => {
-    const names = repo.references().map((r) => r.name);
+    const names = repo.references().map((r: any) => r.name);
     expect(Array.isArray(names)).toBe(true);
     // `references()` returns concrete refs (branches, tags); the symbolic HEAD is not listed.
-    expect(names.some((n) => n.startsWith("refs/heads/"))).toBe(true);
+    expect(names.some((n: string) => n.startsWith("refs/heads/"))).toBe(true);
     expect(repo.findReference("HEAD").name).toBe("HEAD");
   });
 
@@ -207,7 +207,7 @@ describe("Repository references", () => {
     expect(repo.findTag(ann.target!).name).toBe("__probe_ann__");
     expect(repo.findTag(ann.target!).message).toContain("annotated message");
 
-    expect(repo.references().some((r) => r.name === "refs/tags/__probe_lw__")).toBe(true);
+    expect(repo.references().some((r: any) => r.name === "refs/tags/__probe_lw__")).toBe(true);
 
     // Cleanup (temp clone only).
     repo.findReference("refs/heads/__probe_branch__").delete();
@@ -222,7 +222,7 @@ describe("Repository remotes", () => {
   test("remotes() returns an array; findRemote('origin') resolves", () => {
     const rs = repo.remotes();
     expect(Array.isArray(rs)).toBe(true);
-    const origin = rs.find((r) => r.name === "origin");
+    const origin = rs.find((r: any) => r.name === "origin");
     if (origin) {
       const o = repo.findRemote("origin");
       expect(o.name).toBe("origin");

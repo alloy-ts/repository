@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { expect, test } from "vite-plus/test";
-import { Repository, type Commit, type SignatureVerification } from "../dist/index.js";
+import { Repository, type Commit, type SignatureVerification } from "./main.ts";
 
 /** The commit `HEAD` points to in the current working-tree repository. */
 function headCommit(): Commit {
@@ -53,7 +53,7 @@ test("verifySignature reports an unsigned commit as not signed", () => {
   // Walk history and find a commit without a signature; if none, this test is a no-op pass.
   const tip = repo.revParseSingle("HEAD");
   const ids = repo.revWalk([tip]);
-  const unsigned = ids.find((id) => {
+  const unsigned = ids.find((id: string) => {
     const c = repo.findCommit(id);
     return !c.verifySignature().signed;
   });
