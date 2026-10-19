@@ -93,6 +93,14 @@ impl Task for CloneTask {
     }
 }
 
+/// A key-value configuration entry.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ConfigEntry {
+    pub key: String,
+    pub value: String,
+}
+
 /// The primary handle to a git repository, exposed to TypeScript as a class.
 ///
 /// Internally wraps `Arc<gix::ThreadSafeRepository>` so it can be shared and offloaded to worker
@@ -247,6 +255,53 @@ impl Repository {
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    // ---- wave 1 probe -----------------------------------------------------
+
+
+
+    // ---- wave 1 additions -------------------------------------------------
+
+    /// The OID of the tree pointed to by `HEAD`.
+    #[napi]
+    pub fn head_tree_id(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        Ok(id.to_string())
+    }
+
+    /// The `HEAD` reference, or `null` if detached or unborn.
+    #[napi]
+    pub fn head_ref(&self) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.head_ref().map_err(|e| err("head_ref", e))? {
+            Some(reference) => Ok(Some(build_reference(&self.inner, reference)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The tree pointed to by `HEAD`.
+    #[napi]
+    pub fn head_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        build_tree(&self.inner, id)
+    }
+
+    /// Whether the repository is shallow.
+    #[napi]
+    pub fn is_shallow(&self) -> bool {
+        let r = thread_local(&self.inner);
+        r.is_shallow().unwrap_or(false)
+    }
+
+    /// Create an anonymous remote at `url`.
+    #[napi]
+    pub fn remote_at(&self, url: String) -> Result<Remote> {
+        let r = thread_local(&self.inner);
+        let remote = r.remote_at(url.as_str()).map_err(|e| err("remote_at", e))?;
+        Ok(build_remote(&self.inner, remote))
     }
 
     // ---- reflog -----------------------------------------------------------

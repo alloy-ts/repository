@@ -106,17 +106,34 @@ describe("Repository static constructors", () => {
 // --- HEAD / objects ---------------------------------------------------------
 
 describe("Repository objects", () => {
-  test("head() / headId() / headCommit() / headName() agree", () => {
+  test("head() / headId() / headCommit() / headName() / headTreeId() / headRef() agree", () => {
     const head = repo.head();
     const id = repo.headId();
     const commit = repo.headCommit();
 
     expect(id).toMatch(/^[0-9a-f]{40}$/);
     expect(commit.id).toBe(id);
+    expect(repo.headTreeId()).toBe(commit.treeId);
+    expect(repo.headTree().id).toBe(commit.treeId);
+
+    const headRef = repo.headRef();
+    if (headRef) {
+      expect(headRef.name.startsWith("refs/heads")).toBe(true);
+    }
+
     if (head.referent) expect(head.referent.startsWith("refs/heads")).toBe(true);
 
     const name = repo.headName();
     if (name) expect(name.startsWith("refs/heads")).toBe(true);
+  });
+
+  test("isShallow() returns boolean", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+  });
+
+  test("remoteAt() creates an anonymous remote instance", () => {
+    const remote = repo.remoteAt("https://example.com/test.git");
+    expect(remote.url).toBe("https://example.com/test.git");
   });
 
   test("findCommit resolves a real commit and matches headCommit", () => {
