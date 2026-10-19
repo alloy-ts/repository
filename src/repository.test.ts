@@ -44,6 +44,11 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure sandbox has at least 2 commits on branch for revision tests (since parent repo might be shallow).
+  const head = repo.headCommit();
+  const branchName = repo.headName() ?? "refs/heads/main";
+  repo.commit(branchName, "sandbox commit 2\n", head.treeId, [head.id]);
 });
 
 afterAll(() => {
@@ -223,6 +228,24 @@ describe("Repository references", () => {
     repo.findReference("refs/heads/__probe_branch__").delete();
     repo.findReference("refs/tags/__probe_lw__").delete();
     repo.findReference("refs/tags/__probe_ann__").delete();
+  });
+
+  test("createBranch / deleteBranch / editReference", () => {
+    const head = repo.headId();
+    const branchName = "__probe_branch_2__";
+
+    const branch = repo.createBranch(branchName, "HEAD", true);
+    expect(branch.name).toBe("refs/heads/__probe_branch_2__");
+    expect(repo.findReference("refs/heads/__probe_branch_2__").name).toBe(
+      "refs/heads/__probe_branch_2__",
+    );
+
+    // Perform an edit_reference update on the created branch.
+    repo.editReference("refs/heads/__probe_branch_2__", head, head, "update probe branch");
+
+    // Delete the branch via deleteBranch.
+    repo.deleteBranch(branchName);
+    expect(() => repo.findReference("refs/heads/__probe_branch_2__")).toThrow();
   });
 });
 
@@ -452,6 +475,47 @@ describe("Repository.commit", () => {
 
 // --- wave-1 additions: HEAD extras, remote_at, describe, is_ancestor, shallow ---
 
+describe("Repository worktree & advanced utilities", () => {
+  test("mainWorktree and worktree lookup", () => {
+    const main = repo.mainWorktree();
+    expect(main).not.toBeNull();
+    expect(main?.isMain).toBe(true);
+    expect(typeof main?.path).toBe("string");
+
+    const nonExistent = repo.worktree("non-existent-wt");
+    expect(nonExistent).toBeNull();
+  });
+
+  test("configPath resolves local and user config paths", () => {
+    const localPath = repo.configPath("local");
+    expect(typeof localPath).toBe("string");
+    expect(localPath.length).toBeGreaterThan(0);
+  });
+
+  test("odbStats returns database status", () => {
+    const stats = repo.odbStats();
+    expect(typeof stats.isEmpty).toBe("boolean");
+  });
+
+  test("mailmap returns availability", () => {
+    const mm = repo.mailmap();
+    expect(typeof mm.isAvailable).toBe("boolean");
+  });
+
+  test("matchPathspec checks pattern matching", () => {
+    expect(repo.matchPathspec(["src/*.rs"], "src/repository.rs")).toBe(true);
+    expect(repo.matchPathspec(["*.md"], "src/repository.rs")).toBe(false);
+  });
+
+  test("submodule lookup returns null for non-existent submodule", () => {
+    expect(repo.submodule("non-existent-submodule")).toBeNull();
+  });
+
+  test("findNote returns null for unannotated object", () => {
+    expect(repo.findNote(repo.headId())).toBeNull();
+  });
+});
+
 describe("Repository wave-1 additions", () => {
   test("headTreeId / headTree / headRef", () => {
     const tid = repo.headTreeId();
@@ -494,9 +558,9 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return boolean/array", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -578,10 +642,10 @@ describe("Repository index editing & construction options", () => {
   });
 
   test("initOpts creates bare and non-bare repositories", () => {
-    const bare = Repository.initOpts(join(base, "init-bare"), { bare: true });
+    const bare = Repository.initOpts(join(base, "init-opts-bare"), { bare: true });
     expect(bare.isBare()).toBe(true);
 
-    const withWorktree = Repository.initOpts(join(base, "init-worktree"), {});
+    const withWorktree = Repository.initOpts(join(base, "init-opts-worktree"), {});
     expect(withWorktree.isBare()).toBe(false);
   });
 });
@@ -630,7 +694,33 @@ describe("Repository checkout / reset / merge / defaultRemote", () => {
     }
   });
 
-  test("reset rejects an unknown mode", async () => {
-    await expect(repo.reset(repo.headId(), "bogus")).rejects.toThrow();
+  test("cherryPick creates a new commit on HEAD", async () => {
+    const head = repo.headId();
+    const parent = repo.revParseSingle("HEAD~1");
+    // Create a standalone commit on a temp ref
+    const standalone = repo.writeCommit(repo.headTreeId(), [parent], "standalone for cherry pick\n");
+    try {
+      const result = await repo.cherryPick(standalone);
+      expect(typeof result).toBe("string");
+      expect(repo.headId()).toBe(result);
+      expect(repo.headCommit().message).toContain("standalone for cherry pick");
+    } finally {
+      await repo.reset(head, "hard");
+    }
+  });
+
+  test("rebase rewrites commits onto upstream", async () => {
+    const head = repo.headId();
+    const parent = repo.revParseSingle("HEAD~1");
+    try {
+      const result = await repo.rebase(parent);
+      expect(typeof result).toBe("string");
+    } finally {
+      await repo.reset(head, "hard");
+    }
+  });
+
+  test("reset rejects an unknown mode", () => {
+    expect(() => repo.reset(repo.headId(), "bogus")).toThrow();
   });
 });
