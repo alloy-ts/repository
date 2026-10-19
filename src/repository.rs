@@ -9,7 +9,7 @@ use napi_derive::napi;
 
 use gix::progress::{Count, Id, MessageLevel, NestedProgress, Progress, Step, StepShared, Unit};
 
-use gix::bstr::BString;
+use gix::bstr::{BString, ByteSlice};
 use gix::diff::index::Change as TreeIndexChange;
 use gix::status::index_worktree::iter::Summary;
 
@@ -983,7 +983,7 @@ impl Repository {
             .collect();
         if !remove_paths.is_empty() {
             file.remove_entries(|_idx, path, _entry| {
-                remove_paths.iter().any(|p| p.as_bstr() == path)
+                remove_paths.iter().any(|p| p.as_bytes().as_bstr() == path)
             });
         }
 
