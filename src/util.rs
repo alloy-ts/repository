@@ -43,33 +43,17 @@ impl Manifest {
             .map_err(|e| napi::Error::from_reason(format!("parse {}: {e}", path.display())))
     }
     pub fn read_at(repo: &gix::Repository, revision: &str, rel_path: &str) -> Result<Manifest> {
-        // 1) Resolve the revision spec to a single object id (commit/tag/tree/blob).
+        let spec = format!("{revision}:{rel_path}");
         let id = repo
-            .rev_parse_single(revision)
-            .map_err(|e| napi::Error::from_reason(format!("rev_parse {revision}: {e}")))?;
-        // 2) Load the object and peel whatever it is down to its tree.
-        let tree = id
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| napi::Error::from_reason(format!("no {rel_path} at revision {revision}: {e}")))?;
+        let blob = id
             .object()
-            .map_err(|e| napi::Error::from_reason(format!("object for {revision}: {e}")))?
-            .peel_to_kind(gix::objs::Kind::Tree)
-            .map_err(|e| napi::Error::from_reason(format!("peel {revision} to tree: {e}")))?
-            .try_into_tree()
-            .map_err(|_| napi::Error::from_reason(format!("{revision} is not a tree-ish")))?;
-        // 3) Look the manifest path up in the tree.
-        let entry = tree
-            .lookup_entry_by_path(rel_path)
-            .map_err(|e| napi::Error::from_reason(format!("lookup {rel_path}: {e}")))?
-            .ok_or_else(|| {
-                napi::Error::from_reason(format!("no {rel_path} at revision {revision}"))
-            })?;
-        // 4) Materialize and decode the blob.
-        let blob = entry
-            .object()
-            .map_err(|e| napi::Error::from_reason(format!("read {rel_path}: {e}")))?
+            .map_err(|e| napi::Error::from_reason(format!("object for {spec}: {e}")))?
+            .peel_to_kind(gix::objs::Kind::Blob)
+            .map_err(|e| napi::Error::from_reason(format!("peel {spec} to blob: {e}")))?
             .try_into_blob()
-            .map_err(|_| {
-                napi::Error::from_reason(format!("{rel_path} at {revision} is not a blob"))
-            })?;
+            .map_err(|_| napi::Error::from_reason(format!("{rel_path} at {revision} is not a blob")))?;
         let text = String::from_utf8_lossy(&blob.data).into_owned();
         serde_yaml::from_str(&text)
             .map_err(|e| napi::Error::from_reason(format!("parse {rel_path} at {revision}: {e}")))

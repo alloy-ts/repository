@@ -29,8 +29,16 @@ beforeAll(async () => {
   } catch (e) {
     console.log(`Repository.clone unavailable (${e}); using git CLI clone for sandbox`);
     rmSync(cloneDir, { recursive: true, force: true });
+    execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
+      stdio: "ignore",
+    });
+    repo = Repository.open(cloneDir);
+  }
+
+  // Ensure sandbox clone has at least 2 commits so `HEAD~1` revision queries succeed.
+  if (repo.log().length < 2) {
     execSync(
-      `git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`,
+      `git -c user.name=test -c user.email=test@t -c commit.gpgsign=false -C ${JSON.stringify(cloneDir)} commit --allow-empty -m "sandbox second commit"`,
       { stdio: "ignore" },
     );
     repo = Repository.open(cloneDir);
@@ -341,16 +349,13 @@ describe("Repository revisions", () => {
   });
 });
 
-
 describe("Repository revisions - reading file content", () => {
   test("resolve a ref/SHA to a commit, then read a file blob from its tree", () => {
     // `HEAD` (or `main`, or a `<sha>`) -> commit id -> tree -> entry -> blob content.
     const tip = repo.revParseSingle("HEAD");
     const commit = repo.findCommit(tip);
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "Cargo.toml" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "Cargo.toml" && e.mode === "Blob");
     expect(entry).toBeDefined();
     const text = repo.findBlob(entry!.id).content().toString("utf8");
     expect(text.length).toBeGreaterThan(0);
@@ -368,12 +373,9 @@ describe("Repository revisions - reading file content", () => {
 describe("Repository.commit", () => {
   test("commit creates a new commit on a throwaway ref", () => {
     const head = repo.headCommit();
-    const newId = repo.commit(
-      "refs/heads/__probe_commit__",
-      "probe commit message",
-      head.treeId,
-      [head.id],
-    );
+    const newId = repo.commit("refs/heads/__probe_commit__", "probe commit message", head.treeId, [
+      head.id,
+    ]);
     expect(typeof newId).toBe("string");
     expect(newId).not.toBe(head.id);
 
