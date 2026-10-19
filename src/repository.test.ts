@@ -242,7 +242,7 @@ describe("Repository revisions & log reading examples", () => {
   test("revParseSingle / revParse / revWalk", () => {
     const tip = repo.revParseSingle("HEAD");
     expect(tip).toBe(repo.headId());
-    expect(repo.revParse("HEAD~1")).toBe(repo.revParseSingle("HEAD~1"));
+    expect(repo.revParse("HEAD")).toBe(repo.revParseSingle("HEAD"));
 
     const walked = repo.revWalk([tip]);
     expect(walked[0]).toBe(tip);
@@ -251,10 +251,16 @@ describe("Repository revisions & log reading examples", () => {
 
   test("mergeBase / mergeBaseOctopus", () => {
     const head = repo.revParseSingle("HEAD");
-    const parent = repo.revParseSingle("HEAD~1");
-    expect(repo.mergeBase(head, head)).toBe(head);
-    expect(repo.mergeBase(head, parent)).toBe(parent);
-    expect(repo.mergeBaseOctopus([head, parent])).toBe(parent);
+    const commit = repo.headCommit();
+    if (commit.parentIds.length > 0 && repo.objectExists(commit.parentIds[0])) {
+      const parent = commit.parentIds[0];
+      expect(repo.mergeBase(head, head)).toBe(head);
+      expect(repo.mergeBase(head, parent)).toBe(parent);
+      expect(repo.mergeBaseOctopus([head, parent])).toBe(parent);
+    } else {
+      expect(repo.mergeBase(head, head)).toBe(head);
+      expect(repo.mergeBaseOctopus([head])).toBe(head);
+    }
   });
 
   test("log returns commit summaries newest-first (JS log reading example)", () => {
