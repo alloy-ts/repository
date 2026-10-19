@@ -17,7 +17,10 @@ import { Repository, type LogEntry, type Tree, type TreeEntry } from "./main.ts"
  *    - repo.log(rev?, limit?, firstParent?) -> obtain log summaries in reverse-chronological order
  *    - repo.revWalk(tips) + repo.findCommit(id) -> manual revision walking and object inspection
  *
- * 3. Inspection of Trees and Objects.
+ * 3. Manifest Remote Setup:
+ *    - repo.setupRemotesFromManifest(manifestPath?) -> setup remotes from repository.manifest.yml
+ *
+ * 4. Inspection of Trees and Objects.
  */
 
 function openRepo(): Repository {
@@ -140,7 +143,34 @@ test("manual log reading via revWalk() and findCommit()", () => {
   expect(typeof commit.author.email).toBe("string");
 });
 
-// --- 3. Tree & object inspection ---------------------------------------------
+// --- 3. Manifest Remote Setup -------------------------------------------------
+
+test("setupRemotesFromManifest parses manifest and configures remotes", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-test-manifest-remotes-"));
+  try {
+    const repo = Repository.init(tmpDir, false);
+    const manifestPath = path.join(process.cwd(), "repository.manifest.yml");
+    const configured = repo.setupRemotesFromManifest(manifestPath);
+
+    expect(Array.isArray(configured)).toBe(true);
+    expect(configured.length).toBeGreaterThan(0);
+
+    const names = configured.map((r) => r.name);
+    expect(names).toContain("origin");
+    expect(names).toContain("codeberg");
+    expect(names).toContain("github");
+    expect(names).toContain("gitlab");
+
+    const reloaded = Repository.open(tmpDir);
+    const githubRemote = reloaded.findRemote("github");
+    expect(githubRemote).toBeDefined();
+    expect(githubRemote.url).toBe("https://github.com/yumin-chen/repository");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// --- 4. Tree & object inspection ---------------------------------------------
 
 test("head().tree() returns the current HEAD tree with entries", () => {
   const repo = openRepo();

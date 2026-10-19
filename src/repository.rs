@@ -326,6 +326,15 @@ impl Repository {
         Ok(build_remote(&self.inner, remote))
     }
 
+    /// Read `repository.manifest.yml` and set up remotes for this repository.
+    #[napi]
+    pub fn setup_remotes_from_manifest(
+        &self,
+        manifest_path: Option<String>,
+    ) -> Result<Vec<crate::util::RemoteInfo>> {
+        crate::util::setup_remotes_from_manifest(self, manifest_path)
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// Read a single config value as a string.
