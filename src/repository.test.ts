@@ -22,28 +22,30 @@ let repo: Repository; // the sandbox clone
 beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-api-"));
   cloneDir = join(base, "clone");
-  // Prefer the binding's own `Repository.clone`; fall back to a git CLI sandbox if the
-  // local transport hits gix's ref-update limitation in this environment.
-  try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
-  } catch (e) {
-    console.log(`Repository.clone unavailable (${e}); using git CLI clone for sandbox`);
-    rmSync(cloneDir, { recursive: true, force: true });
-    // `git init` + `fetch` instead of `git clone`: a clone always creates
-    // `refs/remotes/origin/HEAD`, which collides with `refs/remotes/origin/head/...`
-    // on case-insensitive filesystems when the source has a `head/*` branch. The
-    // fetch-only sandbox avoids that ref entirely.
-    const branch = Repository.open(realRoot).headName() ?? "refs/heads/main";
-    const git = (args: string) => execSync(`git ${args}`, { stdio: "ignore" });
-    git(`init --quiet ${JSON.stringify(cloneDir)}`);
-    git(`-C ${JSON.stringify(cloneDir)} remote add origin ${JSON.stringify(realRoot)}`);
-    git(
-      `-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+refs/heads/*:refs/remotes/origin/*"`,
-    );
-    git(`-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+${branch}:${branch}"`);
-    git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
-    repo = Repository.open(cloneDir);
-  }
+  mkdirSync(cloneDir, { recursive: true });
+
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "test",
+    GIT_AUTHOR_EMAIL: "test@example.com",
+    GIT_COMMITTER_NAME: "test",
+    GIT_COMMITTER_EMAIL: "test@example.com",
+  };
+  const git = (args: string) =>
+    execSync(`git -C ${JSON.stringify(cloneDir)} ${args}`, { stdio: "ignore", env });
+
+  execSync(`git init --quiet ${JSON.stringify(cloneDir)}`, { stdio: "ignore", env });
+  git(`config user.name "test"`);
+  git(`config user.email "test@example.com"`);
+
+  // Extract tracked repository files into sandbox (fast, excludes node_modules/target)
+  execSync(`git archive HEAD | tar -x -C ${JSON.stringify(cloneDir)}`);
+  git(`add .`);
+  git(`commit -m "initial commit"`);
+  git(`commit --allow-empty -m "second commit"`);
+  git(`remote add origin https://github.com/example/repo.git`);
+
+  repo = Repository.open(cloneDir);
 });
 
 afterAll(() => {
@@ -67,18 +69,10 @@ function firstBlobEntry(r: Repository, tree: Tree): TreeEntry | null {
 
 describe("Repository static constructors", () => {
   test("clone() returns a usable repository instance (async)", async () => {
-    // Best-effort: exercise the binding's own clone when it works in this environment.
     const dir = join(base, "clone-by-binding");
-    let cloned: Repository | null = null;
-    try {
-      cloned = await Repository.clone(realRoot, dir, false);
-    } catch (e) {
-      console.log(`Repository.clone not exercised in this environment (${e})`);
-    }
-    if (cloned) {
-      expect(typeof cloned.headId()).toBe("string");
-      expect(cloned.headId().length).toBeGreaterThan(0);
-    }
+    const cloned = await Repository.clone(cloneDir, dir, false);
+    expect(typeof cloned.headId()).toBe("string");
+    expect(cloned.headId().length).toBeGreaterThan(0);
   });
 
   test("init() creates a non-bare worktree repository", () => {
@@ -481,6 +475,15 @@ describe("Repository wave-1 additions", () => {
     expect(remote.url).toBe("https://example.com/owner/repo.git");
   });
 
+  test("createRemote adds a named remote to configuration", () => {
+    const remote = repo.createRemote("upstream", "https://example.com/upstream.git");
+    expect(remote.name).toBe("upstream");
+    expect(remote.url).toBe("https://example.com/upstream.git");
+    const found = repo.findRemote("upstream");
+    expect(found.name).toBe("upstream");
+    expect(found.url).toBe("https://example.com/upstream.git");
+  });
+
   test("describe returns a non-empty name for HEAD", () => {
     const name = repo.describe("HEAD");
     expect(typeof name).toBe("string");
@@ -506,5 +509,58 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+});
+
+describe("Repository wave-2 additions: Index & Status", () => {
+  test("index / indexOrLoad returns array of index entries", () => {
+    const idx = repo.index();
+    const idxLoad = repo.indexOrLoad();
+    expect(Array.isArray(idx)).toBe(true);
+    expect(Array.isArray(idxLoad)).toBe(true);
+    expect(idx.length).toBe(idxLoad.length);
+  });
+
+  test("editIndex and indexWorktree reflect staged changes", () => {
+    const blobId = repo.writeBlob(Buffer.from("new index content\n"));
+    repo.editIndex([
+      {
+        path: "staged_test.txt",
+        id: blobId,
+        mode: "Blob",
+        stage: 0,
+      },
+    ]);
+    const updatedIndex = repo.index();
+    expect(updatedIndex.some((e) => e.path === "staged_test.txt")).toBe(true);
+
+    const wtStatus = repo.indexWorktree();
+    expect(Array.isArray(wtStatus)).toBe(true);
+  });
+});
+
+describe("Repository wave-3 additions: Config Editing & Branch Helpers", () => {
+  test("configSnapshot returns array of config entries", () => {
+    const snap = repo.configSnapshot();
+    expect(Array.isArray(snap)).toBe(true);
+    expect(snap.length).toBeGreaterThan(0);
+  });
+
+  test("editConfig sets new key and can be read back", () => {
+    repo.editConfig("user.customKey", "test-value-123");
+    expect(repo.configString("user.customKey")).toBe("test-value-123");
+  });
+
+  test("branchNames and branch remote helpers", () => {
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches.length).toBeGreaterThan(0);
+
+    const mainBranch = branches[0]!;
+    repo.editConfig(`branch.${mainBranch}.remote`, "origin");
+    repo.editConfig(`branch.${mainBranch}.merge`, "refs/heads/main");
+
+    expect(repo.branchRemoteName(mainBranch)).toBe("origin");
+    expect(repo.branchRemoteRef(mainBranch)).toBe("refs/heads/main");
   });
 });
