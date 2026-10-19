@@ -114,6 +114,76 @@ describe("Repository static constructors", () => {
 
 // --- HEAD / objects ---------------------------------------------------------
 
+describe("Repository Wave 1 APIs", () => {
+  test("headTreeId() / headRef() / headTree() return expected values", () => {
+    const treeId = repo.headTreeId();
+    expect(treeId).toMatch(/^[0-9a-f]{40}$/);
+    expect(treeId).toBe(repo.headCommit().treeId);
+
+    const headRef = repo.headRef();
+    if (headRef) {
+      expect(headRef.name.startsWith("refs/heads/")).toBe(true);
+    }
+
+    const tree = repo.headTree();
+    expect(tree.id).toBe(treeId);
+  });
+
+  test("setHead() updates HEAD symbolically or detached, then restores", () => {
+    const head = repo.headId();
+    const initialBranch = repo.headName();
+    const probeBranch = "refs/heads/__probe_set_head__";
+    repo.createReference(probeBranch, head, true);
+
+    repo.setHead(probeBranch);
+    const reopened1 = Repository.open(cloneDir);
+    expect(reopened1.headName()).toBe(probeBranch);
+
+    repo.setHead(head);
+    const reopened2 = Repository.open(cloneDir);
+    expect(reopened2.headName()).toBeNull();
+    expect(reopened2.headId()).toBe(head);
+
+    // Restore original HEAD
+    if (initialBranch) {
+      repo.setHead(initialBranch);
+    }
+    repo.findReference(probeBranch).delete();
+  });
+
+  test("remoteAt() creates an anonymous remote; createRemote() persists a named remote", () => {
+    const anon = repo.remoteAt("https://example.com/anon.git");
+    expect(anon.url).toBe("https://example.com/anon.git");
+
+    const created = repo.createRemote("__probe_remote__", "https://example.com/named.git");
+    expect(created.name).toBe("__probe_remote__");
+    expect(created.url).toBe("https://example.com/named.git");
+    const reopened = Repository.open(cloneDir);
+    expect(reopened.findRemote("__probe_remote__").url).toBe("https://example.com/named.git");
+  });
+
+  test("configEntries() returns an array of config key-value objects", () => {
+    const entries = repo.configEntries();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+    const coreBare = entries.find((e) => e.key === "core.bare");
+    if (coreBare) {
+      expect(coreBare.value).toBe("false");
+    }
+  });
+
+  test("isAncestor() / describe() / isShallow() work as expected", () => {
+    const head = repo.headId();
+    expect(repo.isAncestor(head, head)).toBe(true);
+
+    const desc = repo.describe(head);
+    expect(typeof desc).toBe("string");
+    expect(desc.length).toBeGreaterThan(0);
+
+    expect(typeof repo.isShallow()).toBe("boolean");
+  });
+});
+
 describe("Repository objects", () => {
   test("head() / headId() / headCommit() / headName() agree", () => {
     const head = repo.head();

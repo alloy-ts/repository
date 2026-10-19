@@ -59,6 +59,25 @@ function main() {
     console.log(`setupRemotes skipped/failed: ${String(err)}`);
   }
 
+  // 6. Wave 1 API Additions
+  console.log("\n--- 5. Wave 1 API Additions ---");
+  console.log(`HEAD tree ID: ${repo.headTreeId()}`);
+  const headRef = repo.headRef();
+  console.log(`HEAD ref: ${headRef ? headRef.name : "(detached)"}`);
+  const headTree = repo.headTree();
+  console.log(`HEAD tree entry count: ${headTree.entries.length}`);
+
+  const entries = repo.configEntries();
+  console.log(`Config entries total: ${entries.length}`);
+  const coreBare = entries.find((e) => e.key === "core.bare");
+  if (coreBare) {
+    console.log(`core.bare = ${coreBare.value}`);
+  }
+
+  console.log(`isAncestor(HEAD, HEAD): ${repo.isAncestor(headSha, headSha)}`);
+  console.log(`describe("HEAD"): ${repo.describe("HEAD")}`);
+  console.log(`isShallow(): ${repo.isShallow()}`);
+
   console.log("\n=== Example Completed Successfully ===");
 }
 

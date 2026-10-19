@@ -20,6 +20,14 @@ fn lossy(b: &[u8]) -> String {
 }
 
 #[napi(object)]
+pub struct ConfigEntry {
+    /// Dot-separated config key, e.g. `user.name` or `core.bare`.
+    pub key: String,
+    /// Value string, if present.
+    pub value: Option<String>,
+}
+
+#[napi(object)]
 pub struct RefLogEntry {
     /// The object id the ref pointed at *before* this update.
     pub old_id: String,
@@ -202,6 +210,76 @@ impl Repository {
     pub fn head_name(&self) -> Result<Option<String>> {
         let r = thread_local(&self.inner);
         Ok(r.head_name().map_err(|e| err("head_name", e))?.map(|n| n.to_string()))
+    }
+
+    /// The object id of the tree pointed to by `HEAD`.
+    #[napi]
+    pub fn head_tree_id(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        Ok(id.to_string())
+    }
+
+    /// The `Reference` `HEAD` points to, if `HEAD` is attached to a branch.
+    #[napi]
+    pub fn head_ref(&self) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        let reference = r.head_ref().map_err(|e| err("head_ref", e))?;
+        match reference {
+            Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The `Tree` `HEAD` points to.
+    #[napi]
+    pub fn head_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let tree = r.head_tree().map_err(|e| err("head_tree", e))?;
+        build_tree(&self.inner, tree.id)
+    }
+
+    /// Set `HEAD` to point to a branch, tag, or commit target (e.g. `refs/heads/main` or `<sha>`).
+    #[napi]
+    pub fn set_head(&self, target: String) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        if target.starts_with("refs/") {
+            let name: gix::refs::FullName = target
+                .try_into()
+                .map_err(|e| err("invalid ref name", e))?;
+            r.edit_reference(gix::refs::transaction::RefEdit {
+                change: gix::refs::transaction::Change::Update {
+                    log: gix::refs::transaction::LogChange {
+                        mode: gix::refs::transaction::RefLog::Only,
+                        force_create_reflog: true,
+                        message: format!("set HEAD to {name}").into(),
+                    },
+                    expected: gix::refs::transaction::PreviousValue::Any,
+                    new: gix::refs::Target::Symbolic(name),
+                },
+                name: "HEAD".try_into().unwrap(),
+                deref: false,
+            })
+            .map_err(|e| err("set_head", e))?;
+        } else {
+            let oid = parse_oid(&target)?;
+            r.edit_reference(gix::refs::transaction::RefEdit {
+                change: gix::refs::transaction::Change::Update {
+                    log: gix::refs::transaction::LogChange {
+                        mode: gix::refs::transaction::RefLog::Only,
+                        force_create_reflog: true,
+                        message: format!("detach HEAD at {target}").into(),
+                    },
+                    expected: gix::refs::transaction::PreviousValue::Any,
+                    new: gix::refs::Target::Object(oid),
+                },
+                name: "HEAD".try_into().unwrap(),
+                deref: false,
+            })
+            .map_err(|e| err("set_head", e))?;
+        }
+        r.reload().map_err(|e| err("reload after set_head", e))?;
+        Ok(())
     }
 
     /// Find and decode a commit by id.
@@ -416,6 +494,38 @@ impl Repository {
         Ok(build_remote(&self.inner, remote))
     }
 
+    /// Construct an anonymous in-memory `Remote` from a URL (or existing remote name).
+    #[napi]
+    pub fn remote_at(&self, url_or_name: String) -> Result<Remote> {
+        let r = thread_local(&self.inner);
+        let remote = r
+            .remote_at(url_or_name.as_str())
+            .map_err(|e| err("remote_at", e))?;
+        Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Create and persist a named remote `name` -> `url`.
+    #[napi]
+    pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
+        let mut r = thread_local(&self.inner);
+        let config_path = r
+            .config_path(gix::config::Source::Local)
+            .map_err(|e| err("config_path", e))?;
+        let mut tx = r
+            .config_file_mut(&config_path)
+            .map_err(|e| err("open config_file_mut", e))?;
+        let mut remote = r
+            .remote_at(url.as_str())
+            .map_err(|e| err("remote_at", e))?;
+        remote
+            .save_as_to(name.as_str(), &mut tx)
+            .map_err(|e| err("save_as_to", e))?;
+        tx.commit().map_err(|e| err("commit config", e))?;
+        r.reload().map_err(|e| err("reload repo", e))?;
+        let saved = r.find_remote(name.as_str()).map_err(|e| err("find_remote after save", e))?;
+        Ok(build_remote(&self.inner, saved))
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// Read a single config value as a string.
@@ -423,6 +533,32 @@ impl Repository {
     pub fn config_string(&self, key: String) -> Option<String> {
         let r = thread_local(&self.inner);
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
+    }
+
+    /// List all configuration entries from the active config snapshot.
+    #[napi]
+    pub fn config_entries(&self) -> Result<Vec<ConfigEntry>> {
+        let r = thread_local(&self.inner);
+        let snap = r.config_snapshot();
+        let mut out = Vec::new();
+        for section in snap.sections() {
+            let header = section.header();
+            let section_name = lossy(header.name());
+            let sub_name = header.subsection_name().map(|s| lossy(s.as_ref()));
+            for key in section.value_names() {
+                let key_name = lossy(key.as_ref());
+                let full_key = match &sub_name {
+                    Some(sub) => format!("{section_name}.{sub}.{key_name}"),
+                    None => format!("{section_name}.{key_name}"),
+                };
+                let val = snap.string(&full_key).map(|v| lossy(&*v));
+                out.push(ConfigEntry {
+                    key: full_key,
+                    value: val,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// The working directory, if this is not a bare repository.
@@ -550,6 +686,47 @@ impl Repository {
             .merge_base_octopus(ids)
             .map_err(|e| err("merge_base_octopus", e))?;
         Ok(base.map(|id| id.to_string()))
+    }
+
+    /// Whether `ancestor` is an ancestor of `descendant`.
+    #[napi]
+    pub fn is_ancestor(&self, ancestor: String, descendant: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let anc_id = parse_oid(&ancestor)?;
+        let desc_id = parse_oid(&descendant)?;
+        let walk = r.rev_walk([desc_id]);
+        for id in walk.all().map_err(|e| err("rev_walk", e))? {
+            let id = id.map_err(|e| err("rev_walk item", e))?;
+            if id.id == anc_id {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Describe a commit or revision (e.g. `HEAD`) using nearest tags.
+    #[napi]
+    pub fn describe(&self, rev: Option<String>) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id: gix::ObjectId = match &rev {
+            Some(s) => r
+                .rev_parse_single(s.as_str())
+                .map_err(|e| err("rev_parse_single", e))?
+                .into(),
+            None => r.head_id().map_err(|e| err("head_id", e))?.into(),
+        };
+        let commit = r.find_commit(id).map_err(|e| err("find_commit", e))?;
+        match commit.describe().format() {
+            Ok(fmt) => Ok(fmt.to_string()),
+            _ => Ok(id.to_string()),
+        }
+    }
+
+    /// Whether the repository is shallow (cloned with depth limit).
+    #[napi]
+    pub fn is_shallow(&self) -> bool {
+        let r = thread_local(&self.inner);
+        r.is_shallow().unwrap_or(false)
     }
 
     // ---- log ---------------------------------------------------------------
