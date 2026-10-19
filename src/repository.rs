@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
+use gix::config::AsBStr;
+use napi::bindgen_prelude::AsyncTask;
 use napi::Result;
 use napi_derive::napi;
 
+use crate::clone::CloneTask;
 use crate::error::{err, parse_oid, thread_local};
 use crate::object::{
     build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Tag,
@@ -63,6 +66,16 @@ impl Repository {
         })
     }
 
+    /// Clone a repository from `url` into `path`.
+    #[napi(ts_return_type = "Promise<Repository>")]
+    pub fn clone(url: String, path: String, bare: Option<bool>) -> AsyncTask<CloneTask> {
+        AsyncTask::new(CloneTask {
+            url,
+            path,
+            bare: bare.unwrap_or(false),
+        })
+    }
+
     // ---- head / objects --------------------------------------------------
 
     /// The repository `HEAD`.
@@ -107,11 +120,8 @@ impl Repository {
     /// Find and decode a tree by id.
     #[napi]
     pub fn find_tree(&self, id: String) -> Result<Tree> {
-        let r = thread_local(&self.inner);
-        let tree = r
-            .find_tree(parse_oid(&id)?)
-            .map_err(|e| err("find_tree", e))?;
-        build_tree(&self.inner, tree)
+        let oid = parse_oid(&id)?;
+        build_tree(&self.inner, oid)
     }
 
     /// Find a blob by id (content is read lazily via [`Blob::content`]).
@@ -475,14 +485,14 @@ impl Repository {
 
     /// Diff two trees (or one tree against empty when `old` is omitted).
     #[napi]
-    pub fn diff_tree_to_tree(&self, old: Option<String>, new: String) -> Result<Vec<Change>> {
+    pub fn diff_tree_to_tree(&self, old: Option<String>, new_tree: String) -> Result<Vec<Change>> {
         let r = thread_local(&self.inner);
         let old_tree = match old {
             Some(o) => Some(r.find_tree(parse_oid(&o)?).map_err(|e| err("find_tree", e))?),
             None => None,
         };
         let new_tree = r
-            .find_tree(parse_oid(&new)?)
+            .find_tree(parse_oid(&new_tree)?)
             .map_err(|e| err("find_tree", e))?;
         let changes = r
             .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
@@ -491,13 +501,13 @@ impl Repository {
             .into_iter()
             .map(|c| match c {
                 gix::object::tree::diff::ChangeDetached::Addition { location, id, .. } => Change {
-                    path: lossy(location.as_bstr()),
+                    path: lossy(location.as_ref()),
                     old_id: None,
                     new_id: Some(id.to_string()),
                     kind: "Added".to_string(),
                 },
                 gix::object::tree::diff::ChangeDetached::Deletion { location, id, .. } => Change {
-                    path: lossy(location.as_bstr()),
+                    path: lossy(location.as_ref()),
                     old_id: Some(id.to_string()),
                     new_id: None,
                     kind: "Deleted".to_string(),
@@ -508,7 +518,7 @@ impl Repository {
                     id,
                     ..
                 } => Change {
-                    path: lossy(location.as_bstr()),
+                    path: lossy(location.as_ref()),
                     old_id: Some(previous_id.to_string()),
                     new_id: Some(id.to_string()),
                     kind: "Modified".to_string(),
@@ -519,7 +529,7 @@ impl Repository {
                     id,
                     ..
                 } => Change {
-                    path: lossy(location.as_bstr()),
+                    path: lossy(location.as_ref()),
                     old_id: Some(source_id.to_string()),
                     new_id: Some(id.to_string()),
                     kind: "Renamed".to_string(),

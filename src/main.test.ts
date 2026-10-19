@@ -1,6 +1,6 @@
 import { expect, test } from "vite-plus/test";
-import { main } from "./main.ts";
+import { add } from "../dist/index.js";
 
-test("main returns Hello, world!", () => {
-  expect(main()).toBe("Hello, world!");
+test("add returns sum of two numbers", () => {
+  expect(add(1, 2)).toBe(3);
 });

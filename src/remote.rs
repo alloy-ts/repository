@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use futures::executor;
+use gix::bstr::ByteSlice;
 use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
 use napi::Result;
@@ -43,7 +43,7 @@ pub(crate) fn build_remote(repo: &Arc<gix::ThreadSafeRepository>, remote: gix::R
 }
 
 /// Blocking fetch work, executed on the libuv thread pool by [`AsyncTask`].
-struct FetchTask {
+pub struct FetchTask {
     repo: Arc<gix::ThreadSafeRepository>,
     name: String,
 }
@@ -61,7 +61,7 @@ impl Task for FetchTask {
     }
 }
 
-/// Blocking fetch implementation (runs on a worker thread; the async gix `receive` is awaited there).
+/// Blocking fetch implementation (runs on a worker thread).
 fn do_fetch(repo: Arc<gix::ThreadSafeRepository>, name: String) -> Result<RemoteFetchOutcome> {
     let r = thread_local(&repo);
     let remote = r
@@ -74,15 +74,20 @@ fn do_fetch(repo: Arc<gix::ThreadSafeRepository>, name: String) -> Result<Remote
     let prepare = conn
         .prepare_fetch(gix::progress::Discard, gix::remote::ref_map::Options::default())
         .map_err(|e| err("prepare_fetch", e))?;
-    let outcome = executor::block_on(async { prepare.receive(gix::progress::Discard, &interrupt).await })
+    let outcome = prepare
+        .receive(gix::progress::Discard, &interrupt)
         .map_err(|e| err("receive", e))?;
     let updated_refs = outcome
         .ref_map
         .mappings
         .iter()
-        .filter_map(|m| m.local_ref_name.as_ref().map(|n| n.to_string()))
+        .filter_map(|m| m.local.as_ref().map(|n| lossy(n.as_bstr())))
         .collect();
     Ok(RemoteFetchOutcome { updated_refs })
+}
+
+fn lossy(b: &gix::bstr::BStr) -> String {
+    String::from_utf8_lossy(b).into_owned()
 }
 
 /// Fetch from this remote. Resolves a `Promise<RemoteFetchOutcome>`.

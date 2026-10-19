@@ -9,10 +9,10 @@ use napi_derive::napi;
 use crate::repository::Repository;
 
 /// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
-struct CloneTask {
-    url: String,
-    path: String,
-    bare: bool,
+pub struct CloneTask {
+    pub(crate) url: String,
+    pub(crate) path: String,
+    pub(crate) bare: bool,
 }
 
 impl Task for CloneTask {
