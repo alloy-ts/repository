@@ -99,3 +99,34 @@ test("Repository.log & revWalk: reading git logs in JS/TS", () => {
     removeTmpDir(tmpDir);
   }
 });
+
+test("Wave 1 extensions: headRef, headTreeId, configEntries, isAncestor", () => {
+  const tmpDir = createTmpDir("git-wave1-test-");
+
+  try {
+    const repo = Repository.init(tmpDir, false);
+    const emptyTreeId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    const c1 = repo.commit("refs/heads/main", "Commit 1", emptyTreeId, []);
+    const c2 = repo.commit("refs/heads/main", "Commit 2", emptyTreeId, [c1]);
+
+    // 1. headRef and headTreeId
+    const headRef = repo.headRef();
+    expect(headRef).not.toBeNull();
+    expect(headRef?.name).toBe("refs/heads/main");
+    expect(headRef?.target).toBe(c2);
+
+    expect(repo.headTreeId()).toBe(emptyTreeId);
+
+    // 2. configEntries
+    const configs = repo.configEntries();
+    expect(Array.isArray(configs)).toBe(true);
+
+    // 3. isAncestor
+    expect(repo.isAncestor(c1, c2)).toBe(true);
+    expect(repo.isAncestor(c2, c1)).toBe(false);
+    expect(repo.isAncestor(c1, c1)).toBe(true);
+  } finally {
+    removeTmpDir(tmpDir);
+  }
+});

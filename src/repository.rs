@@ -103,6 +103,25 @@ impl Repository {
         Ok(r.head_name().map_err(|e| err("head_name", e))?.map(|n| n.to_string()))
     }
 
+    /// The HEAD reference, or `null` if unborn or detached.
+    #[napi]
+    pub fn head_ref(&self) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.head_ref() {
+            Ok(Some(rf)) => Ok(Some(build_reference(&self.inner, rf)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("head_ref", e)),
+        }
+    }
+
+    /// The tree id `HEAD` points to.
+    #[napi]
+    pub fn head_tree_id(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        Ok(id.to_string())
+    }
+
     /// Find and decode a commit by id.
     #[napi]
     pub fn find_commit(&self, id: String) -> Result<Commit> {
@@ -320,6 +339,30 @@ impl Repository {
         r.config_snapshot().string(key.as_str()).map(|v| lossy(v.as_ref()))
     }
 
+    /// All flattened configuration entries.
+    #[napi]
+    pub fn config_entries(&self) -> Result<Vec<ConfigEntry>> {
+        let r = thread_local(&self.inner);
+        let snap = r.config_snapshot();
+        let mut out = Vec::new();
+        for section in snap.sections() {
+            let header = section.header();
+            let name = header.name();
+            let subname = header.subsection_name();
+            for (key, val) in section.body() {
+                let full_key = match subname {
+                    Some(sub) => format!("{name}.{sub}.{key}"),
+                    None => format!("{name}.{key}"),
+                };
+                out.push(ConfigEntry {
+                    key: full_key,
+                    value: lossy(val.as_ref()),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// The working directory, if this is not a bare repository.
     #[napi]
     pub fn work_dir(&self) -> Option<String> {
@@ -360,6 +403,13 @@ impl Repository {
     pub fn object_hash(&self) -> String {
         let r = thread_local(&self.inner);
         format!("{:?}", r.object_hash())
+    }
+
+    /// Whether the working directory is dirty.
+    #[napi]
+    pub fn is_dirty(&self) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        r.is_dirty().map_err(|e| err("is_dirty", e))
     }
 
     // ---- commits / revisions --------------------------------------------
@@ -421,6 +471,19 @@ impl Repository {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| err("rev_walk item", e))?;
         Ok(ids)
+    }
+
+    /// Check whether `ancestor` is an ancestor of `descendant`.
+    #[napi]
+    pub fn is_ancestor(&self, ancestor: String, descendant: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let anc_id = parse_oid(&ancestor)?;
+        let desc_id = parse_oid(&descendant)?;
+        if anc_id == desc_id {
+            return Ok(true);
+        }
+        let base = r.merge_base(anc_id, desc_id).map_err(|e| err("merge_base", e))?;
+        Ok(base.map(|id| id.detach() == anc_id).unwrap_or(false))
     }
 
     /// The merge base of two commits, if any.
@@ -560,6 +623,14 @@ impl Repository {
             })
             .collect())
     }
+}
+
+/// A single configuration entry ({ key, value }).
+#[derive(Clone)]
+#[napi(object)]
+pub struct ConfigEntry {
+    pub key: String,
+    pub value: String,
 }
 
 /// A single change produced by [`Repository::diff_tree_to_tree`].

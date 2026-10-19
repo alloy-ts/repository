@@ -1,6 +1,5 @@
-export * from "../dist/index.js";
+export * from "../dist/index";
 
-// Dummy export to ensure main.ts compiles standalone
 export function main(): string {
   return "repository";
 }

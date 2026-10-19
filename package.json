@@ -16,7 +16,7 @@
   },
   "type": "module",
   "exports": {
-    ".": "./dist/main.mjs",
+    ".": "./dist/pack/main.mjs",
     "./package.json": "./package.json"
   },
   "scripts": {
