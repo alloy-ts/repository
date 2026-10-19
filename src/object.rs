@@ -7,6 +7,7 @@ use napi_derive::napi;
 use gix::objs::signature::{Format, sign::Options};
 
 use crate::error::{err, parse_oid, thread_local};
+use crate::repository::Repository;
 
 /// A git signature (author / committer / tagger), copied out as owned data.
 #[derive(Clone)]
@@ -292,6 +293,12 @@ impl Tree {
     pub fn entry(&self, name: String) -> Option<TreeEntry> {
         self.entries.iter().find(|e| e.name == name).cloned()
     }
+
+    /// The repository this tree belongs to.
+    #[napi(getter)]
+    pub fn repo(&self) -> Repository {
+        Repository { inner: Arc::clone(&self.repo) }
+    }
 }
 
 /// Build a [`Tree`] from a found, decoded `gix::Tree`.
@@ -372,6 +379,12 @@ impl Tag {
     #[napi(getter)]
     pub fn tagger(&self) -> Option<Signature> {
         self.tagger.clone()
+    }
+
+    /// The repository this tag belongs to.
+    #[napi(getter)]
+    pub fn repo(&self) -> Repository {
+        Repository { inner: Arc::clone(&self.repo) }
     }
 }
 

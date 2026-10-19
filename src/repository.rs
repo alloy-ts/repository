@@ -53,6 +53,13 @@ pub struct MergeOutcome {
     pub conflicts: bool,
 }
 
+/// Object header metadata (kind and size in bytes).
+#[napi(object)]
+pub struct ObjectHeader {
+    pub kind: String,
+    pub size: f64,
+}
+
 /// A single git attribute assignment for a path (see [`Repository::attributes`]).
 #[derive(Clone)]
 #[napi(object)]
@@ -181,7 +188,6 @@ impl Progress for TsfnProgress {
             MessageLevel::Info => "info",
             MessageLevel::Success => "success",
             MessageLevel::Failure => "failure",
-            _ => "info",
         };
         self.emit(Some(message), Some(tag));
     }
@@ -250,7 +256,7 @@ fn summary_kind(s: Summary) -> String {
 }
 
 /// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
-struct CloneTask {
+pub struct CloneTask {
     url: String,
     path: String,
     bare: bool,
@@ -258,7 +264,7 @@ struct CloneTask {
 }
 
 /// Blocking status walk, executed on the libuv thread pool by [`AsyncTask`].
-struct StatusTask {
+pub struct StatusTask {
     inner: Arc<gix::ThreadSafeRepository>,
     on_progress: Option<Arc<ThreadsafeFunction<ProgressEvent, ()>>>,
 }
@@ -382,6 +388,7 @@ fn is_local_url(url: &str) -> bool {
         || lower.starts_with("git://")
         || lower.starts_with("rsync://"))
 }
+
 
 /// The primary handle to a git repository, exposed to TypeScript as a class.
 ///
@@ -612,6 +619,22 @@ impl Repository {
         Ok(out)
     }
 
+    /// Reload cached configuration and references from disk.
+    #[napi]
+    pub fn reload(&self) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
+    /// Return a new `Repository` handle pointing to the same underlying thread-safe repo.
+    #[napi]
+    pub fn to_thread_local(&self) -> Repository {
+        Repository {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
     /// Find a single reference by name (e.g. `main`, `refs/heads/main`, `HEAD`).
     #[napi]
     pub fn find_reference(&self, name: String) -> Result<Reference> {
@@ -742,6 +765,61 @@ impl Repository {
             .find_remote(name.as_str())
             .map_err(|e| err("find_remote", e))?;
         Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Find a reference by name, returning `null` if missing instead of throwing.
+    #[napi]
+    pub fn try_find_reference(&self, name: String) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.try_find_reference(name.as_str()).map_err(|e| err("try_find_reference", e))? {
+            Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Find a remote by name, returning `null` if missing instead of throwing.
+    #[napi]
+    pub fn try_find_remote(&self, name: String) -> Result<Option<Remote>> {
+        let r = thread_local(&self.inner);
+        match r.try_find_remote(name.as_str()) {
+            Some(rm) => {
+                let remote = rm.map_err(|e| err("try_find_remote", e))?;
+                Ok(Some(build_remote(&self.inner, remote)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Find header metadata (kind and size) for an object without reading its full content.
+    #[napi]
+    pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
+        let r = thread_local(&self.inner);
+        let oid = match parse_oid(&id) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        };
+        match r.try_find_header(oid) {
+            Ok(Some(hdr)) => Ok(Some(ObjectHeader {
+                kind: format!("{:?}", hdr.kind()),
+                size: hdr.size() as f64,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("try_find_header", e)),
+        }
+    }
+
+    /// Path to the index file (`.git/index`).
+    #[napi]
+    pub fn index_path(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.index_path().to_string_lossy().into_owned()
+    }
+
+    /// Relative path prefix from repository root to current working directory, if any.
+    #[napi]
+    pub fn prefix(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        Ok(r.prefix().map_err(|e| err("prefix", e))?.map(|p| p.to_string_lossy().into_owned()))
     }
 
     /// Build an (anonymous) remote from `url` without persisting it to config.

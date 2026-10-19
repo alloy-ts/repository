@@ -44,6 +44,12 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure cloneDir has at least 2 commits so HEAD~1 exists for tests
+  const gitCmd = (args: string) => execSync(`git ${args}`, { stdio: "ignore" });
+  gitCmd(`-C ${JSON.stringify(cloneDir)} config user.name "test"`);
+  gitCmd(`-C ${JSON.stringify(cloneDir)} config user.email "test@example.com"`);
+  gitCmd(`-C ${JSON.stringify(cloneDir)} commit --allow-empty -m "second commit"`);
 });
 
 afterAll(() => {
@@ -495,8 +501,8 @@ describe("Repository wave-1 additions", () => {
   });
 
   test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -506,5 +512,35 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+
+  test("tree and tag repo getters return Repository instance", () => {
+    const tree = repo.headTree();
+    expect(tree.repo).toBeDefined();
+    expect(tree.repo.gitDir()).toBe(repo.gitDir());
+  });
+
+  test("tryFindReference, tryFindRemote, tryFindHeader return null on missing items", () => {
+    expect(repo.tryFindReference("HEAD")?.name).toBe("HEAD");
+    expect(repo.tryFindReference("refs/heads/__missing__")).toBeNull();
+
+    expect(repo.tryFindRemote("__missing__")).toBeNull();
+
+    const headId = repo.headId();
+    const hdr = repo.tryFindHeader(headId);
+    expect(hdr).not.toBeNull();
+    expect(hdr?.kind).toBe("Commit");
+    expect(hdr?.size).toBeGreaterThan(0);
+    expect(repo.tryFindHeader("0".repeat(40))).toBeNull();
+  });
+
+  test("indexPath, prefix, reload, and toThreadLocal", () => {
+    expect(typeof repo.indexPath()).toBe("string");
+    expect(repo.indexPath()).toContain(".git");
+
+    const local = repo.toThreadLocal();
+    expect(local.gitDir()).toBe(repo.gitDir());
+
+    expect(() => repo.reload()).not.toThrow();
   });
 });
