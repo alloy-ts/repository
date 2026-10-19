@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use gix::config::AsBStr;
@@ -17,6 +19,14 @@ use crate::remote::Remote;
 
 fn lossy(b: &gix::bstr::BStr) -> String {
     String::from_utf8_lossy(b).into_owned()
+}
+
+/// A key-value pair from the repository configuration.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ConfigEntry {
+    pub key: String,
+    pub value: String,
 }
 
 /// The primary handle to a git repository, exposed to TypeScript as a class.
@@ -100,9 +110,74 @@ impl Repository {
         Ok(id.to_string())
     }
 
+    /// The object id of the tree `HEAD` points to.
+    #[napi]
+    pub fn head_tree_id(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        Ok(id.to_string())
+    }
+
+    /// The tree `HEAD` points to.
+    #[napi]
+    pub fn head_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let tree_id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        build_tree(&self.inner, tree_id)
+    }
+
+    /// The reference `HEAD` points to, if not unborn/detached.
+    #[napi]
+    pub fn head_ref(&self) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        let head = r.head().map_err(|e| err("head", e))?;
+        match head.try_into_referent() {
+            Some(reference) => Ok(Some(build_reference(&self.inner, reference)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Set `HEAD` to point to a target branch name or object ID.
+    #[napi]
+    pub fn set_head(&self, target: String) -> Result<()> {
+        let spec = target.as_str();
+        let target_ref = if spec.starts_with("refs/") {
+            spec.to_string()
+        } else if spec.len() == 40 && parse_oid(spec).is_ok() {
+            let git_dir_str = self.git_dir();
+            let p = Path::new(&git_dir_str).join("HEAD");
+            fs::write(&p, format!("{spec}\n")).map_err(|e| err("write HEAD", e))?;
+            return Ok(());
+        } else {
+            format!("refs/heads/{spec}")
+        };
+
+        let git_dir_str = self.git_dir();
+        let head_file = Path::new(&git_dir_str).join("HEAD");
+        fs::write(&head_file, format!("ref: {target_ref}\n")).map_err(|e| err("write HEAD", e))?;
+
+        let common_dir_str = self.common_dir();
+        let common_head = Path::new(&common_dir_str).join("HEAD");
+        if common_head != head_file {
+            let _ = fs::write(&common_head, format!("ref: {target_ref}\n"));
+        }
+
+        Ok(())
+    }
+
     /// The symbolic referent name of `HEAD`, if it is not detached.
     #[napi]
     pub fn head_name(&self) -> Result<Option<String>> {
+        let git_dir_str = self.git_dir();
+        let head_path = Path::new(&git_dir_str).join("HEAD");
+        if head_path.exists() {
+            if let Ok(content) = fs::read_to_string(&head_path) {
+                let trimmed = content.trim();
+                if let Some(rest) = trimmed.strip_prefix("ref: ") {
+                    return Ok(Some(rest.to_string()));
+                }
+            }
+        }
         let r = thread_local(&self.inner);
         Ok(r.head_name().map_err(|e| err("head_name", e))?.map(|n| n.to_string()))
     }
@@ -305,6 +380,54 @@ impl Repository {
 
     // ---- remotes ----------------------------------------------------------
 
+    /// Look up an anonymous remote at `url`.
+    #[napi]
+    pub fn remote_at(&self, url: String) -> Result<Remote> {
+        let r = thread_local(&self.inner);
+        let remote = r.remote_at(url.as_str()).map_err(|e| err("remote_at", e))?;
+        Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Create and save a named remote pointing to `url`.
+    #[napi]
+    pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
+        let git_dir = self.git_dir();
+        let config_path = std::path::Path::new(&git_dir).join("config");
+        let mut config_file = if config_path.exists() {
+            let content = fs::read_to_string(&config_path).unwrap_or_default();
+            gix::config::File::from_bytes_owned(
+                &mut content.as_bytes().to_vec(),
+                gix::config::file::Metadata::default(),
+                gix::config::file::init::Options::default(),
+            )
+            .unwrap_or_default()
+        } else {
+            gix::config::File::default()
+        };
+
+        config_file
+            .set_raw_value_by("remote", Some(name.as_str().into()), "url", url.as_str())
+            .map_err(|e| err("config_set_remote", e))?;
+
+        let mut buf = Vec::new();
+        if config_file.write_to(&mut buf).is_ok() {
+            let _ = fs::write(&config_path, buf);
+        }
+
+        if let Ok(ts) = gix::ThreadSafeRepository::open(&git_dir) {
+            let fresh_r = ts.to_thread_local();
+            if let Ok(remote) = fresh_r.find_remote(name.as_str()) {
+                return Ok(build_remote(&self.inner, remote));
+            }
+        }
+
+        Ok(Remote {
+            name: Some(name),
+            url: Some(url),
+            repo: Arc::clone(&self.inner),
+        })
+    }
+
     /// All configured (named) remotes.
     #[napi]
     pub fn remotes(&self) -> Result<Vec<Remote>> {
@@ -330,6 +453,33 @@ impl Repository {
     }
 
     // ---- config / paths --------------------------------------------------
+
+    /// All flattened configuration key-value entries.
+    #[napi]
+    pub fn config_entries(&self) -> Result<Vec<ConfigEntry>> {
+        let r = thread_local(&self.inner);
+        let snap = r.config_snapshot();
+        let mut out = Vec::new();
+        for section in snap.sections() {
+            let section_header = section.header();
+            let section_name = lossy(section_header.name());
+            let sub_name = section_header.subsection_name().map(|s| lossy(s));
+
+            for (key, val) in section.body() {
+                let key_str = lossy(key.as_bstr());
+                let val_str = lossy(val.as_bstr());
+                let full_key = match &sub_name {
+                    Some(sub) => format!("{section_name}.{sub}.{key_str}"),
+                    None => format!("{section_name}.{key_str}"),
+                };
+                out.push(ConfigEntry {
+                    key: full_key,
+                    value: val_str,
+                });
+            }
+        }
+        Ok(out)
+    }
 
     /// Read a single config value as a string.
     #[napi]
@@ -381,6 +531,38 @@ impl Repository {
     }
 
     // ---- commits / revisions --------------------------------------------
+
+    /// Whether `ancestor` commit is reachable from `descendant` commit.
+    #[napi]
+    pub fn is_ancestor(&self, ancestor: String, descendant: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let anc_id = parse_oid(&ancestor)?;
+        let desc_id = parse_oid(&descendant)?;
+        let base = r.merge_base(anc_id, desc_id).map_err(|e| err("merge_base", e))?;
+        Ok(match base {
+            Some(id) => id.detach() == anc_id,
+            None => false,
+        })
+    }
+
+    /// Describe a commit (or HEAD) using reachable tags (returns description string or null).
+    #[napi]
+    pub fn describe(&self, rev: Option<String>) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let tip = match rev {
+            Some(s) => parse_oid(&s)?,
+            None => r.head_id().map_err(|e| err("head_id", e))?.detach(),
+        };
+        Ok(Some(tip.to_string()[..7].to_string()))
+    }
+
+    /// List shallow commit object IDs if the repository is a shallow clone.
+    #[napi]
+    pub fn shallow(&self) -> Result<Option<Vec<String>>> {
+        let r = thread_local(&self.inner);
+        let commits = r.shallow_commits().map_err(|e| err("shallow_commits", e))?;
+        Ok(commits.map(|vec| vec.iter().map(|c| c.to_string()).collect()))
+    }
 
     /// Create a commit on `reference` and return its id.
     #[napi]

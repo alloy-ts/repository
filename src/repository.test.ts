@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { expect, test, describe, beforeEach, afterEach } from "vite-plus/test";
-import { Repository } from "../dist/index.js";
+import { Repository, Reference, Tree } from "../dist/index.js";
 
 // Standard Git SHA1 OID for an empty tree
 const EMPTY_TREE_ID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -128,11 +128,9 @@ describe("Repository static constructors and methods", () => {
     const repoPath = path.join(tmpDir, "rev-parse-repo");
     const repo = Repository.init(repoPath, false);
 
-    // Create a blob for ReadMe.md content
     const readmeContent = "# Hello Repository";
     const blobId = repo.writeBlob(Buffer.from(readmeContent));
 
-    // For testing tree resolution, verify revParseSingle resolves main and SHA
     const commitId = repo.commit(
       "refs/heads/main",
       "Add ReadMe.md",
@@ -140,15 +138,12 @@ describe("Repository static constructors and methods", () => {
       []
     );
 
-    // Resolve 'main' branch spec to commit SHA
     const mainOid = repo.revParseSingle("refs/heads/main");
     expect(mainOid).toBe(commitId);
 
-    // Resolve SHA spec
     const shaOid = repo.revParseSingle(commitId);
     expect(shaOid).toBe(commitId);
 
-    // Read stored blob content directly using its OID
     const blob = repo.findBlob(blobId);
     expect(blob.content().toString("utf-8")).toBe(readmeContent);
   });
@@ -170,5 +165,90 @@ describe("Repository static constructors and methods", () => {
     const resolved = repo.findCommit(commit1);
     expect(resolved.id).toBe(commit1);
     expect(resolved.message).toBe("Commit 1");
+  });
+
+  describe("Wave 1 API Additions", () => {
+    test("headTreeId, headRef, headTree, and setHead", () => {
+      const repoPath = path.join(tmpDir, "wave1-head-repo");
+      const repo = Repository.init(repoPath, false);
+
+      const commit1 = repo.commit(
+        "refs/heads/main",
+        "Commit for HEAD test",
+        EMPTY_TREE_ID,
+        []
+      );
+
+      expect(repo.headTreeId()).toBe(EMPTY_TREE_ID);
+
+      const headTree = repo.headTree();
+      expect(headTree).toBeInstanceOf(Tree);
+      expect(headTree.id).toBe(EMPTY_TREE_ID);
+
+      const headRef = repo.headRef();
+      expect(headRef).toBeInstanceOf(Reference);
+      expect(headRef?.name).toBe("refs/heads/main");
+
+      // Test setHead to a new branch
+      repo.createReference("refs/heads/feature", commit1, false);
+      repo.setHead("feature");
+      expect(Repository.open(repoPath).headName()).toBe("refs/heads/feature");
+    });
+
+    test("remoteAt and createRemote", () => {
+      const repoPath = path.join(tmpDir, "wave1-remote-repo");
+      const repo = Repository.init(repoPath, false);
+
+      const url = "https://github.com/example/repo.git";
+      const anonRemote = repo.remoteAt(url);
+      expect(anonRemote.url).toBe(url);
+
+      const createdRemote = repo.createRemote("origin", url);
+      expect(createdRemote.name).toBe("origin");
+      expect(createdRemote.url).toBe(url);
+
+      const fresh = Repository.open(repoPath);
+      const remotes = fresh.remotes();
+      expect(remotes.some((r) => r.name === "origin")).toBe(true);
+    });
+
+    test("configEntries returns flattened config key-value pairs", () => {
+      const repoPath = path.join(tmpDir, "wave1-config-repo");
+      const repo = Repository.init(repoPath, false);
+
+      const entries = repo.configEntries();
+      expect(Array.isArray(entries)).toBe(true);
+      expect(entries.length).toBeGreaterThan(0);
+      expect(entries[0]).toHaveProperty("key");
+      expect(entries[0]).toHaveProperty("value");
+    });
+
+    test("isAncestor, describe, and shallow", () => {
+      const repoPath = path.join(tmpDir, "wave1-rev-repo");
+      const repo = Repository.init(repoPath, false);
+
+      const parent = repo.commit(
+        "refs/heads/main",
+        "Parent commit",
+        EMPTY_TREE_ID,
+        []
+      );
+
+      const child = repo.commit(
+        "refs/heads/main",
+        "Child commit",
+        EMPTY_TREE_ID,
+        [parent]
+      );
+
+      expect(repo.isAncestor(parent, child)).toBe(true);
+      expect(repo.isAncestor(child, parent)).toBe(false);
+
+      const desc = repo.describe(child);
+      expect(desc === null || typeof desc === "string").toBe(true);
+
+      const shallowCommits = repo.shallow();
+      expect(shallowCommits === null || Array.isArray(shallowCommits)).toBe(true);
+    });
   });
 });

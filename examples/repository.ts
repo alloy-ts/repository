@@ -9,6 +9,20 @@ async function main() {
   console.log("Git Directory:", repo.gitDir());
   console.log("Is Bare:", repo.isBare());
 
+  // Wave 1: HEAD Management
+  console.log("\n--- HEAD Management ---");
+  console.log("HEAD Name:", repo.headName());
+  console.log("HEAD Tree OID:", repo.headTreeId());
+  const headRef = repo.headRef();
+  console.log("HEAD Reference:", headRef ? headRef.name : "Detached/Unborn");
+
+  // Wave 1: Config Entries
+  console.log("\n--- Configuration Entries ---");
+  const configEntries = repo.configEntries();
+  for (const entry of configEntries.slice(0, 5)) {
+    console.log(`Config [${entry.key}] = ${entry.value}`);
+  }
+
   // 2. Read git logs using repo.log(rev?, limit?, firstParent?)
   console.log("\n--- Git Log (repo.log) ---");
   const logEntries = repo.log("HEAD", 5, false);
