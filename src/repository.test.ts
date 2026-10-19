@@ -17,10 +17,14 @@ import { Repository, type LogEntry, type Tree, type TreeEntry } from "./main.ts"
  *    - repo.log(rev?, limit?, firstParent?) -> obtain log summaries in reverse-chronological order
  *    - repo.revWalk(tips) + repo.findCommit(id) -> manual revision walking and object inspection
  *
- * 3. Manifest Remote Setup:
+ * 3. Reading Reflogs:
+ *    - repo.reflog("refs/heads/main") -> read reflog entries for a branch
+ *    - repo.headReflog()              -> read reflog entries for HEAD
+ *
+ * 4. Manifest Remote Setup:
  *    - repo.setupRemotesFromManifest(manifestPath?) -> setup remotes from repository.manifest.yml
  *
- * 4. Inspection of Trees and Objects.
+ * 5. Inspection of Trees and Objects.
  */
 
 function openRepo(): Repository {
@@ -143,7 +147,33 @@ test("manual log reading via revWalk() and findCommit()", () => {
   expect(typeof commit.author.email).toBe("string");
 });
 
-// --- 3. Manifest Remote Setup -------------------------------------------------
+// --- 3. Repository Reflogs ----------------------------------------------------
+
+test("repo.reflog() reads reflog entries from a reference or HEAD", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-test-repo-reflog-"));
+  try {
+    const repo = Repository.init(tmpDir, false);
+    const treeId = Repository.open(process.cwd()).headCommit().treeId;
+
+    const commit1 = repo.commit("refs/heads/main", "initial commit", treeId, []);
+    const commit2 = repo.commit("refs/heads/main", "second commit", treeId, [commit1]);
+
+    // Read reflog for refs/heads/main directly via repo
+    const logs = repo.reflog("refs/heads/main");
+    expect(Array.isArray(logs)).toBe(true);
+    expect(logs.length).toBeGreaterThanOrEqual(1);
+    expect(logs[0]!.newId).toBe(commit2);
+    expect(logs[0]!.previousId).toBe(commit1);
+
+    // Read HEAD reflog via repo.headReflog()
+    const headLogs = repo.headReflog();
+    expect(Array.isArray(headLogs)).toBe(true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// --- 4. Manifest Remote Setup -------------------------------------------------
 
 test("setupRemotesFromManifest parses manifest and configures remotes", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-test-manifest-remotes-"));
@@ -170,7 +200,7 @@ test("setupRemotesFromManifest parses manifest and configures remotes", () => {
   }
 });
 
-// --- 4. Tree & object inspection ---------------------------------------------
+// --- 5. Tree & object inspection ---------------------------------------------
 
 test("head().tree() returns the current HEAD tree with entries", () => {
   const repo = openRepo();

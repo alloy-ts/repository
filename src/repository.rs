@@ -207,7 +207,23 @@ impl Repository {
         Ok(id.to_string())
     }
 
-    // ---- references -------------------------------------------------------
+    // ---- references & reflogs ----------------------------------------------
+
+    /// Read reflog entries for a reference (e.g. `"refs/heads/main"`, `"HEAD"`).
+    ///
+    /// Defaults to `"HEAD"` if `name` is omitted.
+    #[napi]
+    pub fn reflog(&self, name: Option<String>) -> Result<Vec<crate::reference::ReflogEntry>> {
+        let ref_name = name.unwrap_or_else(|| "HEAD".to_string());
+        let reference = self.find_reference(ref_name)?;
+        reference.log()
+    }
+
+    /// Read reflog entries for `HEAD`.
+    #[napi]
+    pub fn head_reflog(&self) -> Result<Vec<crate::reference::ReflogEntry>> {
+        self.reflog(Some("HEAD".to_string()))
+    }
 
     /// All references in the repository.
     #[napi]
