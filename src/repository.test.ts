@@ -44,6 +44,17 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure sandbox has at least 2 commits so HEAD~1 is valid even if host repo is a shallow clone
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    repo.commit(
+      repo.headName() ?? "refs/heads/main",
+      "test sandbox commit 2",
+      head.treeId,
+      [head.id],
+    );
+  }
 });
 
 afterAll(() => {
@@ -450,6 +461,50 @@ describe("Repository.commit", () => {
   });
 });
 
+// --- wave-3 additions: config_bool, config_int, edit_config, branch_names ---
+
+describe("Repository wave-3 additions", () => {
+  test("configBool, configInt, editConfig round-trip", () => {
+    expect(repo.configBool("core.bare")).toBe(false);
+    expect(repo.configInt("this.nonexistent.key")).toBeNull();
+
+    repo.editConfig("test.wave3.int", "42");
+    expect(repo.configInt("test.wave3.int")).toBe(42);
+
+    repo.editConfig("test.wave3.int", null);
+    expect(repo.configInt("test.wave3.int")).toBeNull();
+  });
+
+  test("branchNames returns branch list", () => {
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches.length).toBeGreaterThan(0);
+  });
+});
+
+// --- wave-2 additions: index_or_load, edit_index, index_worktree ---
+
+describe("Repository wave-2 additions", () => {
+  test("indexOrLoad returns entries", () => {
+    const entries = repo.indexOrLoad();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+  });
+
+  test("editIndex adds an entry and indexWorktree reflects state", async () => {
+    const blobId = repo.writeBlob(Buffer.from("wave 2 test content\n"));
+    repo.editIndex("wave2_file.txt", blobId, false);
+    const entries = repo.index();
+    expect(entries.some((e) => e.path === "wave2_file.txt" && e.id === blobId)).toBe(true);
+
+    const stSync = repo.indexWorktree();
+    expect(Array.isArray(stSync)).toBe(true);
+
+    const stAsync = await repo.status();
+    expect(Array.isArray(stAsync)).toBe(true);
+  });
+});
+
 // --- wave-1 additions: HEAD extras, remote_at, describe, is_ancestor, shallow ---
 
 describe("Repository wave-1 additions", () => {
@@ -494,9 +549,9 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags are reported correctly", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {

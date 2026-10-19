@@ -750,6 +750,43 @@ impl Repository {
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
     }
 
+    /// Read a single config value as a boolean.
+    #[napi]
+    pub fn config_bool(&self, key: String) -> Option<bool> {
+        let r = thread_local(&self.inner);
+        let snap = r.config_snapshot();
+        snap.boolean(key.as_str()).map(|b| b)
+    }
+
+    /// Read a single config value as an integer.
+    #[napi]
+    pub fn config_int(&self, key: String) -> Option<i64> {
+        let r = thread_local(&self.inner);
+        let snap = r.config_snapshot();
+        snap.integer(key.as_str()).map(|i| i as i64)
+    }
+
+    /// Edit config by setting a raw value or removing a key if value is null/undefined.
+    #[napi]
+    pub fn edit_config(&mut self, key: String, value: Option<String>) -> Result<()> {
+        match value {
+            Some(v) => self.set_config_value(key, v),
+            None => {
+                let parts: Vec<&str> = key.split('.').collect();
+                if parts.len() >= 2 {
+                    let section = parts[0].to_string();
+                    let sub = if parts.len() > 2 {
+                        Some(parts[1..parts.len() - 1].join("."))
+                    } else {
+                        None
+                    };
+                    self.unset_config(section, sub)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     // ---- index (staging area) ----------------------------------------------
 
     /// All entries currently in the index (staging area).
@@ -758,6 +795,33 @@ impl Repository {
         let r = thread_local(&self.inner);
         let file = r.index().map_err(|e| err("index", e))?;
         build_index_entries(&file)
+    }
+
+    /// Add or update an entry in the index with the given relative path and blob ID.
+    #[napi]
+    pub fn edit_index(&self, path: String, blob_id: String, executable: Option<bool>) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&blob_id)?;
+        let mode = if executable.unwrap_or(false) {
+            gix::index::entry::Mode::FILE_EXECUTABLE
+        } else {
+            gix::index::entry::Mode::FILE
+        };
+        let mut index_file = r.open_index().map_err(|e| err("edit_index load", e))?;
+        let time = gix::index::entry::stat::Time { secs: 0, nsecs: 0 };
+        let stat = gix::index::entry::Stat {
+            mtime: time,
+            ctime: time,
+            dev: 0,
+            ino: 0,
+            uid: 0,
+            gid: 0,
+            size: 0,
+        };
+        let flags = gix::index::entry::Flags::empty();
+        index_file.dangerously_push_entry(stat, oid, flags, mode, gix::bstr::BStr::new(path.as_bytes()));
+        index_file.write(Default::default()).map_err(|e| err("write index", e))?;
+        Ok(())
     }
 
     /// Compute the working-tree + index status (`git status`), returning one entry per change.
@@ -1177,13 +1241,30 @@ impl Repository {
 
     /// Set a value (e.g. `user.name`) in the local config file.
     #[napi]
-    pub fn set_config_value(&self, key: String, value: String) -> Result<()> {
+    pub fn set_config_value(&mut self, key: String, value: String) -> Result<()> {
         let mut r = thread_local(&self.inner);
-        let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
+        let git_dir = r.git_dir().to_path_buf();
+        let config_path = git_dir.join("config");
         let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
-        let _ = config_file.set_raw_value(key.as_str(), value.as_str());
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.len() >= 2 {
+            let section = parts[0];
+            let (sub, val_name) = if parts.len() == 2 {
+                (None, parts[1])
+            } else {
+                (Some(parts[1..parts.len()-1].join(".")), parts[parts.len()-1])
+            };
+            config_file.set_raw_value_by(
+                section,
+                sub.as_deref().map(gix::bstr::BStr::new),
+                val_name,
+                value.as_bytes(),
+            ).map_err(|e| err("set_raw_value_by", e))?;
+        }
         config_file.commit().map_err(|e| err("commit_config", e))?;
-        r.reload().map_err(|e| err("reload", e))?;
+        drop(r);
+        let ts = gix::ThreadSafeRepository::open(git_dir).map_err(|e| err("reload repo", e))?;
+        self.inner = Arc::new(ts);
         Ok(())
     }
     /// Names of local branches (short form, e.g. `main`).
@@ -1238,7 +1319,7 @@ impl Repository {
     /// Returns whether a section was removed. The file is rewritten atomically (temp + rename) so a
     /// failure can't leave a truncated config behind.
     #[napi]
-    pub fn unset_config(&self, section: String, subsection: Option<String>) -> Result<bool> {
+    pub fn unset_config(&mut self, section: String, subsection: Option<String>) -> Result<bool> {
         let git_dir = self.git_dir();
         let config_path = std::path::Path::new(&git_dir).join("config");
         let mut file = gix::config::File::from_git_dir(git_dir.clone().into())
@@ -1252,6 +1333,8 @@ impl Repository {
                 file.write_to(&mut f).map_err(|e| err("write config", e))?;
             }
             std::fs::rename(&tmp, &config_path).map_err(|e| err("rename config", e))?;
+            let ts = gix::ThreadSafeRepository::open(&git_dir).map_err(|e| err("reload repo", e))?;
+            self.inner = Arc::new(ts);
         }
         Ok(removed)
     }
