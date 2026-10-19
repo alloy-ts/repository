@@ -122,6 +122,14 @@ impl Repository {
         Ok(id.to_string())
     }
 
+    /// The tree object `HEAD` points to.
+    #[napi]
+    pub fn head_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        build_tree(&self.inner, id)
+    }
+
     /// Find and decode a commit by id.
     #[napi]
     pub fn find_commit(&self, id: String) -> Result<Commit> {
@@ -185,6 +193,25 @@ impl Repository {
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    /// Write a commit object without updating any references, returning its object id.
+    #[napi]
+    pub fn write_commit_object(
+        &self,
+        message: String,
+        tree_id: String,
+        parents: Vec<String>,
+    ) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let parent_ids: Vec<gix::ObjectId> = parents
+            .iter()
+            .map(|p| parse_oid(p))
+            .collect::<Result<Vec<_>>>()?;
+        let commit_obj = r
+            .new_commit(message.as_str(), parse_oid(&tree_id)?, parent_ids)
+            .map_err(|e| err("new_commit", e))?;
+        Ok(commit_obj.id.to_string())
     }
 
     // ---- references -------------------------------------------------------
@@ -368,6 +395,23 @@ impl Repository {
     pub fn work_dir(&self) -> Option<String> {
         let r = thread_local(&self.inner);
         r.workdir().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// The root directory of the working tree, if one exists.
+    #[napi]
+    pub fn worktree_path(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.worktree().map(|wt| wt.base().to_string_lossy().into_owned())
+    }
+
+    /// Return a handle to the main repository (e.g. when called from a linked worktree).
+    #[napi]
+    pub fn main_repo(&self) -> Result<Repository> {
+        let r = thread_local(&self.inner);
+        let main = r.main_repo().map_err(|e| err("main_repo", e))?;
+        Ok(Repository {
+            inner: Arc::new(main.into()),
+        })
     }
 
     /// The `.git` directory.

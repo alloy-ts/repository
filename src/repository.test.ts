@@ -100,6 +100,42 @@ test("Repository.log & revWalk: reading git logs in JS/TS", () => {
   }
 });
 
+test("Waves 4, 5, 6: writeCommitObject, worktreePath, mainRepo, mergeBaseOctopus", () => {
+  const tmpDir = createTmpDir("git-waves456-test-");
+
+  try {
+    const repo = Repository.init(tmpDir, false);
+    const emptyTreeId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    // 1. writeCommitObject
+    const unrefCommitId = repo.writeCommitObject("unreferenced commit", emptyTreeId, []);
+    expect(typeof unrefCommitId).toBe("string");
+    expect(unrefCommitId.length).toBe(40);
+    expect(repo.objectExists(unrefCommitId)).toBe(true);
+
+    const fetchedCommit = repo.findCommit(unrefCommitId);
+    expect(fetchedCommit.message).toBe("unreferenced commit");
+
+    // 2. worktreePath and mainRepo
+    const wtPath = repo.worktreePath();
+    expect(wtPath).not.toBeNull();
+    expect(typeof wtPath).toBe("string");
+
+    const mainRepo = repo.mainRepo();
+    expect(mainRepo).toBeDefined();
+
+    // 3. mergeBaseOctopus
+    const c1 = repo.commit("refs/heads/main", "c1", emptyTreeId, []);
+    const c2 = repo.commit("refs/heads/branch-a", "c2", emptyTreeId, [c1]);
+    const c3 = repo.commit("refs/heads/branch-b", "c3", emptyTreeId, [c1]);
+
+    const octopusBase = repo.mergeBaseOctopus([c2, c3]);
+    expect(octopusBase).toBe(c1);
+  } finally {
+    removeTmpDir(tmpDir);
+  }
+});
+
 test("Wave 1 extensions: headRef, headTreeId, configEntries, isAncestor", () => {
   const tmpDir = createTmpDir("git-wave1-test-");
 
