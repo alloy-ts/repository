@@ -20,7 +20,7 @@ pub struct Manifest {
     pub remote: Vec<String>,
 }
 
-/// Read and parse a manifest YAML file (e.g., `repository.manifest.yml`).
+/// Read and parse a manifest YAML file from disk (e.g., `repository.manifest.yml`).
 pub fn parse_manifest(path: impl AsRef<Path>) -> Result<Manifest> {
     let p = path.as_ref();
     let content = fs::read_to_string(p)
@@ -28,6 +28,52 @@ pub fn parse_manifest(path: impl AsRef<Path>) -> Result<Manifest> {
     let manifest: Manifest = serde_yaml::from_str(&content)
         .map_err(|e| napi::Error::from_reason(format!("Failed to parse manifest YAML at {:?}: {e}", p)))?;
     Ok(manifest)
+}
+
+/// Reads and parses `repository.manifest.yml` from a repository revision spec (e.g. `"HEAD:repository.manifest.yml"`, `"main:repository.manifest.yml"`, or `"<sha>"`), falling back to filesystem path if it exists.
+pub fn read_manifest_from_revision(
+    repo_inner: &gix::ThreadSafeRepository,
+    rev_spec_or_path: &str,
+) -> Result<Manifest> {
+    let repo = repo_inner.to_thread_local();
+
+    // 1. Try revision spec formatted as "<rev>:repository.manifest.yml" or verbatim "<rev>:<path>"
+    let spec = if rev_spec_or_path.contains(':') {
+        rev_spec_or_path.to_string()
+    } else {
+        format!("{rev_spec_or_path}:repository.manifest.yml")
+    };
+
+    if let Ok(object_id) = repo.rev_parse_single(spec.as_str()) {
+        if let Ok(blob) = repo.find_blob(object_id) {
+            if let Ok(manifest) = serde_yaml::from_slice::<Manifest>(&blob.data) {
+                return Ok(manifest);
+            }
+        }
+    }
+
+    // 2. Try verbatim revision spec
+    if let Ok(object_id) = repo.rev_parse_single(rev_spec_or_path) {
+        if let Ok(blob) = repo.find_blob(object_id) {
+            if let Ok(manifest) = serde_yaml::from_slice::<Manifest>(&blob.data) {
+                return Ok(manifest);
+            }
+        }
+    }
+
+    // 3. Fall back to local filesystem path
+    if Path::new(rev_spec_or_path).exists() {
+        return parse_manifest(rev_spec_or_path);
+    }
+
+    // 4. Fall back to default filename in process working directory
+    if Path::new("repository.manifest.yml").exists() {
+        return parse_manifest("repository.manifest.yml");
+    }
+
+    Err(napi::Error::from_reason(format!(
+        "Could not resolve manifest at revision spec or file path '{rev_spec_or_path}'"
+    )))
 }
 
 /// Sets up repository remotes and git configuration using a parsed manifest.
@@ -109,12 +155,13 @@ pub fn setup_repository_from_manifest(
     Ok(())
 }
 
-/// Reads `repository.manifest.yml` and sets up repository remotes and configuration.
-pub fn setup_repository_from_manifest_file(
+/// Reads `repository.manifest.yml` from a revision spec or file path and sets up repository remotes and configuration.
+pub fn setup_repository_from_manifest_spec(
     repo_inner: &gix::ThreadSafeRepository,
-    manifest_path: impl AsRef<Path>,
+    rev_spec_or_path: Option<&str>,
 ) -> Result<()> {
-    let manifest = parse_manifest(manifest_path)?;
+    let spec = rev_spec_or_path.unwrap_or("HEAD:repository.manifest.yml");
+    let manifest = read_manifest_from_revision(repo_inner, spec)?;
     setup_repository_from_manifest(repo_inner, &manifest)
 }
 

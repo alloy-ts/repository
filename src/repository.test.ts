@@ -335,6 +335,19 @@ describe("Repository revisions", () => {
     expect(walked.length).toBeGreaterThanOrEqual(1);
   });
 
+  test("revParseSingle resolves file entries at revisions (e.g. ReadMe.md or manifest)", () => {
+    const sha = repo.headId();
+    // Resolve ReadMe.md or repository.manifest.yml blob ID via revision spec
+    const blobId = repo.revParseSingle(`${sha}:repository.manifest.yml`);
+    expect(typeof blobId).toBe("string");
+    expect(blobId.length).toBe(40);
+
+    // Retrieve blob content
+    const blob = repo.findBlob(blobId);
+    const content = blob.content().toString("utf-8");
+    expect(content).toContain("name: repository");
+  });
+
   test("mergeBase / mergeBaseOctopus", () => {
     const head = repo.revParseSingle("HEAD");
     const parent = repo.revParseSingle("HEAD~1");

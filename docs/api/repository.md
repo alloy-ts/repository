@@ -69,7 +69,35 @@ const clonedRepo = await Repository.clone(
 
 ---
 
-### 3.2 Reading Git Logs (`repo.log()`)
+### 3.2 Resolving Revisions and Reading Specific File Entries (e.g. `ReadMe.md` from `main` or SHA)
+
+`Repository.prototype.revParseSingle(spec)` parses standard git revision expressions, including branch names (`"main"`), commit SHAs (`"45c58a7"`), parent specs (`"HEAD~1"`), and path specifications (`"main:ReadMe.md"`, `"<SHA>:ReadMe.md"`, `"HEAD:repository.manifest.yml"`).
+
+```typescript
+import { Repository } from "./main.ts";
+
+const repo = Repository.open(process.cwd());
+
+// 1. Resolve commit SHA from a branch or ref
+const mainCommitId = repo.revParseSingle("main");
+console.log(`Latest commit on main: ${mainCommitId}`);
+
+// 2. Resolve a specific file entry (ReadMe.md) from the "main" branch or SHA
+const readmeBlobId = repo.revParseSingle("main:ReadMe.md");
+const readmeBlob = repo.findBlob(readmeBlobId);
+const readmeText = readmeBlob.content().toString("utf-8");
+console.log("ReadMe.md from main:\n", readmeText);
+
+// 3. Resolve a file entry at a specific commit SHA
+const specificSha = "45c58a7a137f5d8b8c082fa75aa5b8644fd18dd6";
+const manifestBlobId = repo.revParseSingle(`${specificSha}:repository.manifest.yml`);
+const manifestContent = repo.findBlob(manifestBlobId).content().toString("utf-8");
+console.log("Manifest at SHA:\n", manifestContent);
+```
+
+---
+
+### 3.3 Reading Git Logs (`repo.log()`)
 
 `Repository.prototype.log(rev?, limit?, firstParent?)` retrieves commit summaries in reverse-chronological order without needing manual per-commit round-trips.
 
