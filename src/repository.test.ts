@@ -283,6 +283,24 @@ describe("Repository revisions & log reading examples", () => {
     }
   });
 
+  test("get file (e.g. ReadMe.md or repository.manifest.yml) from a specific revision or SHA", () => {
+    // 1. Resolve revision spec (e.g. "HEAD" or SHA)
+    const commitId = repo.revParseSingle("HEAD");
+    const commit = repo.findCommit(commitId);
+
+    // 2. Inspect tree and retrieve file entry
+    const tree = repo.findTree(commit.treeId);
+    const entry = tree.entry("ReadMe.md") ?? tree.entry("repository.manifest.yml");
+
+    expect(entry).not.toBeNull();
+    if (entry) {
+      // 3. Find blob by OID and read content
+      const blob = repo.findBlob(entry.id);
+      const content = blob.content().toString("utf-8");
+      expect(content.length).toBeGreaterThan(0);
+    }
+  });
+
   test("diffTreeToTree diffs two trees and against empty", () => {
     const head = repo.findCommit(repo.headId());
     const changes = repo.diffTreeToTree(null, head.treeId);

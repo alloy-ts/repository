@@ -72,3 +72,36 @@ When interacting with a `gix::Repository`, operations yield rich handle objects:
 
 1. **Static Factories vs Constructors**: `napi-rs` constructors (`constructor()`) cannot return errors cleanly or perform asynchronous fallible creation. Therefore, `Repository` exposes static factory methods (`Repository.open`, `Repository.init`, `Repository.discover`, `Repository.clone`) that throw idiomatic JS `Error` objects on failure.
 2. **Thread Offloading**: Network operations like `clone()` and `remote.fetch()` run asynchronously on libuv worker threads via `napi::Task` / `AsyncTask`, returning JavaScript `Promise` instances without blocking the main event loop.
+
+---
+
+## 6. Reading Files from Specific Revisions (SHA / Branch / HEAD)
+
+Rather than reading files directly from the working tree directory on disk, `Repository` provides a complete revision API (`revParseSingle`, `findCommit`, `findTree`, `findBlob`) to inspect files as they exist at any commit SHA or branch reference (e.g. `main` or `HEAD`).
+
+### Example: Reading `ReadMe.md` or `repository.manifest.yml` from `main` or SHA in JavaScript
+
+```ts
+import { Repository } from "repository";
+
+const repo = Repository.open(".");
+
+// 1. Resolve any revision spec (branch name like "main", "HEAD", or commit SHA)
+const commitId = repo.revParseSingle("main"); // or repo.revParseSingle("a266f38...")
+
+// 2. Fetch the commit and its root tree
+const commit = repo.findCommit(commitId);
+const tree = repo.findTree(commit.treeId);
+
+// 3. Find the target file entry in the tree
+const entry = tree.entry("ReadMe.md"); // or tree.entry("repository.manifest.yml")
+if (entry) {
+  // 4. Retrieve blob content by OID
+  const blob = repo.findBlob(entry.id);
+  const content = blob.content().toString("utf-8");
+  console.log("File content from revision:", content);
+}
+```
+
+### Manifest Helper (`setup_remotes_from_manifest`)
+In Rust (`src/util.rs`), `setup_remotes_from_manifest(repo, revision_or_path)` accepts a revision string (e.g., `"HEAD"` or `"main"`). If a path on disk exists, it reads from disk; otherwise it resolves the revision using `gix::Repository::rev_parse_single`, extracts `repository.manifest.yml` from the commit tree, and sets up configured remotes.

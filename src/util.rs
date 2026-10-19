@@ -27,26 +27,25 @@ pub struct Manifest {
 
 /// Helper function to parse `repository.manifest.yml` and configure repository remotes using gix.
 ///
-/// It reads the manifest file from `manifest_path` (or `repository.manifest.yml` relative to the repository workDir/gitDir),
-/// parses the remote URLs listed under `remote`, and adds or updates remotes on the gix Repository.
+/// It attempts to load `repository.manifest.yml` using the gix revision API from the provided `revision_or_path`
+/// (defaulting to `"HEAD"`). If `revision_or_path` refers to an existing file on disk, it reads from disk instead.
 #[napi]
 pub fn setup_remotes_from_manifest(
     repo: &Repository,
-    manifest_path: Option<String>,
+    revision_or_path: Option<String>,
 ) -> Result<Vec<String>> {
-    let repo_dir = repo.work_dir().unwrap_or_else(|| repo.git_dir());
-    let path_str = manifest_path.unwrap_or_else(|| {
-        Path::new(&repo_dir)
-            .join("repository.manifest.yml")
-            .to_string_lossy()
-            .into_owned()
-    });
+    let spec_or_path = revision_or_path.unwrap_or_else(|| "HEAD".to_string());
+    let path = Path::new(&spec_or_path);
 
-    let content = fs::read_to_string(&path_str)
-        .map_err(|e| err("read_manifest", format!("failed to read {path_str}: {e}")))?;
+    let content = if path.exists() && path.is_file() {
+        fs::read_to_string(path)
+            .map_err(|e| err("read_manifest_file", format!("failed reading {spec_or_path}: {e}")))?
+    } else {
+        read_manifest_from_revision(repo, &spec_or_path)?
+    };
 
     let manifest: Manifest = serde_yaml::from_str(&content)
-        .map_err(|e| err("parse_manifest", format!("failed to parse YAML in {path_str}: {e}")))?;
+        .map_err(|e| err("parse_manifest", format!("failed parsing manifest YAML: {e}")))?;
 
     let remotes = manifest.remote.unwrap_or_default();
     let mut configured_remotes = Vec::new();
@@ -90,6 +89,31 @@ pub fn setup_remotes_from_manifest(
     Ok(configured_remotes)
 }
 
+fn read_manifest_from_revision(repo: &Repository, rev: &str) -> Result<String> {
+    let r = thread_local(&repo.inner);
+    let oid = r
+        .rev_parse_single(rev)
+        .map_err(|e| err("rev_parse_single", format!("invalid revision '{rev}': {e}")))?;
+    let commit = r
+        .find_commit(oid)
+        .map_err(|e| err("find_commit", format!("failed finding commit for '{rev}': {e}")))?;
+    let tree = commit
+        .tree()
+        .map_err(|e| err("commit_tree", format!("failed getting tree for '{rev}': {e}")))?;
+
+    let entry = tree
+        .lookup_entry_by_path("repository.manifest.yml")
+        .map_err(|e| err("lookup_manifest", format!("error looking up manifest in '{rev}': {e}")))?
+        .ok_or_else(|| err("manifest_not_found", format!("repository.manifest.yml not found in '{rev}'")))?;
+
+    let blob = r
+        .find_blob(entry.object_id())
+        .map_err(|e| err("find_blob", format!("failed finding manifest blob in '{rev}': {e}")))?;
+
+    String::from_utf8(blob.data.clone())
+        .map_err(|e| err("utf8_decode", format!("manifest blob is not valid UTF-8: {e}")))
+}
+
 fn derive_remote_name(url: &str) -> String {
     if url.contains("github.com") {
         "github".to_string()
@@ -118,5 +142,12 @@ mod tests {
         let remotes = setup_remotes_from_manifest(&repo, None).expect("setup remotes");
         assert!(!remotes.is_empty());
         assert!(remotes.iter().any(|r| r.contains("github")));
+    }
+
+    #[test]
+    fn test_read_manifest_from_head_revision() {
+        let repo = Repository::open(".".to_string()).expect("open repo");
+        let manifest_content = read_manifest_from_revision(&repo, "HEAD").expect("read manifest from HEAD");
+        assert!(manifest_content.contains("yumin-chen"));
     }
 }
