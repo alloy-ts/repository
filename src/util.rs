@@ -90,6 +90,27 @@ pub fn setup_repository_from_manifest(
     setup_remotes_from_manifest(repo, &manifest)
 }
 
+/// Read and parse `repository.manifest.yml` at a specific revision (e.g. `"main"`, `"HEAD"`, or SHA).
+pub fn read_manifest_at_revision(
+    repo: &gix::Repository,
+    revision: &str,
+    manifest_path: Option<&str>,
+) -> Result<Manifest, String> {
+    let path = manifest_path.unwrap_or("repository.manifest.yml");
+    let spec = format!("{revision}:{path}");
+    let object_id = repo
+        .rev_parse_single(spec.as_str())
+        .map_err(|e| format!("Failed to resolve revision spec '{spec}': {e}"))?;
+    let blob = repo
+        .find_blob(object_id)
+        .map_err(|e| format!("Failed to find blob at '{spec}': {e}"))?;
+    let content = String::from_utf8(blob.data.to_vec())
+        .map_err(|e| format!("Invalid UTF-8 in '{spec}': {e}"))?;
+    let manifest: Manifest = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Failed to parse manifest at '{spec}': {e}"))?;
+    Ok(manifest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +131,13 @@ mod tests {
         assert_eq!(manifest.name.as_deref(), Some("repository"));
         assert_eq!(manifest.owner.as_deref(), Some("yumin-chen"));
         assert!(!manifest.remote.is_empty());
+    }
+
+    #[test]
+    fn test_read_manifest_at_revision() {
+        let repo = gix::open(".").unwrap();
+        let manifest = read_manifest_at_revision(&repo, "HEAD", None).unwrap();
+        assert_eq!(manifest.name.as_deref(), Some("repository"));
     }
 
     #[test]

@@ -148,6 +148,31 @@ impl Repository {
         Ok(id.to_string())
     }
 
+    /// The tree object id `HEAD` points to.
+    #[napi]
+    pub fn head_tree_id(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        Ok(id.to_string())
+    }
+
+    /// The reference `HEAD` points to (or `null` if detached/unborn).
+    #[napi]
+    pub fn head_ref(&self) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.head_ref().map_err(|e| err("head_ref", e))? {
+            Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The tree object `HEAD` points to.
+    #[napi]
+    pub fn head_tree(&self) -> Result<Tree> {
+        let id = self.head_tree_id()?;
+        build_tree(&self.inner, parse_oid(&id)?)
+    }
+
     /// The symbolic referent name of `HEAD`, if it is not detached.
     #[napi]
     pub fn head_name(&self) -> Result<Option<String>> {
@@ -339,6 +364,38 @@ impl Repository {
         Ok(build_remote(&self.inner, remote))
     }
 
+    /// Create an in-memory (anonymous) remote pointing at `url`.
+    #[napi]
+    pub fn remote_at(&self, url: String) -> Result<Remote> {
+        let r = thread_local(&self.inner);
+        let remote = r.remote_at(url.as_str()).map_err(|e| err("remote_at", e))?;
+        Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Create a named remote with `name` and `url` in the repository configuration.
+    #[napi]
+    pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
+        let r = thread_local(&self.inner);
+        let config_path = r.git_dir().join("config");
+        let mut config_file = gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
+            .unwrap_or_default();
+        let mut remote = r.remote_at(url.as_str()).map_err(|e| err("remote_at", e))?;
+        remote
+            .save_as_to(name.as_str(), &mut config_file)
+            .map_err(|e| err("save_remote", e))?;
+        let mut out = std::fs::File::create(&config_path)
+            .map_err(|e| napi::Error::from_reason(format!("create config file: {e}")))?;
+        config_file
+            .write_to(&mut out)
+            .map_err(|e| napi::Error::from_reason(format!("write config file: {e}")))?;
+
+        Ok(Remote {
+            name: Some(name),
+            url: Some(url),
+            repo: Arc::clone(&self.inner),
+        })
+    }
+
     /// Read `repository.manifest.yml` and set up remotes for this repository.
     #[napi]
     pub fn setup_remotes_from_manifest(&self, manifest_path: Option<String>) -> Result<Vec<String>> {
@@ -417,6 +474,33 @@ impl Repository {
     pub fn config_string(&self, key: String) -> Option<String> {
         let r = thread_local(&self.inner);
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
+    }
+
+    /// Flattened list of all configuration entries in the repository.
+    #[napi]
+    pub fn config_entries(&self) -> Result<Vec<ConfigEntry>> {
+        let r = thread_local(&self.inner);
+        let snap = r.config_snapshot();
+        let mut out = Vec::new();
+        for section in snap.sections() {
+            let header = section.header();
+            let name = lossy(header.name().as_ref());
+            let sub = header.subsection_name().map(|s| lossy(s.as_ref()));
+            for value_name in section.value_names() {
+                let key_name = lossy(value_name.as_ref());
+                let full_key = match &sub {
+                    Some(s) => format!("{name}.{s}.{key_name}"),
+                    None => format!("{name}.{key_name}"),
+                };
+                for val in section.values(&key_name) {
+                    out.push(ConfigEntry {
+                        key: full_key.clone(),
+                        value: lossy(val.as_ref()),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The working directory, if this is not a bare repository.
@@ -504,6 +588,28 @@ impl Repository {
         self.rev_parse_single(spec)
     }
 
+    /// Read raw blob content at a specific revision and path (e.g. `"main"`, `"HEAD"`, or SHA, and `"ReadMe.md"`).
+    #[napi]
+    pub fn read_blob_at_revision(&self, revision: String, path: String) -> Result<napi::bindgen_prelude::Buffer> {
+        let r = thread_local(&self.inner);
+        let spec = format!("{revision}:{path}");
+        let object_id = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("rev_parse_single", e))?;
+        let blob = r
+            .find_blob(object_id)
+            .map_err(|e| err("find_blob", e))?;
+        Ok(napi::bindgen_prelude::Buffer::from(blob.data.to_vec()))
+    }
+
+    /// Read text content at a specific revision and path as a UTF-8 string.
+    #[napi]
+    pub fn read_text_at_revision(&self, revision: String, path: String) -> Result<String> {
+        let buf = self.read_blob_at_revision(revision, path)?;
+        String::from_utf8(buf.to_vec())
+            .map_err(|e| napi::Error::from_reason(format!("Invalid UTF-8 content: {e}")))
+    }
+
     /// Walk all reachable commits from the given tip ids (newest first).
     #[napi]
     pub fn rev_walk(&self, tips: Vec<String>) -> Result<Vec<String>> {
@@ -544,6 +650,19 @@ impl Repository {
             .merge_base_octopus(ids)
             .map_err(|e| err("merge_base_octopus", e))?;
         Ok(base.map(|id| id.to_string()))
+    }
+
+    /// Whether `ancestor` is an ancestor commit of `descendant`.
+    #[napi]
+    pub fn is_ancestor(&self, ancestor: String, descendant: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let anc_id = parse_oid(&ancestor)?;
+        let desc_id = parse_oid(&descendant)?;
+        if anc_id == desc_id {
+            return Ok(true);
+        }
+        let base = r.merge_base(anc_id, desc_id).map_err(|e| err("merge_base", e))?;
+        Ok(base.map(|b| b == anc_id).unwrap_or(false))
     }
 
     // ---- log ---------------------------------------------------------------
@@ -659,6 +778,14 @@ impl Repository {
             })
             .collect())
     }
+}
+
+/// A single configuration key-value entry snapshot.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ConfigEntry {
+    pub key: String,
+    pub value: String,
 }
 
 /// A single change produced by [`Repository::diff_tree_to_tree`].

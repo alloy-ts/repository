@@ -24,7 +24,7 @@ pub struct Remote {
     pub name: Option<String>,
     #[napi(readonly)]
     pub url: Option<String>,
-    repo: Arc<gix::ThreadSafeRepository>,
+    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
 }
 
 pub(crate) fn build_remote(repo: &Arc<gix::ThreadSafeRepository>, remote: gix::Remote) -> Remote {

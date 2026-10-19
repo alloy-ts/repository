@@ -337,6 +337,57 @@ describe("Repository revisions", () => {
   });
 });
 
+// --- Wave 1 & Revision Reading ----------------------------------------------
+
+describe("Wave 1 additions & revision reading", () => {
+  test("headTreeId(), headRef(), headTree()", () => {
+    const headTreeId = repo.headTreeId();
+    expect(headTreeId).toMatch(/^[0-9a-f]{40}$/);
+
+    const headRef = repo.headRef();
+    if (headRef) {
+      expect(headRef.name.startsWith("refs/heads/")).toBe(true);
+    }
+
+    const headTree = repo.headTree();
+    expect(headTree.id).toBe(headTreeId);
+  });
+
+  test("readTextAtRevision and readBlobAtRevision", () => {
+    const readme = repo.readTextAtRevision("HEAD", "ReadMe.md");
+    expect(typeof readme).toBe("string");
+    expect(readme.length).toBeGreaterThan(0);
+
+    const blob = repo.readBlobAtRevision("HEAD", "repository.manifest.yml");
+    expect(Buffer.isBuffer(blob)).toBe(true);
+    expect(blob.toString("utf-8")).toContain("name: repository");
+  });
+
+  test("remoteAt() and createRemote()", () => {
+    const anon = repo.remoteAt("https://github.com/yumin-chen/repository");
+    expect(anon.name).toBeNull();
+    expect(anon.url).toBe("https://github.com/yumin-chen/repository");
+
+    const created = repo.createRemote("__test_remote__", "https://example.com/repo.git");
+    expect(created.name).toBe("__test_remote__");
+  });
+
+  test("configEntries()", () => {
+    const entries = repo.configEntries();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const e of entries) {
+      expect(typeof e.key).toBe("string");
+      expect(typeof e.value).toBe("string");
+    }
+  });
+
+  test("isAncestor()", () => {
+    const head = repo.headId();
+    expect(repo.isAncestor(head, head)).toBe(true);
+  });
+});
+
 // --- commit (mutation on a throwaway ref) -----------------------------------
 
 describe("Repository.commit", () => {
