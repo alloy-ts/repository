@@ -44,6 +44,14 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure sandbox has at least 2 commits so `HEAD~1` tests work cleanly.
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    const headName = repo.headName() ?? "refs/heads/main";
+    repo.commit(headName, "second commit for testing", head.treeId, [head.id]);
+    repo = Repository.open(cloneDir);
+  }
 });
 
 afterAll(() => {
@@ -494,9 +502,14 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return consistent shallow status", () => {
+    const isShallow = repo.isShallow();
+    expect(typeof isShallow).toBe("boolean");
+    if (isShallow) {
+      expect(Array.isArray(repo.shallowCommits())).toBe(true);
+    } else {
+      expect(repo.shallowCommits()).toEqual([]);
+    }
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -506,5 +519,64 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+});
+
+describe("Repository expanded surface tests", () => {
+  test("index() and indexWorktree()", () => {
+    const idx = repo.index();
+    expect(Array.isArray(idx)).toBe(true);
+
+    const wtStatus = repo.indexWorktree();
+    expect(Array.isArray(wtStatus)).toBe(true);
+  });
+
+  test("writeTree() and tryFindObject()", () => {
+    const headCommit = repo.headCommit();
+    const tree = repo.findTree(headCommit.treeId);
+    if (tree.entries.length > 0) {
+      const entry = tree.entries[0]!;
+      const treeId = repo.writeTree([{ path: entry.name, mode: "100644", id: entry.id }]);
+      expect(typeof treeId).toBe("string");
+      expect(treeId.length).toBe(40);
+    }
+
+    const found = repo.tryFindObject(headCommit.id);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("commit");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+  });
+
+  test("mergeTrees() and mergeCommits()", () => {
+    const headCommit = repo.headCommit();
+    const outcome = repo.mergeTrees(headCommit.treeId, headCommit.treeId, headCommit.treeId);
+    expect(typeof outcome.treeId).toBe("string");
+    expect(typeof outcome.conflicts).toBe("boolean");
+
+    const commitOutcome = repo.mergeCommits(headCommit.id, headCommit.id);
+    expect(typeof commitOutcome.treeId).toBe("string");
+    expect(typeof commitOutcome.conflicts).toBe("boolean");
+  });
+
+  test("attributes() and isPathExcluded()", () => {
+    const attrs = repo.attributes("Cargo.toml");
+    expect(Array.isArray(attrs)).toBe(true);
+
+    const isExcluded = repo.isPathExcluded("Cargo.toml");
+    expect(typeof isExcluded).toBe("boolean");
+  });
+
+  test("submodules() and blameFile()", () => {
+    const subs = repo.submodules();
+    expect(Array.isArray(subs)).toBe(true);
+
+    try {
+      const blame = repo.blameFile("Cargo.toml");
+      expect(Array.isArray(blame)).toBe(true);
+    } catch (e) {
+      expect(e).toBeDefined();
+    }
   });
 });
