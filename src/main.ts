@@ -71,6 +71,13 @@ export interface ReflogEntry {
   message: string;
 }
 
+export interface IndexEntry {
+  path: string;
+  id: string;
+  mode: string;
+  stage: number;
+}
+
 export type Blob = any;
 export type Commit = any;
 export type GitObject = any;

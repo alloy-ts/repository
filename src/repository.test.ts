@@ -136,6 +136,16 @@ describe("Repository objects", () => {
     expect(remote.url).toBe("https://example.com/test.git");
   });
 
+  test("indexEntries() returns array of staged/tracked index entries", () => {
+    const entries = repo.indexEntries();
+    expect(Array.isArray(entries)).toBe(true);
+    for (const e of entries) {
+      expect(typeof e.path).toBe("string");
+      expect(typeof e.id).toBe("string");
+      expect(typeof e.stage).toBe("number");
+    }
+  });
+
   test("findCommit resolves a real commit and matches headCommit", () => {
     const c = repo.headCommit();
     const again = repo.findCommit(c.id);
