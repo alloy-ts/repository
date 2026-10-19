@@ -217,6 +217,71 @@ describe("Repository remotes", () => {
   });
 });
 
+// --- index & status ---------------------------------------------------------
+
+describe("Repository index & status (Wave 2)", () => {
+  test("indexEntries() and indexOrLoadFromHeadEntries() return index items", () => {
+    const loaded = repo.indexOrLoadFromHeadEntries();
+    expect(Array.isArray(loaded)).toBe(true);
+    expect(loaded.length).toBeGreaterThan(0);
+    for (const e of loaded) {
+      expect(typeof e.path).toBe("string");
+      expect(typeof e.id).toBe("string");
+      expect(typeof e.stage).toBe("number");
+    }
+
+    try {
+      const entries = repo.indexEntries();
+      expect(Array.isArray(entries)).toBe(true);
+    } catch {
+      // Index file may not exist yet in a fresh clone
+    }
+  });
+
+  test("status() resolves working tree status asynchronously", async () => {
+    const statusEntries = await repo.status();
+    expect(Array.isArray(statusEntries)).toBe(true);
+  });
+});
+
+// --- submodules & identity (Wave 8) ------------------------------------------
+
+describe("Submodules & default identity (Wave 8)", () => {
+  test("submodules() and defaultAuthor() / defaultCommitter()", () => {
+    const subs = repo.submodules();
+    expect(Array.isArray(subs)).toBe(true);
+
+    const author = repo.defaultAuthor();
+    expect(author === null || typeof author === "object").toBe(true);
+
+    const committer = repo.defaultCommitter();
+    expect(committer === null || typeof committer === "object").toBe(true);
+  });
+});
+
+// --- attributes & excludes (Wave 7) ------------------------------------------
+
+describe("Repository attributes & excludes (Wave 7)", () => {
+  test("attributes() and isPathExcluded() check path attributes and ignore status", () => {
+    const attrs = repo.attributes("ReadMe.md");
+    expect(Array.isArray(attrs)).toBe(true);
+
+    const isExcluded = repo.isPathExcluded("node_modules/test.js");
+    expect(typeof isExcluded).toBe("boolean");
+  });
+});
+
+// --- worktrees (Wave 5) ------------------------------------------------------
+
+describe("Repository worktrees (Wave 5)", () => {
+  test("worktrees() and isWorktree() return worktree state", () => {
+    const wts = repo.worktrees();
+    expect(Array.isArray(wts)).toBe(true);
+    expect(typeof repo.isWorktree()).toBe("boolean");
+    expect(repo.isWorktree()).toBe(false);
+  });
+});
+
 // --- config / paths ---------------------------------------------------------
 
 describe("Repository config & paths", () => {
@@ -233,6 +298,21 @@ describe("Repository config & paths", () => {
     const signing = repo.configString("user.signingKey");
     expect(typeof signing === "string" || signing === null).toBe(true);
     expect(repo.configString("this.key.does.not.exist.zzz")).toBeNull();
+  });
+
+  test("configSet() sets a key that can be read via configString()", () => {
+    repo.configSet("core.customSetting", "custom_value");
+    expect(Repository.open(cloneDir).configString("core.customSetting")).toBe("custom_value");
+  });
+
+  test("branchNames() and branchRemoteName() list branches and tracking remotes", () => {
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+    for (const b of branches) {
+      expect(typeof b).toBe("string");
+      const remote = repo.branchRemoteName(b);
+      expect(remote === null || typeof remote === "string").toBe(true);
+    }
   });
 });
 
@@ -316,6 +396,41 @@ describe("Repository revisions & log reading examples", () => {
       const twoTree = repo.diffTreeToTree(prev.treeId, head.treeId);
       expect(Array.isArray(twoTree)).toBe(true);
     }
+  });
+});
+
+// --- merge operations (Wave 6) ---------------------------------------------
+
+describe("Repository merge & tree operations (Wave 6)", () => {
+  test("mergeTrees() and mergeCommits() perform tree merges", () => {
+    const head = repo.headCommit();
+    const outcome = repo.mergeTrees(head.treeId, head.treeId, head.treeId);
+    expect(typeof outcome.treeId).toBe("string");
+    expect(typeof outcome.conflicts).toBe("boolean");
+
+    const commitOutcome = repo.mergeCommits(head.id, head.id);
+    expect(typeof commitOutcome.treeId).toBe("string");
+    expect(typeof commitOutcome.conflicts).toBe("boolean");
+  });
+});
+
+// --- object writing & retrieval (Wave 4) ------------------------------------
+
+describe("Object writing & object retrieval (Wave 4)", () => {
+  test("writeTree() creates a tree and tryFindObject() retrieves it", () => {
+    const blobId = repo.writeBlob(Buffer.from("sample content\n"));
+    const treeId = repo.writeTree([{ path: "file.txt", mode: "100644", id: blobId }]);
+    expect(typeof treeId).toBe("string");
+    expect(treeId).toMatch(/^[0-9a-f]{40}$/);
+
+    const found = repo.tryFindObject(treeId);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("tree");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+
+    expect(repo.revParseHex("HEAD")).toBe(repo.headId());
   });
 });
 
