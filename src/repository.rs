@@ -38,7 +38,7 @@ fn move_head_to_commit(r: &gix::Repository, new_commit: gix::ObjectId) -> Result
         name,
         new_commit,
         gix::refs::transaction::PreviousValue::MustExistAndMatch(gix::refs::Target::Object(old)),
-        "checkout/reset/merge".into(),
+        "checkout/reset/merge",
     ))
     .map_err(|e| err("edit_reference", e))?;
     Ok(())
@@ -124,6 +124,15 @@ pub struct SubmoduleInfo {
     pub name: String,
     pub path: String,
     pub url: Option<String>,
+}
+
+/// Header information for an object in the object database (see [`Repository::find_header`]).
+#[napi(object)]
+pub struct ObjectHeader {
+    /// Object kind: `commit`, `tree`, `blob`, or `tag`.
+    pub kind: String,
+    /// Uncompressed size of the object in bytes.
+    pub size: f64,
 }
 
 /// A progress update delivered to JavaScript from a worker thread (e.g. during `clone`/`fetch`/
@@ -416,7 +425,7 @@ impl Task for CheckoutTask {
             .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
             .map_err(|e| err("checkout_options", e))?;
         opts.overwrite_existing = self.force;
-        gix_worktree_state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
+        gix::worktree::state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
             .map_err(|e| err("checkout", e))?;
         index
             .write(gix::index::write::Options::default())
@@ -465,7 +474,7 @@ impl Task for ResetTask {
                     .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
                     .map_err(|e| err("checkout_options", e))?;
                 opts.overwrite_existing = true;
-                gix_worktree_state::checkout(
+                gix::worktree::state::checkout(
                     &mut index,
                     workdir,
                     objects,
@@ -505,22 +514,22 @@ impl Task for MergeTask {
         let ours_id = r.head_id().map_err(|e| err("head_id", e))?.detach();
         let theirs_id = parse_oid(&self.theirs)?;
 
-        let labels = gix_merge::blob::builtin_driver::text::Labels {
+        let labels = gix::merge::blob::builtin_driver::text::Labels {
             ancestor: None,
             current: None,
             other: None,
         };
-        let mut commit_opts = gix_merge::commit::Options::default();
-        commit_opts.tree_merge = r
+        let tree_merge_opts = r
             .tree_merge_options()
             .map_err(|e| err("tree_merge_options", e))?;
+        let commit_opts = gix::merge::commit::Options::from(tree_merge_opts);
 
         let mut outcome = r
             .merge_commits(ours_id, theirs_id, labels, commit_opts)
             .map_err(|e| err("merge_commits", e))?;
         if outcome
             .tree_merge
-            .has_unresolved_conflicts(gix_merge::tree::TreatAsUnresolved::Whatever)
+            .has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::default())
         {
             return Err(err(
                 "merge",
@@ -536,12 +545,16 @@ impl Task for MergeTask {
             .detach();
         let author = r
             .author()
-            .ok_or_else(|| err("author", "no author configured"))??
-            .to_owned();
+            .ok_or_else(|| err("author", "no author configured"))?
+            .map_err(|e| err("author", e))?
+            .to_owned()
+            .map_err(|e| err("author.to_owned", e))?;
         let committer = r
             .committer()
-            .ok_or_else(|| err("committer", "no committer configured"))??
-            .to_owned();
+            .ok_or_else(|| err("committer", "no committer configured"))?
+            .map_err(|e| err("committer", e))?
+            .to_owned()
+            .map_err(|e| err("committer.to_owned", e))?;
         let commit = gix::objs::Commit {
             tree: merged_tree_id,
             parents: vec![ours_id, theirs_id].into(),
@@ -665,7 +678,7 @@ impl Task for CreateWorktreeTask {
                 let reference = r
                     .find_reference(full.as_str())
                     .map_err(|e| err("find_reference", e))?;
-                gix::worktree::add::Head::Attached(reference.name().clone())
+                gix::worktree::add::Head::Attached(reference.name().into())
             }
             // No rev: start the new worktree at the current `HEAD` commit.
             (None, _) => gix::worktree::add::Head::Detached(
@@ -889,14 +902,14 @@ impl Repository {
     /// the worktree). Fails on a detached `HEAD`.
     #[napi]
     pub fn reset(&self, id: String, mode: String) -> Result<AsyncTask<ResetTask>> {
-        let mode = mode.to_lowercase();
-        if !matches!(mode.as_str(), "soft" | "mixed" | "hard") {
-            return Err(err("reset", "mode must be one of soft | mixed | hard"));
+        let mode_lower = mode.to_lowercase();
+        if !matches!(mode_lower.as_str(), "soft" | "mixed" | "hard") {
+            return Err(err("reset", format!("mode must be one of soft | mixed | hard, got {mode}")));
         }
         Ok(AsyncTask::new(ResetTask {
             inner: Arc::clone(&self.inner),
             id,
-            mode,
+            mode: mode_lower,
         }))
     }
 
@@ -1103,6 +1116,37 @@ impl Repository {
             .find_reference(name.as_str())
             .map_err(|e| err("find_reference", e))?;
         build_reference(&self.inner, reference)
+    }
+
+    /// Try to find a single reference by name, returning `null` if missing instead of throwing.
+    #[napi]
+    pub fn try_find_reference(&self, name: String) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.try_find_reference(name.as_str()).map_err(|e| err("try_find_reference", e))? {
+            Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete local branch references matching `names`. Returns the full names of deleted branches.
+    #[napi]
+    pub fn delete_local_branches(&self, names: Vec<String>) -> Result<Vec<String>> {
+        let mut r = thread_local(&self.inner);
+        let branch_names: Vec<gix::refs::FullName> = names
+            .into_iter()
+            .map(|n| {
+                let full = if n.starts_with("refs/heads/") {
+                    n
+                } else {
+                    format!("refs/heads/{n}")
+                };
+                gix::refs::FullName::try_from(full.as_str()).map_err(|e| err("invalid branch name", e))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let deleted = r
+            .delete_local_branches(branch_names)
+            .map_err(|e| err("delete_local_branches", e))?;
+        Ok(deleted.into_iter().map(|fn_ref| fn_ref.to_string()).collect())
     }
 
     /// Create (or, if `force`, overwrite) a reference pointing at `target`.
@@ -1411,6 +1455,29 @@ impl Repository {
     pub fn is_bare(&self) -> bool {
         let r = thread_local(&self.inner);
         r.is_bare()
+    }
+
+    /// Whether this repository is pristine (unmodified since clone/init, or `null` if unknown).
+    #[napi]
+    pub fn is_pristine(&self) -> Option<bool> {
+        let r = thread_local(&self.inner);
+        r.is_pristine()
+    }
+
+    /// Path to the object database directory (`.git/objects`).
+    #[napi]
+    pub fn objects_dir(&self) -> String {
+        self.inner.objects_dir().to_string_lossy().into_owned()
+    }
+
+    /// Normalize a repository-relative path.
+    #[napi]
+    pub fn normalize_path(&self, relative_path: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let normalized = r
+            .normalize_path(relative_path.as_str())
+            .map_err(|e| err("normalize_path", e))?;
+        Ok(normalized.to_string())
     }
 
     /// The repository kind as a string: `Common` (ordinary), `Submodule`, or `LinkedWorkTree`.
@@ -1921,6 +1988,51 @@ impl Repository {
         }
     }
 
+    /// Get object header (kind and uncompressed size) without reading object content.
+    #[napi]
+    pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
+        let r = thread_local(&self.inner);
+        let header = r
+            .find_header(parse_oid(&id)?)
+            .map_err(|e| err("find_header", e))?;
+        Ok(ObjectHeader {
+            kind: format!("{:?}", header.kind()),
+            size: header.size() as f64,
+        })
+    }
+
+    /// Try to get object header, returning `null` if missing.
+    #[napi]
+    pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
+        let r = thread_local(&self.inner);
+        match parse_oid(&id) {
+            Ok(oid) => match r.try_find_header(oid) {
+                Ok(Some(header)) => Ok(Some(ObjectHeader {
+                    kind: format!("{:?}", header.kind()),
+                    size: header.size() as f64,
+                })),
+                _ => Ok(None),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Get an empty tree instance for this repository.
+    #[napi]
+    pub fn empty_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let empty = r.empty_tree();
+        build_tree(&self.inner, empty.id)
+    }
+
+    /// Get an empty blob instance for this repository.
+    #[napi]
+    pub fn empty_blob(&self) -> Result<Blob> {
+        let r = thread_local(&self.inner);
+        let empty = r.empty_blob();
+        Ok(build_blob(&self.inner, empty.id))
+    }
+
     /// The default author signature from config, if set.
     #[napi]
     pub fn default_author(&self) -> Result<Option<Signature>> {
@@ -2157,25 +2269,27 @@ impl Repository {
             Some(s) => to_gix_signature(&s),
             None => r
                 .author()
-                .and_then(|res| res.ok())
-                .and_then(|s| s.to_owned().ok())
                 .ok_or_else(|| {
                     napi::Error::from_reason(
                         "write_commit: no author identity configured, pass `author` explicitly",
                     )
-                })?,
+                })?
+                .map_err(|e| err("author", e))?
+                .to_owned()
+                .map_err(|e| err("author.to_owned", e))?,
         };
         let committer = match committer {
             Some(s) => to_gix_signature(&s),
             None => r
                 .committer()
-                .and_then(|res| res.ok())
-                .and_then(|s| s.to_owned().ok())
                 .ok_or_else(|| {
                     napi::Error::from_reason(
                         "write_commit: no committer identity configured, pass `committer` explicitly",
                     )
-                })?,
+                })?
+                .map_err(|e| err("committer", e))?
+                .to_owned()
+                .map_err(|e| err("committer.to_owned", e))?,
         };
         let commit = gix::objs::Commit {
             tree: parse_oid(&tree)?,

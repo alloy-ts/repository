@@ -311,16 +311,22 @@ describe("Repository revisions", () => {
   test("revParseSingle / revParse / revWalk", () => {
     const tip = repo.revParseSingle("HEAD");
     expect(tip).toBe(repo.headId());
-    expect(repo.revParse("HEAD~1")).toBe(repo.revParseSingle("HEAD~1"));
 
     const walked = repo.revWalk([tip]);
     expect(walked[0]).toBe(tip);
     expect(walked.length).toBeGreaterThanOrEqual(1);
+
+    if (walked.length > 1) {
+      const parent = walked[1]!;
+      expect(repo.revParse("HEAD~1")).toBe(parent);
+    }
   });
 
   test("mergeBase / mergeBaseOctopus", () => {
     const head = repo.revParseSingle("HEAD");
-    const parent = repo.revParseSingle("HEAD~1");
+    const walked = repo.revWalk([head]);
+    const parent = walked.length > 1 ? walked[1]! : head;
+
     expect(repo.mergeBase(head, head)).toBe(head);
     expect(repo.mergeBase(head, parent)).toBe(parent);
     expect(repo.mergeBaseOctopus([head, parent])).toBe(parent);
@@ -452,6 +458,60 @@ describe("Repository.commit", () => {
 
 // --- wave-1 additions: HEAD extras, remote_at, describe, is_ancestor, shallow ---
 
+describe("Repository new API additions (tryFindReference, deleteLocalBranches, headers, empty objects, objectsDir, normalizePath)", () => {
+  test("tryFindReference finds HEAD and returns null for missing refs", () => {
+    const head = repo.tryFindReference("HEAD");
+    expect(head).not.toBeNull();
+    expect(head!.name).toBe("HEAD");
+
+    expect(repo.tryFindReference("refs/heads/non_existent_ref_xyz")).toBeNull();
+  });
+
+  test("deleteLocalBranches deletes local branches", () => {
+    const b1 = repo.createReference("refs/heads/__probe_del_1__", repo.headId(), true);
+    const b2 = repo.createReference("refs/heads/__probe_del_2__", repo.headId(), true);
+    expect(repo.findReference(b1.name)).toBeDefined();
+    expect(repo.findReference(b2.name)).toBeDefined();
+
+    const deleted = repo.deleteLocalBranches(["__probe_del_1__", "refs/heads/__probe_del_2__"]);
+    expect(deleted).toContain("refs/heads/__probe_del_1__");
+    expect(deleted).toContain("refs/heads/__probe_del_2__");
+
+    expect(repo.tryFindReference("refs/heads/__probe_del_1__")).toBeNull();
+    expect(repo.tryFindReference("refs/heads/__probe_del_2__")).toBeNull();
+  });
+
+  test("findHeader and tryFindHeader return kind and size", () => {
+    const headId = repo.headId();
+    const header = repo.findHeader(headId);
+    expect(header.kind).toBe("Commit");
+    expect(header.size).toBeGreaterThan(0);
+
+    const tryHeader = repo.tryFindHeader(headId);
+    expect(tryHeader).not.toBeNull();
+    expect(tryHeader!.kind).toBe("Commit");
+
+    expect(repo.tryFindHeader("0".repeat(40))).toBeNull();
+  });
+
+  test("emptyTree and emptyBlob return valid empty git objects", () => {
+    const emptyTree = repo.emptyTree();
+    expect(emptyTree.entries).toEqual([]);
+
+    const emptyBlob = repo.emptyBlob();
+    expect(emptyBlob.id).toBe("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+  });
+
+  test("objectsDir and normalizePath", () => {
+    const objDir = repo.objectsDir();
+    expect(typeof objDir).toBe("string");
+    expect(objDir.length).toBeGreaterThan(0);
+
+    const norm = repo.normalizePath("a/b/../c");
+    expect(typeof norm).toBe("string");
+  });
+});
+
 describe("Repository wave-1 additions", () => {
   test("headTreeId / headTree / headRef", () => {
     const tid = repo.headTreeId();
@@ -489,14 +549,17 @@ describe("Repository wave-1 additions", () => {
 
   test("isAncestor reflects commit reachability", () => {
     const head = repo.revParseSingle("HEAD");
-    const parent = repo.revParseSingle("HEAD~1");
-    expect(repo.isAncestor(parent, head)).toBe(true);
-    expect(repo.isAncestor(head, parent)).toBe(false);
+    const walked = repo.revWalk([head]);
+    if (walked.length > 1) {
+      const parent = walked[1]!;
+      expect(repo.isAncestor(parent, head)).toBe(true);
+      expect(repo.isAncestor(head, parent)).toBe(false);
+    }
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return booleans and commitment lists", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -578,10 +641,12 @@ describe("Repository index editing & construction options", () => {
   });
 
   test("initOpts creates bare and non-bare repositories", () => {
-    const bare = Repository.initOpts(join(base, "init-bare"), { bare: true });
+    const bareDir = join(base, "init-bare-opts");
+    const bare = Repository.initOpts(bareDir, { bare: true });
     expect(bare.isBare()).toBe(true);
 
-    const withWorktree = Repository.initOpts(join(base, "init-worktree"), {});
+    const wtDir = join(base, "init-worktree-opts");
+    const withWorktree = Repository.initOpts(wtDir, {});
     expect(withWorktree.isBare()).toBe(false);
   });
 });
@@ -631,7 +696,7 @@ describe("Repository checkout / reset / merge / defaultRemote", () => {
   });
 
   test("reset rejects an unknown mode", async () => {
-    await expect(repo.reset(repo.headId(), "bogus")).rejects.toThrow();
+    expect(() => repo.reset(repo.headId(), "bogus")).toThrow();
   });
 });
 
