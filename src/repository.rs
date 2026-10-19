@@ -34,11 +34,12 @@ fn move_head_to_commit(r: &gix::Repository, new_commit: gix::ObjectId) -> Result
         .head_name()
         .map_err(|e| err("head_name", e))?
         .ok_or_else(|| err("head_name", "cannot update a detached HEAD; check out a branch first"))?;
+    let msg: BString = "checkout/reset/merge".into();
     r.edit_reference(gix::refs::transaction::RefEdit::update(
         name,
         new_commit,
         gix::refs::transaction::PreviousValue::MustExistAndMatch(gix::refs::Target::Object(old)),
-        "checkout/reset/merge".into(),
+        msg,
     ))
     .map_err(|e| err("edit_reference", e))?;
     Ok(())
@@ -416,7 +417,7 @@ impl Task for CheckoutTask {
             .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
             .map_err(|e| err("checkout_options", e))?;
         opts.overwrite_existing = self.force;
-        gix_worktree_state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
+        gix::worktree::state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
             .map_err(|e| err("checkout", e))?;
         index
             .write(gix::index::write::Options::default())
@@ -465,7 +466,7 @@ impl Task for ResetTask {
                     .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
                     .map_err(|e| err("checkout_options", e))?;
                 opts.overwrite_existing = true;
-                gix_worktree_state::checkout(
+                gix::worktree::state::checkout(
                     &mut index,
                     workdir,
                     objects,
@@ -505,28 +506,27 @@ impl Task for MergeTask {
         let ours_id = r.head_id().map_err(|e| err("head_id", e))?.detach();
         let theirs_id = parse_oid(&self.theirs)?;
 
-        let labels = gix_merge::blob::builtin_driver::text::Labels {
-            ancestor: None,
-            current: None,
-            other: None,
-        };
-        let mut commit_opts = gix_merge::commit::Options::default();
-        commit_opts.tree_merge = r
-            .tree_merge_options()
-            .map_err(|e| err("tree_merge_options", e))?;
-
         let mut outcome = r
-            .merge_commits(ours_id, theirs_id, labels, commit_opts)
+            .merge_commits(ours_id, theirs_id, Default::default(), Default::default())
             .map_err(|e| err("merge_commits", e))?;
-        if outcome
-            .tree_merge
-            .has_unresolved_conflicts(gix_merge::tree::TreatAsUnresolved::Whatever)
-        {
+        if !outcome.tree_merge.conflicts.is_empty() {
             return Err(err(
                 "merge",
                 "merge produced unresolved conflicts; aborting (no commit written)",
             ));
         }
+        let author = r
+            .author()
+            .ok_or_else(|| err("author", "no author configured"))?
+            .map_err(|e| err("author decode", e))?
+            .to_owned()
+            .map_err(|e| err("author signature", e))?;
+        let committer = r
+            .committer()
+            .ok_or_else(|| err("committer", "no committer configured"))?
+            .map_err(|e| err("committer decode", e))?
+            .to_owned()
+            .map_err(|e| err("committer signature", e))?;
 
         let merged_tree_id = outcome
             .tree_merge
@@ -534,14 +534,6 @@ impl Task for MergeTask {
             .write()
             .map_err(|e| err("tree write", e))?
             .detach();
-        let author = r
-            .author()
-            .ok_or_else(|| err("author", "no author configured"))??
-            .to_owned();
-        let committer = r
-            .committer()
-            .ok_or_else(|| err("committer", "no committer configured"))??
-            .to_owned();
         let commit = gix::objs::Commit {
             tree: merged_tree_id,
             parents: vec![ours_id, theirs_id].into(),
@@ -670,6 +662,62 @@ impl Repository {
             gix::init(path)
         }
         .map_err(|e| err("init", e))?;
+        Ok(Repository {
+            inner: Arc::new(r.into()),
+        })
+    }
+
+    /// Discover a repository by walking up from `path` with explicit options.
+    #[napi]
+    pub fn discover_opts(path: String, options: Option<OpenOptions>) -> Result<Repository> {
+        let mut open_opts = gix::open::Options::default();
+        if let Some(o) = options {
+            open_opts = match o.permissions.as_deref() {
+                Some("isolated") => open_opts.permissions(gix::open::Permissions::isolated()),
+                Some("all") => open_opts.permissions(gix::open::Permissions::all()),
+                Some("secure") | None => open_opts.permissions(gix::open::Permissions::secure()),
+                Some(other) => {
+                    return Err(napi::Error::from_reason(format!(
+                        "discover_opts: unknown permissions {other:?}, expected isolated | secure | all"
+                    )));
+                }
+            };
+            if let Some(v) = o.open_path_as_is {
+                open_opts = open_opts.open_path_as_is(v);
+            }
+            if let Some(v) = o.bail_if_untrusted {
+                open_opts = open_opts.bail_if_untrusted(v);
+            }
+            if let Some(v) = o.strict_config {
+                open_opts = open_opts.strict_config(v);
+            }
+            if let Some(values) = o.config_overrides {
+                open_opts = open_opts.config_overrides(values.iter().map(|s| BString::from(s.as_str())));
+            }
+        }
+        let r = gix::discover_opts(path, Default::default(), open_opts)
+            .map_err(|e| err("discover_opts", e))?;
+        Ok(Repository {
+            inner: Arc::new(r.into()),
+        })
+    }
+
+    /// Discover a repository with environment overrides.
+    #[napi]
+    pub fn discover_with_environment_overrides(path: Option<String>) -> Result<Repository> {
+        let p = path.unwrap_or_else(|| ".".to_string());
+        let r = gix::discover_with_environment_overrides(p)
+            .map_err(|e| err("discover_with_environment_overrides", e))?;
+        Ok(Repository {
+            inner: Arc::new(r.into()),
+        })
+    }
+
+    /// Open a repository with environment overrides.
+    #[napi]
+    pub fn open_with_environment_overrides(path: String) -> Result<Repository> {
+        let r = gix::open_with_environment_overrides(path)
+            .map_err(|e| err("open_with_environment_overrides", e))?;
         Ok(Repository {
             inner: Arc::new(r.into()),
         })
@@ -1000,6 +1048,16 @@ impl Repository {
         let reference = r
             .find_reference(name.as_str())
             .map_err(|e| err("find_reference", e))?;
+        build_reference(&self.inner, reference)
+    }
+
+    /// Find a reference using rev-parse rules (short names like `main` or tags).
+    #[napi]
+    pub fn find_reference_rev_parse(&self, spec: String) -> Result<Reference> {
+        let r = thread_local(&self.inner);
+        let reference = r
+            .find_reference(spec.as_str())
+            .map_err(|e| err("find_reference_rev_parse", e))?;
         build_reference(&self.inner, reference)
     }
 
@@ -1704,6 +1762,29 @@ impl Repository {
             .find_remote(name.as_str())
             .map_err(|e| err("find_remote", e))?;
         Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Reload config, references, and objects caches.
+    #[napi]
+    pub fn reload(&self) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
+    /// Set or clear the in-memory object cache size (in bytes). Pass `null` or 0 to disable.
+    #[napi]
+    pub fn object_cache_size(&self, bytes: Option<f64>) {
+        let mut r = thread_local(&self.inner);
+        let capacity = bytes.map(|b| b as usize).unwrap_or(0);
+        r.object_cache_size(capacity);
+    }
+
+    /// Return the object id of the empty tree (`4b825dc642cb6eb9a060e54bf8d69288fbee4904` for SHA1).
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        let r = thread_local(&self.inner);
+        gix::ObjectId::empty_tree(r.object_hash()).to_string()
     }
 
     /// Set a value (e.g. `user.name`) in the local config file.
