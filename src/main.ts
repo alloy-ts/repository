@@ -64,6 +64,13 @@ export interface RemoteFetchOutcome {
   updatedRefs: Array<string>;
 }
 
+export interface ReflogEntry {
+  previousOid: string;
+  newOid: string;
+  committer: Signature;
+  message: string;
+}
+
 export type Blob = any;
 export type Commit = any;
 export type GitObject = any;
