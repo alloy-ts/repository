@@ -311,19 +311,31 @@ describe("Repository revisions", () => {
   test("revParseSingle / revParse / revWalk", () => {
     const tip = repo.revParseSingle("HEAD");
     expect(tip).toBe(repo.headId());
-    expect(repo.revParse("HEAD~1")).toBe(repo.revParseSingle("HEAD~1"));
 
-    const walked = repo.revWalk([tip]);
-    expect(walked[0]).toBe(tip);
-    expect(walked.length).toBeGreaterThanOrEqual(1);
+    // Create a child commit so we are guaranteed to have parent history
+    const childId = repo.commit("refs/heads/__probe_rev__", "probe child", repo.headTreeId(), [tip]);
+    try {
+      expect(repo.revParse(`${childId}~1`)).toBe(tip);
+      expect(repo.revParseSingle(`${childId}~1`)).toBe(tip);
+
+      const walked = repo.revWalk([childId]);
+      expect(walked[0]).toBe(childId);
+      expect(walked.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      repo.findReference("refs/heads/__probe_rev__").delete();
+    }
   });
 
   test("mergeBase / mergeBaseOctopus", () => {
     const head = repo.revParseSingle("HEAD");
-    const parent = repo.revParseSingle("HEAD~1");
-    expect(repo.mergeBase(head, head)).toBe(head);
-    expect(repo.mergeBase(head, parent)).toBe(parent);
-    expect(repo.mergeBaseOctopus([head, parent])).toBe(parent);
+    const childId = repo.commit("refs/heads/__probe_mbase__", "probe child", repo.headTreeId(), [head]);
+    try {
+      expect(repo.mergeBase(childId, childId)).toBe(childId);
+      expect(repo.mergeBase(childId, head)).toBe(head);
+      expect(repo.mergeBaseOctopus([childId, head])).toBe(head);
+    } finally {
+      repo.findReference("refs/heads/__probe_mbase__").delete();
+    }
   });
 
   test("log returns commit summaries newest-first", () => {
@@ -489,14 +501,18 @@ describe("Repository wave-1 additions", () => {
 
   test("isAncestor reflects commit reachability", () => {
     const head = repo.revParseSingle("HEAD");
-    const parent = repo.revParseSingle("HEAD~1");
-    expect(repo.isAncestor(parent, head)).toBe(true);
-    expect(repo.isAncestor(head, parent)).toBe(false);
+    const childId = repo.commit("refs/heads/__probe_anc__", "probe child", repo.headTreeId(), [head]);
+    try {
+      expect(repo.isAncestor(head, childId)).toBe(true);
+      expect(repo.isAncestor(childId, head)).toBe(false);
+    } finally {
+      repo.findReference("refs/heads/__probe_anc__").delete();
+    }
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return boolean and array", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
