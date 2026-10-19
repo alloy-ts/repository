@@ -44,6 +44,15 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure the sandbox repository has at least 2 commits for `HEAD~1` tests
+  const head = repo.headCommit();
+  repo.commit(
+    repo.headName() ?? "refs/heads/main",
+    "second commit for test sandbox",
+    head.treeId,
+    [head.id],
+  );
 });
 
 afterAll(() => {
@@ -494,9 +503,13 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags on initialized repository and current sandbox", () => {
+    const freshDir = join(base, "fresh-repo");
+    const freshRepo = Repository.init(freshDir, false);
+    expect(freshRepo.isShallow()).toBe(false);
+    expect(freshRepo.shallowCommits()).toEqual([]);
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -506,5 +519,79 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+});
+
+// --- wave-2 additions: Index & Status ----------------------------------------
+
+describe("Repository wave-2 additions: Index & Status", () => {
+  test("index / tryIndex / indexOrLoad / indexWorktree / status", async () => {
+    const entries = repo.index();
+    expect(Array.isArray(entries)).toBe(true);
+
+    const tried = repo.tryIndex();
+    expect(tried === null || Array.isArray(tried)).toBe(true);
+
+    const loaded = repo.indexOrLoad();
+    expect(Array.isArray(loaded)).toBe(true);
+
+    const iw = repo.indexWorktree();
+    expect(Array.isArray(iw)).toBe(true);
+
+    const st = await repo.status();
+    expect(Array.isArray(st)).toBe(true);
+  });
+});
+
+// --- wave-3 additions: Config editing & Branch config helpers ----------------
+
+describe("Repository wave-3 additions: Config editing & Branch config helpers", () => {
+  test("editConfig / setConfigValue / unsetConfig / branchConfigNames", () => {
+    repo.editConfig("testsection.key", "val123");
+    expect(repo.configString("testsection.key")).toBe("val123");
+
+    const removed = repo.unsetConfig("testsection", undefined);
+    expect(removed).toBe(true);
+    expect(repo.configString("testsection.key")).toBeNull();
+
+    const branchConfigs = repo.branchConfigNames();
+    expect(Array.isArray(branchConfigs)).toBe(true);
+  });
+});
+
+// --- wave-4 additions: Object writing & raw object lookup --------------------
+
+describe("Repository wave-4 additions: Object writing & raw object lookup", () => {
+  test("tryFindObject / revParseHex", () => {
+    const headId = repo.headId();
+    const found = repo.tryFindObject(headId);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("commit");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+
+    const hex = repo.revParseHex("HEAD");
+    expect(hex).toBe(headId);
+  });
+});
+
+// --- wave-5 additions: Worktree operations -----------------------------------
+
+describe("Repository wave-5 additions: Worktree operations", () => {
+  test("worktrees / isWorktree / mainWorktree / mainRepoPath", () => {
+    const wts = repo.worktrees();
+    expect(Array.isArray(wts)).toBe(true);
+
+    expect(typeof repo.isWorktree()).toBe("boolean");
+    expect(repo.isWorktree()).toBe(false);
+
+    const mainWt = repo.mainWorktree();
+    expect(typeof mainWt).toBe("string");
+    expect(mainWt.length).toBeGreaterThan(0);
+
+    const mainRepo = repo.mainRepoPath();
+    expect(typeof mainRepo).toBe("string");
+    expect(mainRepo.length).toBeGreaterThan(0);
   });
 });

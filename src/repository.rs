@@ -539,6 +539,26 @@ impl Repository {
         build_object(&self.inner, object)
     }
 
+    /// Try to find an object of any kind by id, returning `null` if not found.
+    #[napi]
+    pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
+        let r = thread_local(&self.inner);
+        let oid = match parse_oid(&id) {
+            Ok(o) => o,
+            Err(_) => return Ok(None),
+        };
+        match r.try_find_object(oid) {
+            Ok(Some(obj)) => Ok(Some(build_object(&self.inner, obj)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Parse a hex string or revision specifier directly to a full hexadecimal object ID string.
+    #[napi]
+    pub fn rev_parse_hex(&self, spec: String) -> Result<String> {
+        self.rev_parse_single(spec)
+    }
+
     /// Whether an object with the given id exists.
     #[napi]
     pub fn object_exists(&self, id: String) -> bool {
@@ -743,10 +763,19 @@ impl Repository {
         Ok(out)
     }
 
+    /// Reload the repository configuration snapshot from disk so subsequent reads see recent writes.
+    #[napi]
+    pub fn reload(&self) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
     /// Read a single config value as a string.
     #[napi]
     pub fn config_string(&self, key: String) -> Option<String> {
-        let r = thread_local(&self.inner);
+        let mut r = thread_local(&self.inner);
+        let _ = r.reload();
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
     }
 
@@ -767,12 +796,9 @@ impl Repository {
     /// Persist a single config value to this repository's local config file (`.git/config`),
     /// creating the section if needed. `key` may include a subsection, e.g. `remote.origin.url`
     /// or `branch.main.remote`.
-    ///
-    /// The write is committed atomically. The in-memory snapshot is *not* updated — call
-    /// [`Repository.reload()`](Repository::reload) or reopen the repository to observe the change.
     #[napi]
     pub fn edit_config(&self, key: String, value: String) -> Result<()> {
-        let r = thread_local(&self.inner);
+        let mut r = thread_local(&self.inner);
         let path = r
             .config_path(gix::config::Source::Local)
             .map_err(|e| err("config_path", e))?;
@@ -782,13 +808,14 @@ impl Repository {
         tx.set_raw_value(key.as_str(), value.as_str())
             .map_err(|e| err("set_raw_value", e))?;
         tx.commit().map_err(|e| err("config.commit", e))?;
+        r.reload().map_err(|e| err("reload", e))?;
         Ok(())
     }
 
     /// The short names of branches that have their own configuration section
     /// (i.e. entries under `branch.<name>.*`), e.g. `["main"]`.
     #[napi]
-    pub fn branch_names(&self) -> Vec<String> {
+    pub fn branch_config_names(&self) -> Vec<String> {
         let r = thread_local(&self.inner);
         r.branch_names().into_iter().map(|s| s.to_string()).collect()
     }
@@ -1126,6 +1153,21 @@ impl Repository {
         Ok(main.path().to_string_lossy().to_string())
     }
 
+    /// Whether this repository is a linked worktree.
+    #[napi]
+    pub fn is_worktree(&self) -> bool {
+        let r = thread_local(&self.inner);
+        matches!(r.kind(), gix::repository::Kind::LinkedWorkTree { .. })
+    }
+
+    /// Path to the main worktree directory or main repository directory.
+    #[napi]
+    pub fn main_worktree(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let main = r.main_repo().map_err(|e| err("main_repo", e))?;
+        Ok(main.path().to_string_lossy().to_string())
+    }
+
     /// Three-way tree merge of `ancestor`, `our`, and `their` (revspecs), writing the result
     /// tree and returning its id. No commit or index update is performed.
     #[napi]
@@ -1221,13 +1263,7 @@ impl Repository {
     /// Set a value (e.g. `user.name`) in the local config file.
     #[napi]
     pub fn set_config_value(&self, key: String, value: String) -> Result<()> {
-        let mut r = thread_local(&self.inner);
-        let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
-        let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
-        let _ = config_file.set_raw_value(key.as_str(), value.as_str());
-        config_file.commit().map_err(|e| err("commit_config", e))?;
-        r.reload().map_err(|e| err("reload", e))?;
-        Ok(())
+        self.edit_config(key, value)
     }
     /// Names of local branches (short form, e.g. `main`).
     #[napi]
@@ -1241,6 +1277,16 @@ impl Repository {
             out.push(lossy(b.name().shorten()));
         }
         Ok(out)
+    }
+
+    /// Try to load the index file, returning `null` if it does not exist.
+    #[napi]
+    pub fn try_index(&self) -> Result<Option<Vec<IndexEntry>>> {
+        let r = thread_local(&self.inner);
+        match r.index_or_empty() {
+            Ok(file) => Ok(Some(build_index_entries(&file)?)),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Load the index, or materialize it from `HEAD` if the index file is missing.
@@ -1282,6 +1328,7 @@ impl Repository {
     /// failure can't leave a truncated config behind.
     #[napi]
     pub fn unset_config(&self, section: String, subsection: Option<String>) -> Result<bool> {
+        let mut r = thread_local(&self.inner);
         let git_dir = self.git_dir();
         let config_path = std::path::Path::new(&git_dir).join("config");
         let mut file = gix::config::File::from_git_dir(git_dir.clone().into())
@@ -1295,6 +1342,7 @@ impl Repository {
                 file.write_to(&mut f).map_err(|e| err("write config", e))?;
             }
             std::fs::rename(&tmp, &config_path).map_err(|e| err("rename config", e))?;
+            r.reload().map_err(|e| err("reload", e))?;
         }
         Ok(removed)
     }
