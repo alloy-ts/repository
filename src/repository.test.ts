@@ -337,6 +337,36 @@ describe("Repository revisions", () => {
   });
 });
 
+// --- Wave 2: Index & Status -------------------------------------------------
+
+describe("Wave 2 Index & Status", () => {
+  test("index() and indexOrLoad() return staged index entries", () => {
+    const cwdRepo = Repository.open(process.cwd());
+    const entries = cwdRepo.index();
+    expect(Array.isArray(entries)).toBe(true);
+    if (entries.length > 0) {
+      const first = entries[0];
+      expect(typeof first.path).toBe("string");
+      expect(typeof first.mode).toBe("string");
+      expect(typeof first.id).toBe("string");
+      expect(typeof first.stage).toBe("number");
+      expect(typeof first.size).toBe("number");
+    }
+
+    const loaded = cwdRepo.indexOrLoad();
+    expect(loaded.length).toBe(entries.length);
+  });
+
+  test("status() returns working tree / index changes asynchronously", async () => {
+    const statusEntries = await repo.status();
+    expect(Array.isArray(statusEntries)).toBe(true);
+    for (const s of statusEntries) {
+      expect(typeof s.path).toBe("string");
+      expect(typeof s.status).toBe("string");
+    }
+  });
+});
+
 // --- Wave 1 & Revision Reading ----------------------------------------------
 
 describe("Wave 1 additions & revision reading", () => {

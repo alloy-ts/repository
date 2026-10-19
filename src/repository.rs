@@ -20,6 +20,37 @@ fn lossy(b: &[u8]) -> String {
 }
 
 /// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
+/// Blocking status work, executed on the libuv thread pool by [`AsyncTask`].
+pub struct StatusTask {
+    repo: Arc<gix::ThreadSafeRepository>,
+}
+
+impl Task for StatusTask {
+    type Output = Vec<StatusEntry>;
+    type JsValue = Vec<StatusEntry>;
+
+    fn compute(&mut self) -> Result<Vec<StatusEntry>> {
+        let r = thread_local(&self.repo);
+        let platform = r.status(gix::progress::Discard).map_err(|e| err("status", e))?;
+        let iter = platform.into_iter(Vec::<gix::bstr::BString>::new()).map_err(|e| err("status iter", e))?;
+        let mut out = Vec::new();
+        for item in iter {
+            let item = item.map_err(|e| err("status item", e))?;
+            let path = lossy(item.location().as_ref());
+            let status = match &item {
+                gix::status::Item::IndexWorktree(_) => "IndexWorktree".to_string(),
+                gix::status::Item::TreeIndex(_) => "TreeIndex".to_string(),
+            };
+            out.push(StatusEntry { path, status });
+        }
+        Ok(out)
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Vec<StatusEntry>) -> Result<Vec<StatusEntry>> {
+        Ok(output)
+    }
+}
+
 pub struct CloneTask {
     url: String,
     path: String,
@@ -467,6 +498,41 @@ impl Repository {
         }
     }
 
+    // ---- index & status ---------------------------------------------------
+
+    /// Read all entries in the repository index.
+    #[napi]
+    pub fn index(&self) -> Result<Vec<IndexEntry>> {
+        let r = thread_local(&self.inner);
+        let idx = r.index_or_empty().map_err(|e| err("index", e))?;
+        let mut out = Vec::new();
+        for entry in idx.entries() {
+            let path = lossy(entry.path(&idx).as_ref());
+            out.push(IndexEntry {
+                path,
+                mode: format!("{:?}", entry.mode),
+                id: entry.id.to_string(),
+                stage: entry.stage() as i32,
+                size: entry.stat.size,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Read or load the index file.
+    #[napi]
+    pub fn index_or_load(&self) -> Result<Vec<IndexEntry>> {
+        self.index()
+    }
+
+    /// Obtain the repository status asynchronously (`Promise<Vec<StatusEntry>>`).
+    #[napi(ts_return_type = "Promise<Vec<StatusEntry>>")]
+    pub fn status(&self) -> Result<AsyncTask<StatusTask>> {
+        Ok(AsyncTask::new(StatusTask {
+            repo: Arc::clone(&self.inner),
+        }))
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// Read a single config value as a string.
@@ -778,6 +844,25 @@ impl Repository {
             })
             .collect())
     }
+}
+
+/// An entry in the git index (staging area).
+#[derive(Clone)]
+#[napi(object)]
+pub struct IndexEntry {
+    pub path: String,
+    pub mode: String,
+    pub id: String,
+    pub stage: i32,
+    pub size: u32,
+}
+
+/// A status change entry between working tree, index, or HEAD.
+#[derive(Clone)]
+#[napi(object)]
+pub struct StatusEntry {
+    pub path: String,
+    pub status: String,
 }
 
 /// A single configuration key-value entry snapshot.
