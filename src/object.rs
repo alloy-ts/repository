@@ -65,6 +65,18 @@ fn bstr_to_string(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// A decoded commit payload.
+#[derive(Clone)]
+#[napi(object)]
+pub struct DecodedCommit {
+    pub id: String,
+    pub message: String,
+    pub tree_id: String,
+    pub parent_ids: Vec<String>,
+    pub author: Signature,
+    pub committer: Signature,
+}
+
 /// A decoded commit object, holding owned data plus a back-link to its repository.
 #[napi]
 pub struct Commit {
@@ -106,6 +118,19 @@ impl Commit {
             out.push(build_commit(&self.repo, commit)?);
         }
         Ok(out)
+    }
+
+    /// Return the decoded commit payload.
+    #[napi]
+    pub fn decode(&self) -> DecodedCommit {
+        DecodedCommit {
+            id: self.id.clone(),
+            message: self.message.clone(),
+            tree_id: self.tree_id.clone(),
+            parent_ids: self.parent_ids.clone(),
+            author: self.author.clone(),
+            committer: self.committer.clone(),
+        }
     }
 
     /// The tree object this commit points to.

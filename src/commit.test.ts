@@ -34,6 +34,17 @@ const canSign = signerAvailable();
 
 // --- verifying signatures -------------------------------------------------
 
+test("decode() returns decoded commit payload", () => {
+  const commit = headCommit();
+  const decoded = commit.decode();
+  expect(decoded.id).toBe(commit.id);
+  expect(decoded.message).toBe(commit.message);
+  expect(decoded.treeId).toBe(commit.treeId);
+  expect(Array.isArray(decoded.parentIds)).toBe(true);
+  expect(typeof decoded.author.name).toBe("string");
+  expect(typeof decoded.committer.name).toBe("string");
+});
+
 test("verifySignature reports that HEAD carries a signature", () => {
   const v = headCommit().verifySignature();
   expect(v.signed).toBe(true);
