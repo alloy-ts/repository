@@ -11,6 +11,7 @@ use gix::progress::{Count, Id, MessageLevel, NestedProgress, Progress, Step, Ste
 
 use gix::bstr::BString;
 use gix::diff::index::Change as TreeIndexChange;
+use gix::prelude::Write;
 use gix::status::index_worktree::iter::Summary;
 
 use crate::error::{err, parse_oid, thread_local};
@@ -143,7 +144,6 @@ impl Progress for TsfnProgress {
             MessageLevel::Info => "info",
             MessageLevel::Success => "success",
             MessageLevel::Failure => "failure",
-            _ => "info",
         };
         self.emit(Some(message), Some(tag));
     }
@@ -164,6 +164,29 @@ impl NestedProgress for TsfnProgress {
     fn add_child_with_id(&mut self, name: impl Into<String>, _id: Id) -> TsfnProgress {
         self.add_child(name)
     }
+}
+
+/// A tree item input struct for writing custom tree objects via [`Repository::write_tree`].
+#[napi(object)]
+pub struct TreeItem {
+    /// Relative path/filename of the entry inside the tree.
+    pub path: String,
+    /// Mode string, e.g. `"100644"`, `"100755"`, `"040000"`, `"120000"`, `"160000"`.
+    pub mode: String,
+    /// Object ID (hex hash) for the entry.
+    pub id: String,
+}
+
+/// Input parameters for writing raw commit objects via [`Repository::write_commit`].
+#[napi(object)]
+pub struct WriteCommitInput {
+    pub message: String,
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    pub committer_name: Option<String>,
+    pub committer_email: Option<String>,
 }
 
 /// A single change reported by `status()` (working tree vs index, and index vs HEAD).
@@ -536,6 +559,154 @@ impl Repository {
         let id = r
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Try to find an object of any kind, returning `null` if not found instead of throwing.
+    #[napi]
+    pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
+        let r = thread_local(&self.inner);
+        let oid = match parse_oid(&id) {
+            Ok(o) => o,
+            Err(_) => return Ok(None),
+        };
+        match r.try_find_object(oid).map_err(|e| err("try_find_object", e))? {
+            Some(obj) => Ok(Some(build_object(&self.inner, obj)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Parse a hex object ID string into its canonical 40-character (or 64-character) hex representation.
+    #[napi]
+    pub fn rev_parse_hex(&self, spec: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("rev_parse_hex", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write a tree object from a collection of tree entries.
+    #[napi]
+    pub fn write_tree(&self, entries: Vec<TreeItem>) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let mut tree = gix::objs::Tree::empty();
+        for item in entries {
+            let mode = match item.mode.as_str() {
+                "040000" | "Tree" => gix::objs::tree::EntryKind::Tree,
+                "100755" | "BlobExecutable" => gix::objs::tree::EntryKind::BlobExecutable,
+                "120000" | "Link" | "Symlink" => gix::objs::tree::EntryKind::Link,
+                "160000" | "Commit" => gix::objs::tree::EntryKind::Commit,
+                _ => gix::objs::tree::EntryKind::Blob,
+            };
+            let oid = parse_oid(&item.id)?;
+            tree.entries.push(gix::objs::tree::Entry {
+                mode: mode.into(),
+                filename: item.path.into(),
+                oid,
+            });
+        }
+        let id = r.write_object(&tree).map_err(|e| err("write_tree", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write a raw commit object and return its id.
+    #[napi]
+    pub fn write_commit(&self, input: WriteCommitInput) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let tree_id = parse_oid(&input.tree)?;
+        let parent_ids = input
+            .parents
+            .iter()
+            .map(|p| parse_oid(p))
+            .collect::<Result<Vec<_>>>()?;
+
+        let author_sig = match (input.author_name, input.author_email) {
+            (Some(name), Some(email)) => gix::actor::Signature {
+                name: name.into(),
+                email: email.into(),
+                time: gix::date::Time::now_utc(),
+            },
+            _ => match r.author() {
+                Some(Ok(s)) => s.to_owned().map_err(|e| err("author.to_owned", e))?,
+                _ => return Err(napi::Error::from_reason("no author configured")),
+            },
+        };
+
+        let committer_sig = match (input.committer_name, input.committer_email) {
+            (Some(name), Some(email)) => gix::actor::Signature {
+                name: name.into(),
+                email: email.into(),
+                time: gix::date::Time::now_utc(),
+            },
+            _ => match r.committer() {
+                Some(Ok(s)) => s.to_owned().map_err(|e| err("committer.to_owned", e))?,
+                _ => return Err(napi::Error::from_reason("no committer configured")),
+            },
+        };
+
+        let commit_obj = gix::objs::Commit {
+            tree: tree_id,
+            parents: parent_ids.into(),
+            author: author_sig,
+            committer: committer_sig,
+            encoding: None,
+            message: input.message.into(),
+            extra_headers: Vec::new(),
+        };
+
+        let id = r.write_object(&commit_obj).map_err(|e| err("write_commit", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write an annotated tag object and return its id.
+    #[napi]
+    pub fn write_tag(
+        &self,
+        name: String,
+        target: String,
+        target_kind: String,
+        message: String,
+    ) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let target_oid = parse_oid(&target)?;
+        let kind = match target_kind.to_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid object kind: {}", target_kind))),
+        };
+        let tagger = match r.committer() {
+            Some(Ok(s)) => s.to_owned().map_err(|e| err("committer.to_owned", e))?,
+            _ => return Err(napi::Error::from_reason("no tagger configured")),
+        };
+        let tag_obj = gix::objs::Tag {
+            target: target_oid,
+            target_kind: kind,
+            name: name.into(),
+            tagger: Some(tagger),
+            message: message.into(),
+            signature: None,
+        };
+        let id = r.write_object(&tag_obj).map_err(|e| err("write_tag", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write raw object bytes with a specified kind (`commit`, `tree`, `blob`, `tag`).
+    #[napi]
+    pub fn write_object(&self, kind: String, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let k = match kind.to_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid object kind: {}", kind))),
+        };
+        let id = r
+            .write_buf(k, &data)
+            .map_err(|e| err("write_object", e))?;
         Ok(id.to_string())
     }
 
