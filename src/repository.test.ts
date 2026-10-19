@@ -531,7 +531,7 @@ describe("Repository expanded surface tests", () => {
     expect(Array.isArray(wtStatus)).toBe(true);
   });
 
-  test("writeTree() and tryFindObject()", () => {
+  test("writeTree(), writeCommit(), writeTag(), peel(), and tryFindObject()", () => {
     const headCommit = repo.headCommit();
     const tree = repo.findTree(headCommit.treeId);
     if (tree.entries.length > 0) {
@@ -540,6 +540,27 @@ describe("Repository expanded surface tests", () => {
       expect(typeof treeId).toBe("string");
       expect(treeId.length).toBe(40);
     }
+
+    const commitId = repo.writeCommit({
+      tree: headCommit.treeId,
+      parents: [headCommit.id],
+      message: "test write commit",
+    });
+    expect(typeof commitId).toBe("string");
+    expect(commitId.length).toBe(40);
+
+    const tagId = repo.writeTag({
+      target: commitId,
+      targetKind: "commit",
+      name: "v1.0.0-test",
+      message: "test tag message",
+    });
+    expect(typeof tagId).toBe("string");
+    expect(tagId.length).toBe(40);
+
+    const peeled = repo.peel(tagId, "commit");
+    expect(peeled.kind).toBe("commit");
+    expect(peeled.asCommit()?.id).toBe(commitId);
 
     const found = repo.tryFindObject(headCommit.id);
     expect(found).not.toBeNull();

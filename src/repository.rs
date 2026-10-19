@@ -43,6 +43,28 @@ pub struct TreeItemInput {
     pub id: String,
 }
 
+/// Input for constructing a loose commit object via [`Repository::write_commit`].
+#[derive(Clone)]
+#[napi(object)]
+pub struct WriteCommitInput {
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub message: String,
+    pub author: Option<Signature>,
+    pub committer: Option<Signature>,
+}
+
+/// Input for constructing an annotated tag object via [`Repository::write_tag`].
+#[derive(Clone)]
+#[napi(object)]
+pub struct WriteTagInput {
+    pub target: String,
+    pub target_kind: String,
+    pub name: String,
+    pub message: String,
+    pub tagger: Option<Signature>,
+}
+
 /// The result of a merge (see [`Repository::merge_trees`] / [`Repository::merge_commits`]).
 #[derive(Clone)]
 #[napi(object)]
@@ -181,7 +203,6 @@ impl Progress for TsfnProgress {
             MessageLevel::Info => "info",
             MessageLevel::Success => "success",
             MessageLevel::Failure => "failure",
-            _ => "info",
         };
         self.emit(Some(message), Some(tag));
     }
@@ -250,7 +271,7 @@ fn summary_kind(s: Summary) -> String {
 }
 
 /// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
-struct CloneTask {
+pub struct CloneTask {
     url: String,
     path: String,
     bare: bool,
@@ -258,7 +279,7 @@ struct CloneTask {
 }
 
 /// Blocking status walk, executed on the libuv thread pool by [`AsyncTask`].
-struct StatusTask {
+pub struct StatusTask {
     inner: Arc<gix::ThreadSafeRepository>,
     on_progress: Option<Arc<ThreadsafeFunction<ProgressEvent, ()>>>,
 }
@@ -1329,6 +1350,123 @@ impl Repository {
             std::fs::rename(&tmp, &config_path).map_err(|e| err("rename config", e))?;
         }
         Ok(removed)
+    }
+
+    /// Write a loose commit object and return its id (does not move any ref).
+    #[napi]
+    pub fn write_commit(&self, input: WriteCommitInput) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let tree = parse_oid(&input.tree)?;
+        let mut parents = Vec::new();
+        for p in input.parents {
+            parents.push(parse_oid(&p)?);
+        }
+
+        let default_sig = match r.committer() {
+            Some(Ok(s)) => gix::actor::Signature {
+                name: s.name.to_owned(),
+                email: s.email.to_owned(),
+                time: s.time().unwrap_or_else(|_| gix::date::Time::new(0, 0)),
+            },
+            _ => gix::actor::Signature {
+                name: "gitoxide".into(),
+                email: "gitoxide@localhost".into(),
+                time: gix::date::Time::new(0, 0),
+            },
+        };
+
+        let author = match input.author {
+            Some(s) => gix::actor::Signature {
+                name: s.name.into(),
+                email: s.email.into(),
+                time: gix::date::Time::new(s.time, s.timezone_offset),
+            },
+            None => default_sig.clone(),
+        };
+
+        let committer = match input.committer {
+            Some(s) => gix::actor::Signature {
+                name: s.name.into(),
+                email: s.email.into(),
+                time: gix::date::Time::new(s.time, s.timezone_offset),
+            },
+            None => default_sig,
+        };
+
+        let commit = gix::objs::Commit {
+            tree,
+            parents: parents.into(),
+            author,
+            committer,
+            encoding: None,
+            message: input.message.into(),
+            extra_headers: Vec::new(),
+        };
+
+        let oid = r.write_object(&commit).map_err(|e| err("write_commit", e))?;
+        Ok(oid.to_string())
+    }
+
+    /// Write an annotated tag object and return its id (does not move any ref).
+    #[napi]
+    pub fn write_tag(&self, input: WriteTagInput) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let target = parse_oid(&input.target)?;
+        let target_kind = match input.target_kind.to_ascii_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid target kind: {}", input.target_kind))),
+        };
+
+        let tagger = match input.tagger {
+            Some(s) => Some(gix::actor::Signature {
+                name: s.name.into(),
+                email: s.email.into(),
+                time: gix::date::Time::new(s.time, s.timezone_offset),
+            }),
+            None => match r.committer() {
+                Some(Ok(s)) => Some(gix::actor::Signature {
+                    name: s.name.to_owned(),
+                    email: s.email.to_owned(),
+                    time: s.time().unwrap_or_else(|_| gix::date::Time::new(0, 0)),
+                }),
+                _ => None,
+            },
+        };
+
+        let tag = gix::objs::Tag {
+            target,
+            target_kind,
+            name: input.name.into(),
+            tagger,
+            message: input.message.into(),
+            signature: None,
+        };
+
+        let oid = r.write_object(&tag).map_err(|e| err("write_tag", e))?;
+        Ok(oid.to_string())
+    }
+
+    /// Peel an object by id to `target_kind` (`"commit"`, `"tree"`, `"blob"`, or `"tag"`).
+    #[napi]
+    pub fn peel(&self, id: String, target_kind: String) -> Result<GitObject> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let kind = match target_kind.to_ascii_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid target kind: {target_kind}"))),
+        };
+        let obj = r
+            .find_object(oid)
+            .map_err(|e| err("find_object", e))?
+            .peel_to_kind(kind)
+            .map_err(|e| err("peel_to_kind", e))?;
+        build_object(&self.inner, obj)
     }
 
     /// Write a tree object built from `entries` and return its id.

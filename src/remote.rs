@@ -42,7 +42,7 @@ pub(crate) fn build_remote(repo: &Arc<gix::ThreadSafeRepository>, remote: gix::R
 }
 
 /// Blocking fetch work, executed on the libuv thread pool by [`AsyncTask`].
-struct FetchTask {
+pub struct FetchTask {
     repo: Arc<gix::ThreadSafeRepository>,
     name: String,
 }
