@@ -28,7 +28,21 @@ import { Repository, type LogEntry, type Tree, type TreeEntry } from "./main.ts"
  *    - repo.revParseSingle("HEAD:ReadMe.md") -> get blob ID for path at revision
  *    - repo.findBlob(blobId).content()       -> read raw buffer/text content at revision
  *
- * 6. Inspection of Trees and Objects.
+ * 6. Worktree Inspection:
+ *    - repo.worktrees()    -> list worktree information
+ *    - repo.isWorktree()   -> check if repo has working directory
+ *    - repo.mainWorktree() -> get main worktree info
+ *
+ * 7. Mailmap Resolution:
+ *    - repo.mailmapResolve(name, email) -> resolve author/committer via .mailmap
+ *
+ * 8. Submodules & State:
+ *    - repo.submodules() -> list submodules
+ *    - repo.state()      -> get repo operation state
+ *    - repo.committer()  -> get default committer
+ *    - repo.emptyTreeId() -> get empty tree ID
+ *
+ * 9. Inspection of Trees and Objects.
  */
 
 function openRepo(): Repository {
@@ -230,6 +244,159 @@ test("resolve revision for a path and read file content (e.g. ReadMe.md from mai
   const shaSpec = `${headCommit.id}:ReadMe.md`;
   const blobIdFromSha = repo.revParseSingle(shaSpec);
   expect(blobIdFromSha).toBe(blobIdFromSpec);
+});
+
+// --- Wave 4: Object Writing & Raw Finding -------------------------------------
+
+test("Wave 4: writeTree, tryFindObject, tryFindHeader, revParseHex", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-test-wave4-"));
+  try {
+    const repo = Repository.init(tmpDir, false);
+    const blob1 = repo.writeBlob(Buffer.from("file one content"));
+    const blob2 = repo.writeBlob(Buffer.from("file two content"));
+
+    // writeTree
+    const treeId = repo.writeTree([
+      { name: "file1.txt", id: blob1, mode: "100644" },
+      { name: "file2.sh", id: blob2, mode: "100755" },
+    ]);
+    expect(typeof treeId).toBe("string");
+    expect(treeId.length).toBe(40);
+
+    // tryFindObject
+    const obj = repo.tryFindObject(treeId);
+    expect(obj).not.toBeNull();
+    expect(obj!.kind).toBe("tree");
+
+    const nonExistent = repo.tryFindObject("0000000000000000000000000000000000000000");
+    expect(nonExistent).toBeNull();
+
+    // tryFindHeader
+    const header = repo.tryFindHeader(treeId);
+    expect(header).not.toBeNull();
+    expect(header!.kind).toBe("tree");
+    expect(typeof header!.size).toBe("number");
+
+    // revParseHex
+    const commitId = repo.commit("refs/heads/main", "test commit", treeId, []);
+    const parsedHex = repo.revParseHex("refs/heads/main");
+    expect(parsedHex).toBe(commitId);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// --- Wave 3: Config Editing & Branch Helpers --------------------------------
+
+test("Wave 3: setConfigValue, branchNames, branchRemoteName, deleteLocalBranches", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-test-wave3-"));
+  try {
+    const repo = Repository.init(tmpDir, false);
+    const headCommitTree = Repository.open(process.cwd()).headCommit().treeId;
+
+    const commit1 = repo.commit("refs/heads/main", "first commit", headCommitTree, []);
+    repo.createReference("refs/heads/feature", commit1);
+
+    // setConfigValue & configString
+    repo.setConfigValue("custom.setting", "Test Setting");
+    expect(repo.configString("custom.setting")).toBe("Test Setting");
+
+    repo.setConfigValue("branch.main.remote", "origin");
+    expect(repo.branchRemoteName("main")).toBe("origin");
+
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+
+    // deleteLocalBranches
+    const deleted = repo.deleteLocalBranches(["refs/heads/feature"]);
+    expect(deleted).toContain("refs/heads/feature");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// --- Wave 5: Worktrees --------------------------------------------------------
+
+test("Wave 5: worktrees, isWorktree, mainWorktree", () => {
+  const repo = openRepo();
+  expect(repo.isWorktree()).toBe(true);
+
+  const worktrees = repo.worktrees();
+  expect(Array.isArray(worktrees)).toBe(true);
+  expect(worktrees.length).toBeGreaterThan(0);
+
+  const mainWt = repo.mainWorktree();
+  expect(mainWt).not.toBeNull();
+  expect(mainWt!.isMain).toBe(true);
+  expect(typeof mainWt!.gitDir).toBe("string");
+  expect(typeof mainWt!.workDir).toBe("string");
+});
+
+// --- Wave 6: Merge & Rebase Helpers ------------------------------------------
+
+test("Wave 6: mergeBase, mergeBaseOctopus, isAncestor", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-test-wave6-"));
+  try {
+    const repo = Repository.init(tmpDir, false);
+    const treeId = Repository.open(process.cwd()).headCommit().treeId;
+
+    const root = repo.commit("refs/heads/main", "root commit", treeId, []);
+    const b1 = repo.commit("refs/heads/branch1", "branch 1 commit", treeId, [root]);
+    const b2 = repo.commit("refs/heads/branch2", "branch 2 commit", treeId, [root]);
+
+    // mergeBase
+    const base = repo.mergeBase(b1, b2);
+    expect(base).toBe(root);
+
+    // mergeBaseOctopus
+    const octopusBase = repo.mergeBaseOctopus([b1, b2]);
+    expect(octopusBase).toBe(root);
+
+    // isAncestor
+    expect(repo.isAncestor(root, b1)).toBe(true);
+    expect(repo.isAncestor(root, b2)).toBe(true);
+    expect(repo.isAncestor(b1, b2)).toBe(false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// --- Wave 7: Mailmap ----------------------------------------------------------
+
+test("Wave 7: mailmapResolve", () => {
+  const repo = openRepo();
+  const identity = repo.mailmapResolve("Yumin Chen", "yumin@chen.software");
+  expect(identity).toBeDefined();
+  expect(typeof identity.name).toBe("string");
+  expect(typeof identity.email).toBe("string");
+});
+
+// --- Wave 8: Submodules, State, Identity, Options ------------------------------
+
+test("Wave 8: submodules, state, committer, emptyTreeId", () => {
+  const repo = openRepo();
+
+  // submodules
+  const submodules = repo.submodules();
+  expect(Array.isArray(submodules)).toBe(true);
+
+  // state
+  const state = repo.state();
+  expect(typeof state).toBe("string");
+
+  // committer
+  const committer = repo.committer();
+  if (committer !== null) {
+    expect(typeof committer.name).toBe("string");
+    expect(typeof committer.email).toBe("string");
+    expect(typeof committer.timeSeconds).toBe("number");
+  }
+
+  // emptyTreeId
+  const emptyTreeId = repo.emptyTreeId();
+  expect(typeof emptyTreeId).toBe("string");
+  expect(emptyTreeId.length).toBe(40);
+  expect(emptyTreeId).toBe("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
 });
 
 // --- 6. Tree & object inspection ---------------------------------------------

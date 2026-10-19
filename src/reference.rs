@@ -5,7 +5,7 @@ use napi::Result;
 use napi_derive::napi;
 
 use crate::error::{err, thread_local};
-use crate::object::{build_commit, build_tree, Commit, Tree};
+use crate::object::{Commit, Tree, build_commit, build_tree};
 
 fn lossy(b: impl AsRef<[u8]>) -> String {
     String::from_utf8_lossy(b.as_ref()).into_owned()
@@ -146,9 +146,7 @@ impl Head {
     #[napi]
     pub fn tree(&self) -> Result<Tree> {
         let repo = thread_local(&self.repo);
-        let tree_id = repo
-            .head_tree_id()
-            .map_err(|e| err("head_tree_id", e))?;
+        let tree_id = repo.head_tree_id().map_err(|e| err("head_tree_id", e))?;
         build_tree(&self.repo, tree_id)
     }
 
@@ -162,7 +160,9 @@ impl Head {
     #[napi]
     pub fn log(&self) -> Result<Vec<ReflogEntry>> {
         let repo = thread_local(&self.repo);
-        let head_ref = repo.find_reference("HEAD").map_err(|e| err("find_reference", e))?;
+        let head_ref = repo
+            .find_reference("HEAD")
+            .map_err(|e| err("find_reference", e))?;
         let mut platform = head_ref.log_iter();
         let mut entries = Vec::new();
 

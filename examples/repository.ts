@@ -9,7 +9,8 @@ import { Repository } from "../src/main.ts";
  *   3. Reading reflogs
  *   4. Resolving revisions and reading file content at specific revisions (e.g. ReadMe.md from main)
  *   5. Working with commits, trees, blobs, annotated tags, and references
- *   6. Setting up remotes from repository.manifest.yml
+ *   6. Inspecting worktrees and status
+ *   7. Setting up remotes from repository.manifest.yml
  */
 
 async function main() {
@@ -19,6 +20,7 @@ async function main() {
   const repo = Repository.open(process.cwd());
   console.log(`Repository path: ${repo.workDir() ?? repo.gitDir()}`);
   console.log(`Is bare: ${repo.isBare()}`);
+  console.log(`Is dirty: ${repo.isDirty()}`);
   console.log(`Object hash: ${repo.objectHash()}\n`);
 
   // 2. Reading Git Logs
@@ -74,8 +76,18 @@ async function main() {
   }
   console.log();
 
-  // 6. Manifest Remote Setup (if repository.manifest.yml exists)
-  console.log("--- 6. Setting up Remotes from Manifest ---");
+  // 6. Inspecting Worktrees
+  console.log("--- 6. Worktree Inspection ---");
+  console.log(`Is worktree: ${repo.isWorktree()}`);
+  const worktrees = repo.worktrees();
+  console.log(`Total worktrees: ${worktrees.length}`);
+  for (const wt of worktrees) {
+    console.log(`  - Worktree dir: ${wt.workDir} (isMain: ${wt.isMain})`);
+  }
+  console.log();
+
+  // 7. Manifest Remote Setup (if repository.manifest.yml exists)
+  console.log("--- 7. Setting up Remotes from Manifest ---");
   try {
     const remotes = repo.setupRemotesFromManifest();
     console.log("Configured remotes:");

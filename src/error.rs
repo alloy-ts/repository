@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use napi::bindgen_prelude::Error as NapiError;
 use napi::Result;
+use napi::bindgen_prelude::Error as NapiError;
 
 /// Map any displayable gix (or other) error into an `napi::Error` with a context prefix.
 pub(crate) fn err<E: std::fmt::Display>(ctx: &str, e: E) -> NapiError {

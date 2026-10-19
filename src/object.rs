@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use napi::bindgen_prelude::{Buffer, Error as NapiError};
 use napi::Result;
+use napi::bindgen_prelude::{Buffer, Error as NapiError};
 use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
@@ -118,7 +118,10 @@ impl Commit {
         let commit = repo
             .find_commit(parse_oid(&self.id)?)
             .map_err(|e| err("find_commit", e))?;
-        match commit.verify_signature().map_err(|e| err("verify_signature", e))? {
+        match commit
+            .verify_signature()
+            .map_err(|e| err("verify_signature", e))?
+        {
             Some(o) => Ok(SignatureVerification {
                 signed: true,
                 format: Some(format!("{:?}", o.format)),

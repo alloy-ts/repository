@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use napi::Result;
 use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
-use napi::Result;
 use napi_derive::napi;
 
 use crate::error::{err, thread_local};
@@ -55,7 +55,11 @@ impl Task for FetchTask {
         do_fetch(Arc::clone(&self.repo), self.name.clone())
     }
 
-    fn resolve(&mut self, _env: napi::Env, output: RemoteFetchOutcome) -> Result<RemoteFetchOutcome> {
+    fn resolve(
+        &mut self,
+        _env: napi::Env,
+        output: RemoteFetchOutcome,
+    ) -> Result<RemoteFetchOutcome> {
         Ok(output)
     }
 }
@@ -71,7 +75,10 @@ fn do_fetch(repo: Arc<gix::ThreadSafeRepository>, name: String) -> Result<Remote
         .map_err(|e| err("connect", e))?;
     let interrupt = AtomicBool::new(false);
     let prepare = conn
-        .prepare_fetch(gix::progress::Discard, gix::remote::ref_map::Options::default())
+        .prepare_fetch(
+            gix::progress::Discard,
+            gix::remote::ref_map::Options::default(),
+        )
         .map_err(|e| err("prepare_fetch", e))?;
     let outcome = prepare
         .receive(gix::progress::Discard, &interrupt)

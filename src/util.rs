@@ -50,7 +50,9 @@ pub fn parse_manifest(content: &str) -> Manifest {
         if current_section == "config" && trimmed.starts_with('-') {
             let item = trimmed.trim_start_matches('-').trim();
             if let Some((k, v)) = item.split_once(':') {
-                manifest.config.push((k.trim().to_string(), v.trim().to_string()));
+                manifest
+                    .config
+                    .push((k.trim().to_string(), v.trim().to_string()));
             }
         } else if current_section == "remote" && trimmed.starts_with('-') {
             let url = trimmed.trim_start_matches('-').trim();
@@ -92,7 +94,9 @@ pub fn remote_name_from_url(url: &str, is_first: bool) -> String {
         "azure".to_string()
     } else {
         // Fallback: extract domain name or return remote
-        let cleaned = url.trim_start_matches("https://").trim_start_matches("http://");
+        let cleaned = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
         if let Some((domain, _)) = cleaned.split_once('/') {
             let parts: Vec<&str> = domain.split('.').collect();
             if parts.len() >= 2 {
@@ -158,7 +162,9 @@ pub fn setup_repository_remotes(
 
         let fetch_refspec = format!("+refs/heads/*:refs/remotes/{name}/*");
         file.set_raw_value_by(section, sub_bstr, "fetch", fetch_refspec.as_str())
-            .map_err(|e| napi::Error::from_reason(format!("failed to set remote fetch refspec: {e}")))?;
+            .map_err(|e| {
+                napi::Error::from_reason(format!("failed to set remote fetch refspec: {e}"))
+            })?;
 
         configured.push((name, url.clone()));
     }
@@ -166,12 +172,13 @@ pub fn setup_repository_remotes(
     for (key, val) in &manifest.config {
         if let Some((section, value_key)) = key.split_once('.') {
             file.set_raw_value_by(section, None, value_key, val.as_str())
-                .map_err(|e| napi::Error::from_reason(format!("failed to set config {key}: {e}")))?;
+                .map_err(|e| {
+                    napi::Error::from_reason(format!("failed to set config {key}: {e}"))
+                })?;
         }
     }
 
-    file.commit()
-        .map_err(|e| err("config_commit", e))?;
+    file.commit().map_err(|e| err("config_commit", e))?;
 
     Ok(configured)
 }
