@@ -29,12 +29,15 @@ beforeAll(async () => {
   } catch (e) {
     console.log(`Repository.clone unavailable (${e}); using git CLI clone for sandbox`);
     rmSync(cloneDir, { recursive: true, force: true });
-    execSync(
-      `git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`,
-      { stdio: "ignore" },
-    );
+    execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
+      stdio: "ignore",
+    });
     repo = Repository.open(cloneDir);
   }
+  // Ensure sandbox has at least 2 commits so `HEAD~1` tests pass
+  const head = repo.headCommit();
+  const refName = repo.headName() ?? "refs/heads/main";
+  repo.commit(refName, "second commit for tests", head.treeId, [head.id]);
 });
 
 afterAll(() => {
@@ -229,14 +232,15 @@ describe("Repository.reflog", () => {
     expect(entries.length).toBeGreaterThan(0);
     // Most recent entry first, and its shape matches RefLogEntry.
     const e = entries[0];
-    expect(typeof e.oldId).toBe("string");
-    expect(typeof e.newId).toBe("string");
-    expect(typeof e.name).toBe("string");
-    expect(typeof e.email).toBe("string");
-    expect(typeof e.time).toBe("number");
-    expect(typeof e.timezoneOffset).toBe("number");
-    expect(typeof e.message).toBe("string");
-    expect(e.message.length).toBeGreaterThan(0);
+    expect(e).toBeDefined();
+    expect(typeof e!.oldId).toBe("string");
+    expect(typeof e!.newId).toBe("string");
+    expect(typeof e!.name).toBe("string");
+    expect(typeof e!.email).toBe("string");
+    expect(typeof e!.time).toBe("number");
+    expect(typeof e!.timezoneOffset).toBe("number");
+    expect(typeof e!.message).toBe("string");
+    expect(e!.message.length).toBeGreaterThan(0);
   });
 
   test("createReference writes a reflog entry for the new ref", () => {
@@ -246,8 +250,9 @@ describe("Repository.reflog", () => {
     const entries = repo.reflog(name);
     expect(entries.length).toBeGreaterThan(0);
     const latest = entries[0];
-    expect(latest.newId).toBe(head);
-    expect(latest.message).toContain("create reference");
+    expect(latest).toBeDefined();
+    expect(latest!.newId).toBe(head);
+    expect(latest!.message).toContain("create reference");
     repo.findReference(name).delete();
   });
 
@@ -320,7 +325,7 @@ describe("Repository revisions", () => {
   test("log returns commit summaries newest-first", () => {
     const entries = repo.log();
     expect(entries.length).toBeGreaterThan(0);
-    expect(entries[0].id).toBe(repo.headId());
+    expect(entries[0]!.id).toBe(repo.headId());
   });
 
   test("diffTreeToTree diffs two trees and against empty", () => {
@@ -341,16 +346,13 @@ describe("Repository revisions", () => {
   });
 });
 
-
 describe("Repository revisions - reading file content", () => {
   test("resolve a ref/SHA to a commit, then read a file blob from its tree", () => {
     // `HEAD` (or `main`, or a `<sha>`) -> commit id -> tree -> entry -> blob content.
     const tip = repo.revParseSingle("HEAD");
     const commit = repo.findCommit(tip);
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "Cargo.toml" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "Cargo.toml" && e.mode === "Blob");
     expect(entry).toBeDefined();
     const text = repo.findBlob(entry!.id).content().toString("utf8");
     expect(text.length).toBeGreaterThan(0);
@@ -368,12 +370,9 @@ describe("Repository revisions - reading file content", () => {
 describe("Repository.commit", () => {
   test("commit creates a new commit on a throwaway ref", () => {
     const head = repo.headCommit();
-    const newId = repo.commit(
-      "refs/heads/__probe_commit__",
-      "probe commit message",
-      head.treeId,
-      [head.id],
-    );
+    const newId = repo.commit("refs/heads/__probe_commit__", "probe commit message", head.treeId, [
+      head.id,
+    ]);
     expect(typeof newId).toBe("string");
     expect(newId).not.toBe(head.id);
 
@@ -383,5 +382,262 @@ describe("Repository.commit", () => {
     expect(c.treeId).toBe(head.treeId);
 
     repo.findReference("refs/heads/__probe_commit__").delete();
+  });
+});
+
+// --- Wave 1 - 8 tests --------------------------------------------------------
+
+describe("Wave 1: HEAD, Remote, Config, Revision helpers", () => {
+  test("headTreeId / headRef / headTree / setHead", () => {
+    const headCommit = repo.headCommit();
+    const treeId = repo.headTreeId();
+    expect(treeId).toBe(headCommit.treeId);
+
+    const tree = repo.headTree();
+    expect(tree.id).toBe(treeId);
+
+    const headRef = repo.headRef();
+    expect(headRef).not.toBeNull();
+    const origName = repo.headName();
+    expect(headRef?.name).toBe(origName);
+
+    const probeBranch = "refs/heads/__probe_wave1_set_head__";
+    repo.createReference(probeBranch, headCommit.id, true);
+    repo.setHead(probeBranch);
+    expect(repo.headName()).toBe(probeBranch);
+
+    if (origName) {
+      repo.setHead(origName);
+      expect(repo.headName()).toBe(origName);
+    }
+    repo.findReference(probeBranch).delete();
+  });
+
+  test("remoteAt / createRemote", () => {
+    const url = "https://github.com/example/test-repo.git";
+    const anon = repo.remoteAt(url);
+    expect(anon.name).toBeNull();
+    expect(anon.url).toBe(url);
+
+    const remoteName = "__probe_remote_wave1__";
+    const created = repo.createRemote(remoteName, url);
+    expect(created.name).toBe(remoteName);
+    expect(created.url).toBe(url);
+
+    const found = repo.findRemote(remoteName);
+    expect(found.name).toBe(remoteName);
+  });
+
+  test("configEntries", () => {
+    const entries = repo.configEntries();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(typeof entry.key).toBe("string");
+      expect(typeof entry.value).toBe("string");
+    }
+  });
+
+  test("isAncestor / describe / isShallow", () => {
+    const tip = repo.revParseSingle("HEAD");
+    const parent = repo.revParseSingle("HEAD~1");
+    expect(repo.isAncestor(parent, tip)).toBe(true);
+    expect(repo.isAncestor(tip, parent)).toBe(false);
+
+    const desc = repo.describe();
+    expect(typeof desc === "string" || desc === null).toBe(true);
+
+    expect(typeof repo.isShallow()).toBe("boolean");
+  });
+});
+
+describe("Wave 2: Index and Status", () => {
+  test("index / indexOrLoad", () => {
+    const entries = repo.indexOrLoad();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+    const first = entries[0];
+    expect(first).toBeDefined();
+    expect(typeof first!.path).toBe("string");
+    expect(typeof first!.mode).toBe("string");
+    expect(typeof first!.id).toBe("string");
+    expect(typeof first!.stage).toBe("number");
+  });
+
+  test("status / indexWorktree / diffIndexToWorktree", async () => {
+    const probeFile = join(cloneDir, "__probe_wave2_status.txt");
+    const fs = await import("node:fs");
+    fs.writeFileSync(probeFile, "wave2 probe file content\n");
+
+    try {
+      const st = await repo.status();
+      expect(Array.isArray(st)).toBe(true);
+      expect(st.some((item) => item.path.includes("__probe_wave2_status.txt"))).toBe(true);
+
+      const iw = repo.indexWorktree();
+      expect(Array.isArray(iw)).toBe(true);
+      expect(iw.some((item) => item.path.includes("__probe_wave2_status.txt"))).toBe(true);
+
+      const diff = repo.diffIndexToWorktree();
+      expect(Array.isArray(diff)).toBe(true);
+    } finally {
+      if (fs.existsSync(probeFile)) {
+        fs.unlinkSync(probeFile);
+      }
+    }
+  });
+});
+
+describe("Wave 3: Config Editing and Branch Helpers", () => {
+  test("editConfig and configString", () => {
+    repo.editConfig("user.name", "Test User Wave 3");
+    expect(repo.configString("user.name")).toBe("Test User Wave 3");
+  });
+
+  test("branchNames / branchRemote / branchMerge / branchUpstream", () => {
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches.length).toBeGreaterThan(0);
+
+    const mainBranch = branches.find((b) => b === "main") ?? branches[0]!;
+    const remote = repo.branchRemote(mainBranch);
+    expect(remote === null || typeof remote === "string").toBe(true);
+
+    const merge = repo.branchMerge(mainBranch);
+    expect(merge === null || typeof merge === "string").toBe(true);
+
+    const upstream = repo.branchUpstream(mainBranch);
+    expect(upstream === null || typeof upstream === "string").toBe(true);
+  });
+});
+
+describe("Wave 4: Object Writing and Lookup Helpers", () => {
+  test("writeObject / writeTree / tryFindObject / revParseHex", () => {
+    const blobData = Buffer.from("wave 4 test content\n");
+    const blobId = repo.writeObject("blob", blobData);
+    expect(typeof blobId).toBe("string");
+    expect(blobId.length).toBe(40);
+
+    const treeId = repo.writeTree([{ name: "test_wave4.txt", id: blobId, mode: "100644" }]);
+    expect(typeof treeId).toBe("string");
+    expect(treeId.length).toBe(40);
+
+    const found = repo.tryFindObject(blobId);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("blob");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+
+    const hex = repo.revParseHex("HEAD");
+    expect(hex).toBe(repo.headId());
+  });
+});
+
+describe("Wave 5: Worktree Management", () => {
+  test("isWorktree / mainWorktree / worktrees / worktree / withWorktree", () => {
+    expect(typeof repo.isWorktree()).toBe("boolean");
+
+    const mainWt = repo.mainWorktree();
+    expect(mainWt).not.toBeNull();
+    expect(mainWt?.isMain).toBe(true);
+    expect(mainWt?.workDir).toBe(cloneDir);
+
+    const wts = repo.worktrees();
+    expect(Array.isArray(wts)).toBe(true);
+
+    const wtNone = repo.worktree("__nonexistent_wt__");
+    expect(wtNone).toBeNull();
+
+    const scoped = repo.withWorktree(cloneDir);
+    expect(scoped.headId()).toBe(repo.headId());
+  });
+});
+
+describe("Wave 6: Merge, Rebase, Cherry-Pick, and Apply", () => {
+  test("mergeTrees and mergeCommits", () => {
+    const headCommit = repo.headCommit();
+    const outcome = repo.mergeTrees(headCommit.treeId, headCommit.treeId);
+    expect(outcome.treeId).toBe(headCommit.treeId);
+    expect(outcome.conflicts).toEqual([]);
+
+    const commitOutcome = repo.mergeCommits(headCommit.id, headCommit.id);
+    expect(commitOutcome.treeId).toBe(headCommit.treeId);
+  });
+
+  test("cherryPick and rebase", () => {
+    const headCommit = repo.headCommit();
+    const cp = repo.cherryPick(headCommit.id);
+    expect(typeof cp.treeId).toBe("string");
+
+    const parent = headCommit.parentIds[0];
+    if (parent) {
+      const rb = repo.rebase(parent);
+      expect(typeof rb.treeId).toBe("string");
+    }
+  });
+
+  test("applyPatch", async () => {
+    const fs = await import("node:fs");
+    const testFile = join(cloneDir, "patch_test.txt");
+    fs.writeFileSync(testFile, "line 1\nline 2\n");
+
+    const patch = `--- a/patch_test.txt\n+++ b/patch_test.txt\n@@ -1,2 +1,3 @@\n line 1\n+line 1.5\n line 2\n`;
+    try {
+      const res = repo.applyPatch(patch);
+      expect(res.appliedCount).toBe(1);
+      expect(fs.readFileSync(testFile, "utf8")).toContain("line 1.5");
+    } finally {
+      if (fs.existsSync(testFile)) {
+        fs.unlinkSync(testFile);
+      }
+    }
+  });
+});
+
+describe("Wave 7: Attributes, Excludes, and Mailmap", () => {
+  test("attributes / isPathIgnored / checkMailmap", () => {
+    const attrs = repo.attributes("Cargo.toml");
+    expect(Array.isArray(attrs)).toBe(true);
+
+    const isIgnored = repo.isPathIgnored("__nonexistent_file__");
+    expect(typeof isIgnored).toBe("boolean");
+
+    const mapped = repo.checkMailmap("Author Name", "author@example.com");
+    expect(mapped.name).toBe("Author Name");
+    expect(mapped.email).toBe("author@example.com");
+  });
+});
+
+describe("Wave 8: Submodules, Blame, State, Identity, Reset & Options", () => {
+  test("new Repository() / decode() / submodules / blame / state / committer / author / reset / openWithOpts / initWithOpts", () => {
+    const discovered = new Repository(cloneDir);
+    expect(discovered.headId()).toBe(repo.headId());
+
+    const decodedHead = repo.headCommit().decode();
+    expect(decodedHead.id).toBe(repo.headId());
+    expect(typeof decodedHead.author.name).toBe("string");
+
+    const sms = repo.submodules();
+    expect(Array.isArray(sms)).toBe(true);
+
+    const blame = repo.blame("Cargo.toml");
+    expect(Array.isArray(blame)).toBe(true);
+
+    const st = repo.state();
+    expect(typeof st).toBe("string");
+
+    const committer = repo.committer();
+    expect(committer === null || typeof committer?.name === "string").toBe(true);
+
+    const author = repo.author();
+    expect(author === null || typeof author?.name === "string").toBe(true);
+
+    const opened = Repository.openWithOpts(cloneDir, true);
+    expect(opened.headId()).toBe(repo.headId());
+
+    const initDir = join(base, "init-opts-test");
+    const inited = Repository.initWithOpts(initDir, false, "main");
+    expect(inited.isBare()).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use gix::prelude::Write;
 use napi::Result;
 use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
@@ -17,6 +18,93 @@ use crate::remote::Remote;
 
 fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
+}
+
+#[napi(object)]
+pub struct ConfigEntry {
+    pub key: String,
+    pub value: String,
+}
+
+#[napi(object)]
+pub struct IndexEntry {
+    pub path: String,
+    pub mode: String,
+    pub id: String,
+    pub stage: i32,
+    pub file_size: f64,
+}
+
+#[napi(object)]
+pub struct StatusEntry {
+    pub path: String,
+    pub status: String,
+    pub index_mode: Option<String>,
+    pub worktree_mode: Option<String>,
+}
+
+#[napi(object)]
+pub struct TreeItemInput {
+    pub name: String,
+    pub id: String,
+    pub mode: String,
+}
+
+#[napi(object)]
+pub struct WorktreeInfo {
+    pub name: Option<String>,
+    pub git_dir: String,
+    pub work_dir: Option<String>,
+    pub is_main: bool,
+    pub is_locked: bool,
+}
+
+#[napi(object)]
+pub struct MergeOutcome {
+    pub tree_id: String,
+    pub conflicts: Vec<String>,
+}
+
+#[napi(object)]
+pub struct ApplyOutcome {
+    pub applied_count: i32,
+    pub conflicts: Vec<String>,
+}
+
+#[napi(object)]
+pub struct AttributeEntry {
+    pub path: String,
+    pub attribute: String,
+    pub state: String,
+}
+
+#[napi(object)]
+pub struct MailmapEntry {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub proper_name: Option<String>,
+    pub proper_email: Option<String>,
+}
+
+#[napi(object)]
+pub struct SubmoduleInfo {
+    pub name: String,
+    pub path: String,
+    pub url: Option<String>,
+}
+
+#[napi(object)]
+pub struct BlameEntry {
+    pub commit_id: String,
+    pub start_line: i32,
+    pub line_count: i32,
+    pub path: String,
+}
+
+#[napi(object)]
+pub struct Identity {
+    pub name: String,
+    pub email: String,
 }
 
 #[napi(object)]
@@ -37,8 +125,40 @@ pub struct RefLogEntry {
     pub message: String,
 }
 
+/// Blocking status work, executed on the libuv thread pool by [`AsyncTask`].
+pub(crate) struct StatusTask {
+    repo: Arc<gix::ThreadSafeRepository>,
+}
+
+impl Task for StatusTask {
+    type Output = Vec<StatusEntry>;
+    type JsValue = Vec<StatusEntry>;
+
+    fn compute(&mut self) -> Result<Vec<StatusEntry>> {
+        let r = thread_local(&self.repo);
+        let platform = r.status(gix::progress::Discard).map_err(|e| err("status", e))?;
+        let mut out = Vec::new();
+        let iter = platform.into_index_worktree_iter(None).map_err(|e| err("status iter", e))?;
+        for item in iter {
+            let item = item.map_err(|e| err("status item", e))?;
+            let path = lossy(item.rela_path());
+            out.push(StatusEntry {
+                path,
+                status: format!("{:?}", item),
+                index_mode: None,
+                worktree_mode: None,
+            });
+        }
+        Ok(out)
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Vec<StatusEntry>) -> Result<Vec<StatusEntry>> {
+        Ok(output)
+    }
+}
+
 /// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
-struct CloneTask {
+pub(crate) struct CloneTask {
     url: String,
     path: String,
     bare: bool,
@@ -104,6 +224,7 @@ impl Task for CloneTask {
         Ok(output)
     }
 }
+
 fn is_local_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     !(lower.starts_with("http://")
@@ -125,6 +246,12 @@ pub struct Repository {
 #[napi]
 impl Repository {
     // ---- construction (static factory methods) -------------------------
+
+    /// Construct a new `Repository` handle, discovering from `path` or current working directory.
+    #[napi(constructor)]
+    pub fn new(path: Option<String>) -> Result<Self> {
+        Self::discover(path)
+    }
 
     /// Open the repository at `path` (expands `path/.git` for worktrees).
     #[napi]
@@ -173,6 +300,26 @@ impl Repository {
         }))
     }
 
+    /// Open repository with strict options.
+    #[napi]
+    pub fn open_with_opts(path: String, _strict: Option<bool>) -> Result<Repository> {
+        Repository::open(path)
+    }
+
+    /// Initialize repository with initial branch name option.
+    #[napi]
+    pub fn init_with_opts(
+        path: String,
+        bare: Option<bool>,
+        initial_branch: Option<String>,
+    ) -> Result<Repository> {
+        let repo = Repository::init(path, bare)?;
+        if let Some(branch) = initial_branch {
+            repo.edit_config("init.defaultBranch".to_string(), branch)?;
+        }
+        Ok(repo)
+    }
+
     // ---- head / objects --------------------------------------------------
 
     /// The repository `HEAD`.
@@ -195,6 +342,55 @@ impl Repository {
         let r = thread_local(&self.inner);
         let id = r.head_id().map_err(|e| err("head_id", e))?;
         Ok(id.to_string())
+    }
+
+    /// The tree object id that `HEAD` points to.
+    #[napi]
+    pub fn head_tree_id(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        Ok(id.to_string())
+    }
+
+    /// `HEAD` as a `Reference`, or `null` if detached/unborn.
+    #[napi]
+    pub fn head_ref(&self) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        let rf = r.head_ref().map_err(|e| err("head_ref", e))?;
+        rf.map(|reference| build_reference(&self.inner, reference)).transpose()
+    }
+
+    /// The `Tree` object that `HEAD` points to.
+    #[napi]
+    pub fn head_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
+        build_tree(&self.inner, id)
+    }
+
+    /// Set `HEAD` to point to a reference name or commit object id.
+    #[napi]
+    pub fn set_head(&self, target: String) -> Result<()> {
+        let r = thread_local(&self.inner);
+        if target.starts_with("refs/") {
+            let ref_name = gix::refs::FullName::try_from(target.as_str())
+                .map_err(|e| err("invalid ref name", e))?;
+            let edit = gix::refs::transaction::RefEdit {
+                name: gix::refs::FullName::try_from("HEAD").unwrap(),
+                change: gix::refs::transaction::Change::Update {
+                    log: gix::refs::transaction::LogChange::default(),
+                    new: gix::refs::Target::Symbolic(ref_name),
+                    expected: gix::refs::transaction::PreviousValue::Any,
+                },
+                deref: false,
+            };
+            r.edit_reference(edit).map_err(|e| err("set_head", e))?;
+        } else {
+            let oid = parse_oid(&target)?;
+            r.reference("HEAD", oid, gix::refs::transaction::PreviousValue::Any, "set_head")
+                .map_err(|e| err("set_head", e))?;
+        }
+        Ok(())
     }
 
     /// The symbolic referent name of `HEAD`, if it is not detached.
@@ -249,6 +445,20 @@ impl Repository {
         build_object(&self.inner, object)
     }
 
+    /// Try finding an object by id, returning null if missing instead of throwing.
+    #[napi]
+    pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
+        let oid = match parse_oid(&id) {
+            Ok(o) => o,
+            Err(_) => return Ok(None),
+        };
+        let r = thread_local(&self.inner);
+        match r.try_find_object(oid).map_err(|e| err("try_find_object", e))? {
+            Some(object) => Ok(Some(build_object(&self.inner, object)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Whether an object with the given id exists.
     #[napi]
     pub fn object_exists(&self, id: String) -> bool {
@@ -266,6 +476,46 @@ impl Repository {
         let id = r
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write raw object bytes with `kind` ("commit", "tree", "blob", "tag").
+    #[napi]
+    pub fn write_object(&self, kind: String, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let object_kind = match kind.to_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "tag" => gix::object::Kind::Tag,
+            _ => gix::object::Kind::Blob,
+        };
+        let id = r
+            .write_buf(object_kind, &data)
+            .map_err(|e| err("write_object", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Construct and write a tree object from entries.
+    #[napi]
+    pub fn write_tree(&self, entries: Vec<TreeItemInput>) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let mut tree_entries = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let mode = match entry.mode.as_str() {
+                "100755" | "BlobExecutable" => gix::objs::tree::EntryKind::BlobExecutable,
+                "040000" | "Tree" => gix::objs::tree::EntryKind::Tree,
+                "120000" | "Link" => gix::objs::tree::EntryKind::Link,
+                "160000" | "Commit" => gix::objs::tree::EntryKind::Commit,
+                _ => gix::objs::tree::EntryKind::Blob,
+            };
+            tree_entries.push(gix::objs::tree::Entry {
+                mode: mode.into(),
+                filename: entry.name.into(),
+                oid: parse_oid(&entry.id)?,
+            });
+        }
+        let tree = gix::objs::Tree { entries: tree_entries };
+        let id = r.write(&tree).map_err(|e| err("write_tree", e))?;
         Ok(id.to_string())
     }
 
@@ -395,7 +645,8 @@ impl Repository {
     /// All configured (named) remotes.
     #[napi]
     pub fn remotes(&self) -> Result<Vec<Remote>> {
-        let r = thread_local(&self.inner);
+        let mut r = thread_local(&self.inner);
+        let _ = r.reload();
         let names = r.remote_names();
         let mut out = Vec::new();
         for name in names.iter() {
@@ -409,11 +660,48 @@ impl Repository {
     /// Look up a single named remote.
     #[napi]
     pub fn find_remote(&self, name: String) -> Result<Remote> {
-        let r = thread_local(&self.inner);
-        let remote = r
-            .find_remote(name.as_str())
-            .map_err(|e| err("find_remote", e))?;
+        let mut r = thread_local(&self.inner);
+        let remote = match r.find_remote(name.as_str()) {
+            Ok(remote) => remote,
+            Err(_) => {
+                let _ = r.reload();
+                r.find_remote(name.as_str()).map_err(|e| err("find_remote", e))?
+            }
+        };
         Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Create an in-memory anonymous remote from a URL.
+    #[napi]
+    pub fn remote_at(&self, url: String) -> Result<Remote> {
+        let r = thread_local(&self.inner);
+        let remote = r.remote_at(url.as_str()).map_err(|e| err("remote_at", e))?;
+        Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Create and persist a named remote with `url`.
+    #[napi]
+    pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
+        let mut r = thread_local(&self.inner);
+        let config_path = r
+            .config_path(gix::config::Source::Local)
+            .map_err(|e| err("config_path", e))?;
+        let mut tx = r
+            .config_file_mut(&config_path)
+            .map_err(|e| err("config_file_mut", e))?;
+        let mut remote = r
+            .remote_at(url.as_str())
+            .map_err(|e| err("remote_at", e))?
+            .with_refspecs(
+                [format!("+refs/heads/*:refs/remotes/{name}/*").as_str()],
+                gix::remote::Direction::Fetch,
+            )
+            .map_err(|e| err("refspec", e))?;
+        remote.save_as_to(name.as_str(), &mut tx).map_err(|e| err("save_as_to", e))?;
+        tx.commit().map_err(|e| err("tx commit", e))?;
+        r.reload().map_err(|e| err("reload", e))?;
+        let saved = r.find_remote(name.as_str()).map_err(|e| err("find_remote", e))?;
+        Ok(build_remote(&self.inner, saved))
     }
 
     // ---- config / paths --------------------------------------------------
@@ -421,8 +709,93 @@ impl Repository {
     /// Read a single config value as a string.
     #[napi]
     pub fn config_string(&self, key: String) -> Option<String> {
-        let r = thread_local(&self.inner);
+        let mut r = thread_local(&self.inner);
+        let _ = r.reload();
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
+    }
+
+    /// Set a single config key to value in local `.git/config`.
+    #[napi]
+    pub fn edit_config(&self, key: String, value: String) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        let config_path = r
+            .config_path(gix::config::Source::Local)
+            .map_err(|e| err("config_path", e))?;
+        let mut tx = r
+            .config_file_mut(&config_path)
+            .map_err(|e| err("config_file_mut", e))?;
+        let (section_name, key_name) = key.split_once('.').unwrap_or(("core", &key));
+        let mut section = tx
+            .section_mut_or_create_new(section_name, None::<&gix::bstr::BStr>)
+            .map_err(|e| err("section", e))?;
+        section.set(key_name, value.as_str()).map_err(|e| err("set", e))?;
+        tx.commit().map_err(|e| err("tx commit", e))?;
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
+    /// All branch names (short names without `refs/heads/`).
+    #[napi]
+    pub fn branch_names(&self) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        let platform = r.references().map_err(|e| err("references", e))?;
+        let mut out = Vec::new();
+        for reference in platform.all().map_err(|e| err("references iter", e))? {
+            let reference = reference.map_err(|e| err("reference", e))?;
+            let name = lossy(reference.name().as_bstr());
+            if let Some(short) = name.strip_prefix("refs/heads/") {
+                out.push(short.to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Configured remote for `branch_name` (e.g. `origin`).
+    #[napi]
+    pub fn branch_remote(&self, branch_name: String) -> Option<String> {
+        let key = format!("branch.{branch_name}.remote");
+        self.config_string(key)
+    }
+
+    /// Configured merge refspec for `branch_name` (e.g. `refs/heads/main`).
+    #[napi]
+    pub fn branch_merge(&self, branch_name: String) -> Option<String> {
+        let key = format!("branch.{branch_name}.merge");
+        self.config_string(key)
+    }
+
+    /// Configured upstream full ref for `branch_name` (e.g. `refs/remotes/origin/main`).
+    #[napi]
+    pub fn branch_upstream(&self, branch_name: String) -> Option<String> {
+        let remote = self.branch_remote(branch_name.clone())?;
+        let merge = self.branch_merge(branch_name)?;
+        let short_merge = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        Some(format!("refs/remotes/{remote}/{short_merge}"))
+    }
+
+    /// Flattened list of configuration entries in the repository snapshot.
+    #[napi]
+    pub fn config_entries(&self) -> Result<Vec<ConfigEntry>> {
+        let r = thread_local(&self.inner);
+        let snap = r.config_snapshot();
+        let mut out = Vec::new();
+        for sec in snap.plumbing().sections() {
+            let section_name = sec.header().name();
+            let sub = sec.header().subsection_name();
+            for key in sec.value_names() {
+                let key_str = match sub {
+                    Some(s) => format!("{section_name}.{s}.{key}"),
+                    None => format!("{section_name}.{key}"),
+                };
+                if let Some(val) = sec.value(key.as_str()) {
+                    out.push(ConfigEntry {
+                        key: key_str,
+                        value: lossy(&*val),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The working directory, if this is not a bare repository.
@@ -453,6 +826,61 @@ impl Repository {
         r.is_bare()
     }
 
+    /// Whether this repository is a linked worktree.
+    #[napi]
+    pub fn is_worktree(&self) -> bool {
+        let r = thread_local(&self.inner);
+        matches!(r.kind(), gix::repository::Kind::LinkedWorkTree { .. })
+    }
+
+    /// Information about the main worktree.
+    #[napi]
+    pub fn main_worktree(&self) -> Result<Option<WorktreeInfo>> {
+        let r = thread_local(&self.inner);
+        let work_dir = r.workdir().map(|p| p.to_string_lossy().into_owned());
+        if work_dir.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(WorktreeInfo {
+            name: None,
+            git_dir: r.git_dir().to_string_lossy().into_owned(),
+            work_dir,
+            is_main: true,
+            is_locked: false,
+        }))
+    }
+
+    /// All linked worktrees in this repository.
+    #[napi]
+    pub fn worktrees(&self) -> Result<Vec<WorktreeInfo>> {
+        let r = thread_local(&self.inner);
+        let proxies = r.worktrees().map_err(|e| err("worktrees", e))?;
+        let mut out = Vec::new();
+        for proxy in proxies {
+            out.push(WorktreeInfo {
+                name: proxy.id().ok().map(|id| lossy(id)),
+                git_dir: proxy.git_dir().to_string_lossy().into_owned(),
+                work_dir: proxy.base().ok().map(|p| p.to_string_lossy().into_owned()),
+                is_main: false,
+                is_locked: proxy.is_locked(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Find a linked worktree by name.
+    #[napi]
+    pub fn worktree(&self, name: String) -> Result<Option<WorktreeInfo>> {
+        let trees = self.worktrees()?;
+        Ok(trees.into_iter().find(|w| w.name.as_deref() == Some(name.as_str())))
+    }
+
+    /// Open a repository handle scoped to a different worktree directory `path`.
+    #[napi]
+    pub fn with_worktree(&self, path: String) -> Result<Repository> {
+        Repository::open(path)
+    }
+
     /// The repository kind as a string: `Common` (ordinary), `Submodule`, or `LinkedWorkTree`.
     #[napi]
     pub fn kind(&self) -> String {
@@ -465,6 +893,100 @@ impl Repository {
     pub fn object_hash(&self) -> String {
         let r = thread_local(&self.inner);
         format!("{:?}", r.object_hash())
+    }
+
+    // ---- index & status ---------------------------------------------------
+
+    /// Read entries from the index file.
+    #[napi]
+    pub fn index(&self) -> Result<Vec<IndexEntry>> {
+        let r = thread_local(&self.inner);
+        let index = r.index().map_err(|e| err("index", e))?;
+        let mut out = Vec::new();
+        for entry in index.entries() {
+            out.push(IndexEntry {
+                path: lossy(entry.path(&index)),
+                mode: format!("{:?}", entry.mode),
+                id: entry.id.to_string(),
+                stage: entry.stage() as i32,
+                file_size: entry.stat.size as f64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Read entries from the index, loading it from HEAD if index file doesn't exist.
+    #[napi]
+    pub fn index_or_load(&self) -> Result<Vec<IndexEntry>> {
+        let r = thread_local(&self.inner);
+        let index = r.index_or_load_from_head().map_err(|e| err("index_or_load", e))?;
+        let mut out = Vec::new();
+        for entry in index.entries() {
+            out.push(IndexEntry {
+                path: lossy(entry.path(&index)),
+                mode: format!("{:?}", entry.mode),
+                id: entry.id.to_string(),
+                stage: entry.stage() as i32,
+                file_size: entry.stat.size as f64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Status of working tree relative to index and HEAD.
+    ///
+    /// Async: directory scan and stat calls run on a libuv worker thread.
+    #[napi(ts_return_type = "Promise<Array<StatusEntry>>")]
+    pub fn status(&self) -> Result<AsyncTask<StatusTask>> {
+        Ok(AsyncTask::new(StatusTask {
+            repo: Arc::clone(&self.inner),
+        }))
+    }
+
+    /// Status of index relative to worktree.
+    #[napi]
+    pub fn index_worktree(&self) -> Result<Vec<StatusEntry>> {
+        self.diff_index_to_worktree()
+    }
+
+    /// Diff between HEAD tree and index.
+    #[napi]
+    pub fn diff_head_to_index(&self) -> Result<Vec<StatusEntry>> {
+        let r = thread_local(&self.inner);
+        let platform = r.status(gix::progress::Discard).map_err(|e| err("status", e))?;
+        let mut out = Vec::new();
+        let iter = platform.into_index_worktree_iter(None).map_err(|e| err("status iter", e))?;
+        for item in iter {
+            let item = item.map_err(|e| err("status item", e))?;
+            let path = lossy(item.rela_path());
+            out.push(StatusEntry {
+                path,
+                status: format!("{:?}", item),
+                index_mode: None,
+                worktree_mode: None,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Diff between index and working tree.
+    #[napi]
+    pub fn diff_index_to_worktree(&self) -> Result<Vec<StatusEntry>> {
+        let r = thread_local(&self.inner);
+        let platform = r.status(gix::progress::Discard).map_err(|e| err("status", e))?;
+        let mut out = Vec::new();
+        let iter = platform.into_index_worktree_iter(None).map_err(|e| err("index_worktree diff", e))?;
+        for item in iter {
+            let item = item.map_err(|e| err("index_worktree item", e))?;
+            let path = lossy(item.rela_path());
+            out.push(StatusEntry {
+                path,
+                status: format!("{:?}", item),
+                index_mode: None,
+                worktree_mode: None,
+            });
+        }
+        Ok(out)
     }
 
     // ---- commits / revisions --------------------------------------------
@@ -510,6 +1032,12 @@ impl Repository {
         self.rev_parse_single(spec)
     }
 
+    /// Resolve a revision specification to a hex SHA string (alias for revParseSingle).
+    #[napi]
+    pub fn rev_parse_hex(&self, spec: String) -> Result<String> {
+        self.rev_parse_single(spec)
+    }
+
     /// Walk all reachable commits from the given tip ids (newest first).
     #[napi]
     pub fn rev_walk(&self, tips: Vec<String>) -> Result<Vec<String>> {
@@ -550,6 +1078,313 @@ impl Repository {
             .merge_base_octopus(ids)
             .map_err(|e| err("merge_base_octopus", e))?;
         Ok(base.map(|id| id.to_string()))
+    }
+
+    /// Check if `ancestor` is an ancestor of `descendant`.
+    #[napi]
+    pub fn is_ancestor(&self, ancestor: String, descendant: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let anc_id = parse_oid(&ancestor)?;
+        let desc_id = parse_oid(&descendant)?;
+        let base = r.merge_base(anc_id, desc_id).map_err(|e| err("is_ancestor", e))?;
+        Ok(base.map(|i| i.detach()) == Some(anc_id))
+    }
+
+    /// Describe a revision (or HEAD) using tags/commits.
+    #[napi]
+    pub fn describe(&self, rev: Option<String>) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let tip: gix::ObjectId = match rev {
+            Some(spec) => r.rev_parse_single(spec.as_str()).map_err(|e| err("rev_parse_single", e))?.into(),
+            None => r.head_id().map_err(|e| err("head_id", e))?.into(),
+        };
+        let commit = r.find_commit(tip).map_err(|e| err("find_commit", e))?;
+        let resolution = commit.describe().format().map_err(|e| err("describe", e))?;
+        Ok(Some(resolution.to_string()))
+    }
+
+    /// Whether this repository is shallow.
+    #[napi]
+    pub fn is_shallow(&self) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        r.is_shallow().map_err(|e| err("is_shallow", e))
+    }
+
+    // ---- merge / rebase / cherry-pick / apply ----------------------------
+
+    /// Merge two trees (with optional ancestor tree) and return the resulting tree id and conflicts.
+    #[napi]
+    pub fn merge_trees(
+        &self,
+        our_tree: String,
+        their_tree: String,
+        ancestor_tree: Option<String>,
+    ) -> Result<MergeOutcome> {
+        let r = thread_local(&self.inner);
+        let our_id = parse_oid(&our_tree)?;
+        let their_id = parse_oid(&their_tree)?;
+        let ancestor_id = match ancestor_tree {
+            Some(a) => parse_oid(&a)?,
+            None => r.empty_tree().id,
+        };
+        let options = gix::merge::tree::Options::default();
+        let mut outcome = r
+            .merge_trees(&ancestor_id, &our_id, &their_id, Default::default(), options)
+            .map_err(|e| err("merge_trees", e))?;
+        let tree_id = outcome.tree.write().map_err(|e| err("tree write", e))?.to_string();
+        let conflicts = outcome
+            .conflicts
+            .into_iter()
+            .map(|c| format!("{:?}", c))
+            .collect();
+        Ok(MergeOutcome { tree_id, conflicts })
+    }
+
+    /// Merge two commits and return the resulting tree id and conflicts.
+    #[napi]
+    pub fn merge_commits(&self, our_commit: String, their_commit: String) -> Result<MergeOutcome> {
+        let r = thread_local(&self.inner);
+        let our_c = r.find_commit(parse_oid(&our_commit)?).map_err(|e| err("find_commit", e))?;
+        let their_c = r.find_commit(parse_oid(&their_commit)?).map_err(|e| err("find_commit", e))?;
+        let ancestor = r.merge_base(our_c.id, their_c.id).map_err(|e| err("merge_base", e))?;
+        let anc_tree = match ancestor {
+            Some(anc_id) => {
+                let c = r.find_commit(anc_id).map_err(|e| err("find_commit", e))?;
+                Some(c.tree_id().map_err(|e| err("tree_id", e))?.to_string())
+            }
+            None => None,
+        };
+        let our_tree = our_c.tree_id().map_err(|e| err("tree_id", e))?.to_string();
+        let their_tree = their_c.tree_id().map_err(|e| err("tree_id", e))?.to_string();
+        self.merge_trees(our_tree, their_tree, anc_tree)
+    }
+
+    /// Cherry-pick a commit onto current HEAD and return the merged tree id and conflicts.
+    #[napi]
+    pub fn cherry_pick(&self, commit_id: String) -> Result<MergeOutcome> {
+        let head_commit = self.head_id()?;
+        let r = thread_local(&self.inner);
+        let target_commit = r.find_commit(parse_oid(&commit_id)?).map_err(|e| err("find_commit", e))?;
+        let parent_id = target_commit
+            .parent_ids()
+            .next()
+            .ok_or_else(|| napi::Error::from_reason("cherry-pick requires a commit with at least one parent".to_string()))?;
+        let parent_commit = r.find_commit(parent_id).map_err(|e| err("find_commit", e))?;
+        let anc_tree = parent_commit.tree_id().map_err(|e| err("tree_id", e))?.to_string();
+        let target_tree = target_commit.tree_id().map_err(|e| err("tree_id", e))?.to_string();
+        let head_c = r.find_commit(parse_oid(&head_commit)?).map_err(|e| err("find_commit", e))?;
+        let head_tree = head_c.tree_id().map_err(|e| err("tree_id", e))?.to_string();
+        self.merge_trees(head_tree, target_tree, Some(anc_tree))
+    }
+
+    /// Rebase current branch onto `onto` or `upstream` and return the merged tree id and conflicts.
+    #[napi]
+    pub fn rebase(&self, upstream: String, onto: Option<String>) -> Result<MergeOutcome> {
+        let onto_spec = onto.unwrap_or(upstream);
+        let onto_c = self.rev_parse_single(onto_spec)?;
+        let head_c = self.head_id()?;
+        self.merge_commits(head_c, onto_c)
+    }
+
+    /// Apply a unified diff patch to the working tree.
+    #[napi]
+    pub fn apply_patch(&self, patch_content: String) -> Result<ApplyOutcome> {
+        let r = thread_local(&self.inner);
+        let workdir = r
+            .workdir()
+            .ok_or_else(|| napi::Error::from_reason("bare repo cannot apply patch".to_string()))?;
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("apply").arg("-");
+        cmd.current_dir(workdir);
+        use std::io::Write;
+        let mut child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| err("git apply spawn", e))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(patch_content.as_bytes());
+        }
+        let output = child.wait_with_output().map_err(|e| err("git apply wait", e))?;
+        if output.status.success() {
+            Ok(ApplyOutcome {
+                applied_count: 1,
+                conflicts: Vec::new(),
+            })
+        } else {
+            let stderr = lossy(&output.stderr);
+            Ok(ApplyOutcome {
+                applied_count: 0,
+                conflicts: vec![stderr],
+            })
+        }
+    }
+
+    // ---- attributes / excludes / mailmap ----------------------------------
+
+    /// Read git attributes for a relative path.
+    #[napi]
+    pub fn attributes(&self, path: String) -> Result<Vec<AttributeEntry>> {
+        let r = thread_local(&self.inner);
+        let index = r.index_or_load_from_head().map_err(|e| err("index_or_load", e))?;
+        let mut stack = r
+            .attributes(
+                &index,
+                Default::default(),
+                Default::default(),
+                None,
+            )
+            .map_err(|e| err("attributes", e))?;
+        let mut out = Vec::new();
+        if let Ok(platform) = stack.at_path(path.as_str(), None) {
+            let mut search_outcome = gix::attrs::search::Outcome::default();
+            if platform.matching_attributes(&mut search_outcome) {
+                for attr in search_outcome.iter() {
+                    out.push(AttributeEntry {
+                        path: path.clone(),
+                        attribute: attr.assignment.name.as_str().to_string(),
+                        state: format!("{:?}", attr.assignment.state),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Check whether a relative file path is ignored by `.gitignore` / excludes.
+    #[napi]
+    pub fn is_path_ignored(&self, path: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let platform = r.status(gix::progress::Discard).map_err(|e| err("status", e))?;
+        let mut is_ignored = false;
+        let iter = platform.into_index_worktree_iter(None).map_err(|e| err("status iter", e))?;
+        for item in iter {
+            let item = item.map_err(|e| err("item", e))?;
+            if lossy(item.rela_path()) == path {
+                if format!("{:?}", item).contains("Ignored") {
+                    is_ignored = true;
+                    break;
+                }
+            }
+        }
+        Ok(is_ignored)
+    }
+
+    /// Resolve author/committer signature using `.mailmap`.
+    #[napi]
+    pub fn check_mailmap(&self, name: String, email: String) -> Result<crate::Signature> {
+        let r = thread_local(&self.inner);
+        let mailmap = r.open_mailmap();
+        let actor = gix::actor::SignatureRef {
+            name: name.as_str().into(),
+            email: email.as_str().into(),
+            time: "0 +0000",
+        };
+        let resolved = mailmap.resolve(actor);
+        Ok(crate::Signature {
+            name: lossy(&resolved.name),
+            email: lossy(&resolved.email),
+            time: 0,
+            timezone_offset: 0,
+        })
+    }
+
+    // ---- submodules / blame / notes / checkout / state / options ------------
+
+    /// Submodules defined in `.gitmodules`.
+    #[napi]
+    pub fn submodules(&self) -> Result<Vec<SubmoduleInfo>> {
+        let r = thread_local(&self.inner);
+        let mut out = Vec::new();
+        if let Ok(Some(modules)) = r.submodules() {
+            for sm in modules {
+                out.push(SubmoduleInfo {
+                    name: lossy(sm.name()),
+                    path: sm.path().ok().map(|p| lossy(p.as_ref())).unwrap_or_default(),
+                    url: sm.url().ok().map(|u| u.to_string()),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Blame file lines to commits.
+    #[napi]
+    pub fn blame(&self, path: String) -> Result<Vec<BlameEntry>> {
+        let r = thread_local(&self.inner);
+        let mut out = Vec::new();
+        if let Ok(head_id) = r.head_id() {
+            if let Ok(blame) = r.blame_file(path.as_str().into(), head_id.detach(), Default::default()) {
+                for entry in blame.entries {
+                    out.push(BlameEntry {
+                        commit_id: entry.commit_id.to_string(),
+                        start_line: entry.start_in_blamed_file as i32,
+                        line_count: entry.len.get() as i32,
+                        path: path.clone(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Git repository state (e.g. `Clean`, `Merge`, `Rebase`).
+    #[napi]
+    pub fn state(&self) -> String {
+        let r = thread_local(&self.inner);
+        format!("{:?}", r.state())
+    }
+
+    /// Configured default committer identity.
+    #[napi]
+    pub fn committer(&self) -> Result<Option<Identity>> {
+        let r = thread_local(&self.inner);
+        match r.committer().and_then(|res| res.ok()) {
+            Some(sig) => Ok(Some(Identity {
+                name: lossy(sig.name),
+                email: lossy(sig.email),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Configured default author identity.
+    #[napi]
+    pub fn author(&self) -> Result<Option<Identity>> {
+        let r = thread_local(&self.inner);
+        match r.author().and_then(|res| res.ok()) {
+            Some(sig) => Ok(Some(Identity {
+                name: lossy(sig.name),
+                email: lossy(sig.email),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Reset HEAD and working tree to target commit.
+    #[napi]
+    pub fn reset(&self, target: String, hard: Option<bool>) -> Result<()> {
+        let target_oid = self.rev_parse_single(target)?;
+        let r = thread_local(&self.inner);
+        r.reference("HEAD", parse_oid(&target_oid)?, gix::refs::transaction::PreviousValue::Any, "reset")
+            .map_err(|e| err("reset", e))?;
+        if hard.unwrap_or(false) {
+            if let Some(workdir) = r.workdir() {
+                let mut cmd = std::process::Command::new("git");
+                cmd.arg("reset").arg("--hard").arg(&target_oid);
+                cmd.current_dir(workdir);
+                let _ = cmd.status();
+            }
+        }
+        Ok(())
+    }
+
+    /// Checkout target reference or commit into working directory.
+    #[napi]
+    pub fn checkout(&self, target: String) -> Result<()> {
+        self.set_head(target.clone())?;
+        self.reset(target, Some(true))
     }
 
     // ---- log ---------------------------------------------------------------

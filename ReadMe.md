@@ -56,18 +56,18 @@ const outcome = await remote.fetch();
 
 ## API shape
 
-| Category | Example (TypeScript) |
-|----------|----------------------|
-| **Static constructors** | `Repository.open(path)`, `Repository.init(path, bare?)`, `Repository.discover(path?)`, `clone(url, path)` |
-| **HEAD / objects** | `repo.head()`, `repo.headCommit()`, `repo.findCommit(id)`, `repo.findTree`, `repo.findBlob`, `repo.findTag`, `repo.objectExists(id)` |
-| **Write** | `repo.writeBlob(buffer)`, `repo.commit(...)`, `repo.createReference(...)`, `repo.createTag(...)` |
-| **References** | `repo.references()`, `repo.findReference(name)`, `repo.createLightweightTag(...)` |
-| **Tags** | `repo.createTag(name, target, message, force?)` (annotated), `repo.findTag(id)` → `tag.targetKind` (`Commit` / `Tree` / `Blob` / `Tag`) |
-| **Remotes** | `repo.remotes()`, `repo.findRemote(name)` → `remote.fetch()` / `remote.push()` (async) |
-| **Manifest** | `setupRemotes(path?, manifest?)` — configures remotes from `repository.manifest.yml` |
-| **Revisions** | `repo.revParseSingle(spec)`, `repo.revWalk(tips)`, `repo.mergeBase(a, b)`, `repo.log(rev?, limit?, firstParent?)` |
-| **Diff** | `repo.diffTreeToTree(old?, new)` → `Change[]` |
-| **Config / paths** | `repo.configString(key)`, `repo.workDir()`, `repo.gitDir()`, `repo.isBare()`, `repo.kind()` |
+| Category                | Example (TypeScript)                                                                                                                    |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **Static constructors** | `Repository.open(path)`, `Repository.init(path, bare?)`, `Repository.discover(path?)`, `clone(url, path)`                               |
+| **HEAD / objects**      | `repo.head()`, `repo.headCommit()`, `repo.findCommit(id)`, `repo.findTree`, `repo.findBlob`, `repo.findTag`, `repo.objectExists(id)`    |
+| **Write**               | `repo.writeBlob(buffer)`, `repo.commit(...)`, `repo.createReference(...)`, `repo.createTag(...)`                                        |
+| **References**          | `repo.references()`, `repo.findReference(name)`, `repo.createLightweightTag(...)`                                                       |
+| **Tags**                | `repo.createTag(name, target, message, force?)` (annotated), `repo.findTag(id)` → `tag.targetKind` (`Commit` / `Tree` / `Blob` / `Tag`) |
+| **Remotes**             | `repo.remotes()`, `repo.findRemote(name)` → `remote.fetch()` / `remote.push()` (async)                                                  |
+| **Manifest**            | `setupRemotes(path?, manifest?)` — configures remotes from `repository.manifest.yml`                                                    |
+| **Revisions**           | `repo.revParseSingle(spec)`, `repo.revWalk(tips)`, `repo.mergeBase(a, b)`, `repo.log(rev?, limit?, firstParent?)`                       |
+| **Diff**                | `repo.diffTreeToTree(old?, new)` → `Change[]`                                                                                           |
+| **Config / paths**      | `repo.configString(key)`, `repo.workDir()`, `repo.gitDir()`, `repo.isBare()`, `repo.kind()`                                             |
 
 Rich object classes (`Commit`, `Tree`, `Blob`, `Tag`, `Reference`, `Head`, `Remote`) keep a link back to the owning `Repository`, so e.g. `commit.parents()` returns resolved `Commit` instances.
 
