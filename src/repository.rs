@@ -125,6 +125,13 @@ pub struct ProgressEvent {
     pub level: Option<String>,
 }
 
+/// Object header info (kind and size) without decoding object content.
+#[napi(object)]
+pub struct ObjectHeader {
+    pub kind: String,
+    pub size: f64,
+}
+
 /// A single entry in the repository index (staging area).
 #[napi(object)]
 pub struct IndexEntry {
@@ -1789,6 +1796,47 @@ impl Repository {
             .map_err(|e| err("peel", e))?
             .id
             .to_string())
+    }
+
+    /// Obtain information about an object without fully decoding it, or fail if missing.
+    #[napi]
+    pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
+        let r = thread_local(&self.inner);
+        let header = r.find_header(parse_oid(&id)?).map_err(|e| err("find_header", e))?;
+        Ok(ObjectHeader {
+            kind: format!("{:?}", header.kind()),
+            size: header.size() as f64,
+        })
+    }
+
+    /// Obtain information about an object without fully decoding it, or `null` if missing.
+    #[napi]
+    pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
+        let r = thread_local(&self.inner);
+        match parse_oid(&id) {
+            Ok(oid) => match r.try_find_header(oid) {
+                Ok(Some(header)) => Ok(Some(ObjectHeader {
+                    kind: format!("{:?}", header.kind()),
+                    size: header.size() as f64,
+                })),
+                _ => Ok(None),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// The empty tree id for this repository's object hash.
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        let r = thread_local(&self.inner);
+        gix::ObjectId::empty_tree(r.object_hash()).to_string()
+    }
+
+    /// The empty blob id for this repository's object hash.
+    #[napi]
+    pub fn empty_blob_id(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.object_hash().empty_blob().to_string()
     }
 }
 

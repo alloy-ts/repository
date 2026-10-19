@@ -546,6 +546,21 @@ describe("Repository object writing (writeCommit / writeTag / peel)", () => {
   test("peel rejects an unknown object kind", () => {
     expect(() => repo.peel(repo.headId(), "not-a-kind")).toThrow();
   });
+
+  test("findHeader / tryFindHeader / emptyTreeId / emptyBlobId", () => {
+    const headHeader = repo.findHeader(repo.headId());
+    expect(headHeader.kind).toContain("Commit");
+    expect(headHeader.size).toBeGreaterThan(0);
+
+    const tryHeader = repo.tryFindHeader(repo.headId());
+    expect(tryHeader).not.toBeNull();
+    expect(tryHeader?.kind).toContain("Commit");
+
+    expect(repo.tryFindHeader("0".repeat(40))).toBeNull();
+
+    expect(repo.emptyTreeId()).toMatch(/^[0-9a-f]{40}$/);
+    expect(repo.emptyBlobId()).toMatch(/^[0-9a-f]{40}$/);
+  });
 });
 
 describe("Repository index editing & construction options", () => {
