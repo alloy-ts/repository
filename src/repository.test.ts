@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository, type Tree, type TreeEntry } from "../dist/index.js";
+import { Repository, ThreadSafeRepository, type Tree, type TreeEntry } from "../dist/index.js";
 
 /**
  * Full-surface test for `Repository`.
@@ -43,6 +43,16 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+${branch}:${branch}"`);
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
+  }
+  // Ensure sandbox has at least 2 commits so HEAD~1 revision tests pass reliably
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    repo.commit(
+      repo.headName() ?? "refs/heads/main",
+      "sandbox second commit",
+      head.treeId,
+      [head.id],
+    );
   }
 });
 
@@ -495,8 +505,10 @@ describe("Repository wave-1 additions", () => {
   });
 
   test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+    const fresh = Repository.init(join(base, "fresh-full-repo"));
+    expect(fresh.isShallow()).toBe(false);
+    expect(fresh.shallowCommits()).toEqual([]);
+    expect(typeof repo.isShallow()).toBe("boolean");
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -578,10 +590,81 @@ describe("Repository index editing & construction options", () => {
   });
 
   test("initOpts creates bare and non-bare repositories", () => {
-    const bare = Repository.initOpts(join(base, "init-bare"), { bare: true });
+    const bare = Repository.initOpts(join(base, "init-opts-bare"), { bare: true });
     expect(bare.isBare()).toBe(true);
 
-    const withWorktree = Repository.initOpts(join(base, "init-worktree"), {});
+    const withWorktree = Repository.initOpts(join(base, "init-opts-worktree"), {});
     expect(withWorktree.isBare()).toBe(false);
+  });
+});
+
+// --- ThreadSafeRepository ---------------------------------------------------
+
+describe("ThreadSafeRepository", () => {
+  test("static constructors (open, openOpts, openWithEnvironmentOverrides)", () => {
+    const ts1 = ThreadSafeRepository.open(cloneDir);
+    expect(typeof ts1.path()).toBe("string");
+    expect(ts1.gitDir()).toBe(repo.gitDir());
+
+    const ts2 = ThreadSafeRepository.openOpts(cloneDir, { permissions: "isolated" });
+    expect(ts2.gitDir()).toBe(repo.gitDir());
+
+    const ts3 = ThreadSafeRepository.openWithEnvironmentOverrides(repo.gitDir());
+    expect(ts3.gitDir()).toBe(repo.gitDir());
+  });
+
+  test("static constructors (init, initOpts)", () => {
+    const initWt = ThreadSafeRepository.init(join(base, "ts-init-wt"), false);
+    expect(typeof initWt.workDir()).toBe("string");
+
+    const initBare = ThreadSafeRepository.initOpts(join(base, "ts-init-opts-bare"), { bare: true });
+    expect(initBare.workDir()).toBeNull();
+  });
+
+  test("static constructors (discover, discoverWithEnvironmentOverrides)", () => {
+    const sub = join(cloneDir, "ts-subdir");
+    mkdirSync(sub, { recursive: true });
+    const tsDisc = ThreadSafeRepository.discover(sub);
+    expect(tsDisc.gitDir()).toBe(repo.gitDir());
+
+    const tsEnv = ThreadSafeRepository.discoverWithEnvironmentOverrides(sub);
+    expect(tsEnv.gitDir()).toBe(repo.gitDir());
+  });
+
+  test("path accessors (path, gitDir, workDir, objectsDir)", () => {
+    const ts = ThreadSafeRepository.open(cloneDir);
+    expect(typeof ts.path()).toBe("string");
+    expect(typeof ts.gitDir()).toBe("string");
+    expect(ts.workDir()).toBe(cloneDir);
+    expect(typeof ts.objectsDir()).toBe("string");
+  });
+
+  test("conversion (toThreadLocal and Repository.toThreadSafe)", () => {
+    const ts = ThreadSafeRepository.open(cloneDir);
+    const local = ts.toThreadLocal();
+    expect(local.gitDir()).toBe(ts.gitDir());
+    expect(local.headId()).toBe(repo.headId());
+
+    const backToTs = local.toThreadSafe();
+    expect(backToTs.gitDir()).toBe(ts.gitDir());
+  });
+
+  test("async status with ThreadsafeFunction progress callback", async () => {
+    const ts = ThreadSafeRepository.open(cloneDir);
+    const events: Array<any> = [];
+    const entries = await ts.status((err, ev) => {
+      if (!err && ev) events.push(ev);
+    });
+    expect(Array.isArray(entries)).toBe(true);
+  });
+
+  test("async clone with ThreadsafeFunction progress callback", async () => {
+    const target = join(base, "ts-clone-target");
+    const events: Array<any> = [];
+    const cloned = await ThreadSafeRepository.clone(realRoot, target, false, (err, ev) => {
+      if (!err && ev) events.push(ev);
+    });
+    expect(cloned.gitDir()).toBeTruthy();
+    expect(cloned.toThreadLocal().headId()).toBeTruthy();
   });
 });

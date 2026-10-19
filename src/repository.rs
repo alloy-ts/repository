@@ -344,6 +344,33 @@ impl Task for StatusTask {
     }
 }
 
+pub struct ThreadSafeCloneTask {
+    url: String,
+    path: String,
+    bare: bool,
+    on_progress: Option<Arc<ThreadsafeFunction<ProgressEvent, ()>>>,
+}
+
+impl Task for ThreadSafeCloneTask {
+    type Output = ThreadSafeRepository;
+    type JsValue = ThreadSafeRepository;
+
+    fn compute(&mut self) -> Result<ThreadSafeRepository> {
+        let mut task = CloneTask {
+            url: self.url.clone(),
+            path: self.path.clone(),
+            bare: self.bare,
+            on_progress: self.on_progress.take(),
+        };
+        let repo = task.compute()?;
+        Ok(ThreadSafeRepository { inner: repo.inner })
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: ThreadSafeRepository) -> Result<ThreadSafeRepository> {
+        Ok(output)
+    }
+}
+
 impl Task for CloneTask {
     type Output = Repository;
     type JsValue = Repository;
@@ -417,6 +444,190 @@ fn is_local_url(url: &str) -> bool {
         || lower.starts_with("ssh://")
         || lower.starts_with("git://")
         || lower.starts_with("rsync://"))
+}
+
+/// Thread-safe repository handle for cross-thread access.
+///
+/// Wraps `Arc<gix::ThreadSafeRepository>`, allowing thread-safe operations and
+/// conversion to a thread-local [`Repository`] via [`to_thread_local`](ThreadSafeRepository::to_thread_local).
+#[napi]
+pub struct ThreadSafeRepository {
+    pub(crate) inner: Arc<gix::ThreadSafeRepository>,
+}
+
+#[napi]
+impl ThreadSafeRepository {
+    /// Open the thread-safe repository at `path`.
+    #[napi]
+    pub fn open(path: String) -> Result<ThreadSafeRepository> {
+        let ts = gix::ThreadSafeRepository::open(path).map_err(|e| err("open", e))?;
+        Ok(ThreadSafeRepository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Open a thread-safe repository with explicit options.
+    #[napi]
+    pub fn open_opts(path: String, options: Option<OpenOptions>) -> Result<ThreadSafeRepository> {
+        let mut opts = gix::open::Options::default();
+        if let Some(o) = options {
+            opts = match o.permissions.as_deref() {
+                Some("isolated") => opts.permissions(gix::open::Permissions::isolated()),
+                Some("all") => opts.permissions(gix::open::Permissions::all()),
+                Some("secure") | None => opts.permissions(gix::open::Permissions::secure()),
+                Some(other) => {
+                    return Err(napi::Error::from_reason(format!(
+                        "open_opts: unknown permissions {other:?}, expected isolated | secure | all"
+                    )));
+                }
+            };
+            if let Some(v) = o.open_path_as_is {
+                opts = opts.open_path_as_is(v);
+            }
+            if let Some(v) = o.bail_if_untrusted {
+                opts = opts.bail_if_untrusted(v);
+            }
+            if let Some(v) = o.strict_config {
+                opts = opts.strict_config(v);
+            }
+            if let Some(values) = o.config_overrides {
+                opts = opts.config_overrides(values.iter().map(|s| BString::from(s.as_str())));
+            }
+        }
+        let ts = gix::ThreadSafeRepository::open_opts(path, opts).map_err(|e| err("open_opts", e))?;
+        Ok(ThreadSafeRepository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Open a thread-safe repository with environment overrides.
+    #[napi]
+    pub fn open_with_environment_overrides(path: String) -> Result<ThreadSafeRepository> {
+        let ts = gix::ThreadSafeRepository::open_with_environment_overrides(path, Default::default())
+            .map_err(|e| err("open_with_environment_overrides", e))?;
+        Ok(ThreadSafeRepository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Initialize a thread-safe repository at `path`.
+    #[napi]
+    pub fn init(path: String, bare: Option<bool>) -> Result<ThreadSafeRepository> {
+        let kind = if bare.unwrap_or(false) {
+            gix::create::Kind::Bare
+        } else {
+            gix::create::Kind::WithWorktree
+        };
+        let ts = gix::ThreadSafeRepository::init(path, kind, Default::default())
+            .map_err(|e| err("init", e))?;
+        Ok(ThreadSafeRepository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Initialize a thread-safe repository with explicit options.
+    #[napi]
+    pub fn init_opts(path: String, options: Option<InitOptions>) -> Result<ThreadSafeRepository> {
+        let (bare, destination_must_be_empty) = match options {
+            Some(o) => (o.bare.unwrap_or(false), o.destination_must_be_empty),
+            None => (false, None),
+        };
+        let kind = if bare {
+            gix::create::Kind::Bare
+        } else {
+            gix::create::Kind::WithWorktree
+        };
+        let create_options = gix::create::Options {
+            destination_must_be_empty,
+            ..Default::default()
+        };
+        let ts = gix::ThreadSafeRepository::init(path, kind, create_options)
+            .map_err(|e| err("init_opts", e))?;
+        Ok(ThreadSafeRepository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Discover a thread-safe repository by walking up from `path`.
+    #[napi]
+    pub fn discover(path: Option<String>) -> Result<ThreadSafeRepository> {
+        let p = path.unwrap_or_else(|| ".".to_string());
+        let ts = gix::ThreadSafeRepository::discover(p).map_err(|e| err("discover", e))?;
+        Ok(ThreadSafeRepository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Discover a thread-safe repository directly from environment overrides.
+    #[napi]
+    pub fn discover_with_environment_overrides(path: Option<String>) -> Result<ThreadSafeRepository> {
+        let p = path.unwrap_or_else(|| ".".to_string());
+        let ts = gix::ThreadSafeRepository::discover_with_environment_overrides(p)
+            .map_err(|e| err("discover_with_environment_overrides", e))?;
+        Ok(ThreadSafeRepository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Convert this thread-safe repository into a thread-local [`Repository`].
+    #[napi]
+    pub fn to_thread_local(&self) -> Repository {
+        Repository {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// The path to the `.git` directory itself or bare directory.
+    #[napi]
+    pub fn path(&self) -> String {
+        self.inner.path().to_string_lossy().into_owned()
+    }
+
+    /// Return the path to the repository directory (`.git` or bare directory).
+    #[napi]
+    pub fn git_dir(&self) -> String {
+        self.inner.git_dir().to_string_lossy().into_owned()
+    }
+
+    /// Return the path to the working directory if not bare.
+    #[napi]
+    pub fn work_dir(&self) -> Option<String> {
+        self.inner.work_dir().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Return the path to the directory containing all git objects.
+    #[napi]
+    pub fn objects_dir(&self) -> String {
+        self.inner.objects_dir().to_string_lossy().into_owned()
+    }
+
+    /// Clone a repository asynchronously with thread-safe progress callbacks via [`ThreadsafeFunction`].
+    #[napi(ts_return_type = "Promise<ThreadSafeRepository>")]
+    pub fn clone(
+        url: String,
+        path: String,
+        bare: Option<bool>,
+        on_progress: Option<ThreadsafeFunction<ProgressEvent, ()>>,
+    ) -> Result<AsyncTask<ThreadSafeCloneTask>> {
+        Ok(AsyncTask::new(ThreadSafeCloneTask {
+            url,
+            path,
+            bare: bare.unwrap_or(false),
+            on_progress: on_progress.map(Arc::new),
+        }))
+    }
+
+    /// Compute working-tree status asynchronously with thread-safe progress callbacks via [`ThreadsafeFunction`].
+    #[napi(ts_return_type = "Promise<StatusEntry[]>")]
+    pub fn status(
+        &self,
+        on_progress: Option<ThreadsafeFunction<ProgressEvent, ()>>,
+    ) -> Result<AsyncTask<StatusTask>> {
+        Ok(AsyncTask::new(StatusTask {
+            inner: self.inner.clone(),
+            on_progress: on_progress.map(Arc::new),
+        }))
+    }
 }
 
 /// The primary handle to a git repository, exposed to TypeScript as a class.
@@ -1040,6 +1251,14 @@ impl Repository {
     pub fn kind(&self) -> String {
         let r = thread_local(&self.inner);
         format!("{:?}", r.kind())
+    }
+
+    /// Convert or share this repository as a [`ThreadSafeRepository`].
+    #[napi]
+    pub fn to_thread_safe(&self) -> ThreadSafeRepository {
+        ThreadSafeRepository {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     /// The object hash kind (`sha1` / `sha256`).
