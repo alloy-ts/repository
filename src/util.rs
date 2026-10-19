@@ -70,19 +70,13 @@ pub fn remote_name_for_url(url: &str, index: usize) -> String {
     }
 }
 
-/// Read `repository.manifest.yml` from `manifest_path` and configure remotes on a `gix::Repository`.
-pub fn setup_remotes_from_manifest(
+/// Helper function to configure remotes from a parsed Manifest on `gix::Repository` and persist to disk.
+fn apply_manifest_remotes(
     repo: &gix::Repository,
-    manifest_path: &Path,
+    manifest: &Manifest,
 ) -> Result<Vec<(String, String)>, String> {
-    let content = fs::read_to_string(manifest_path)
-        .map_err(|e| format!("failed to read manifest at {}: {}", manifest_path.display(), e))?;
-    let manifest = parse_manifest(&content);
-
     let mut configured = Vec::new();
-    let mut config_file = repo
-        .config_snapshot()
-        .to_owned();
+    let mut config_file = repo.config_snapshot().to_owned();
 
     for (i, url) in manifest.remote_urls.iter().enumerate() {
         let name = remote_name_for_url(url, i);
@@ -92,7 +86,72 @@ pub fn setup_remotes_from_manifest(
         configured.push((name, url.clone()));
     }
 
+    // Persist updated config to local .git/config if available
+    let config_path = repo.git_dir().join("config");
+    if config_path.exists() {
+        let mut buf = Vec::new();
+        if config_file.write_to(&mut buf).is_ok() {
+            let _ = fs::write(config_path, buf);
+        }
+    }
+
     Ok(configured)
+}
+
+/// Read `repository.manifest.yml` from `manifest_path` and configure remotes on a `gix::Repository`.
+pub fn setup_remotes_from_manifest(
+    repo: &gix::Repository,
+    manifest_path: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let content = fs::read_to_string(manifest_path)
+        .map_err(|e| format!("failed to read manifest at {}: {}", manifest_path.display(), e))?;
+    let manifest = parse_manifest(&content);
+    apply_manifest_remotes(repo, &manifest)
+}
+
+/// Read `repository.manifest.yml` content from a git revision (e.g. "HEAD", "main", or a commit SHA) in `gix::Repository`.
+pub fn read_manifest_from_revision(
+    repo: &gix::Repository,
+    revspec: Option<&str>,
+) -> Result<Manifest, String> {
+    let spec = revspec.unwrap_or("HEAD");
+    let oid = repo
+        .rev_parse_single(spec)
+        .map_err(|e| format!("failed to resolve revspec '{spec}': {e}"))?;
+
+    let commit = repo
+        .find_commit(oid)
+        .map_err(|e| format!("failed to find commit for '{spec}': {e}"))?;
+
+    let tree_id = commit
+        .tree_id()
+        .map_err(|e| format!("failed to get tree for commit '{spec}': {e}"))?;
+
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| format!("failed to find tree '{tree_id}': {e}"))?;
+
+    let entry = tree
+        .lookup_entry_by_path(Path::new("repository.manifest.yml"))
+        .map_err(|e| format!("failed to lookup 'repository.manifest.yml': {e}"))?
+        .ok_or_else(|| "entry 'repository.manifest.yml' not found in tree".to_string())?;
+
+    let object = entry
+        .object()
+        .map_err(|e| format!("failed to resolve tree entry object: {e}"))?;
+
+    let blob = object.into_blob();
+    let content = String::from_utf8_lossy(&blob.data).into_owned();
+    Ok(parse_manifest(&content))
+}
+
+/// Read `repository.manifest.yml` from a git revision and configure remotes on a `gix::Repository`.
+pub fn setup_remotes_from_revision(
+    repo: &gix::Repository,
+    revspec: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    let manifest = read_manifest_from_revision(repo, revspec)?;
+    apply_manifest_remotes(repo, &manifest)
 }
 
 #[cfg(test)]
