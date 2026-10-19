@@ -420,6 +420,27 @@ impl Repository {
         self.rev_parse_single(spec)
     }
 
+    /// Read the blob content of `path` at a specific revision (e.g. `"main"`, `"HEAD"`, or a commit SHA).
+    #[napi]
+    pub fn read_blob_at_revision(&self, rev: String, path: String) -> Result<napi::bindgen_prelude::Buffer> {
+        let r = thread_local(&self.inner);
+        let spec = format!("{rev}:{path}");
+        let oid = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("rev_parse_single", e))?;
+        let blob = r
+            .find_blob(oid)
+            .map_err(|e| err("find_blob", e))?;
+        Ok(napi::bindgen_prelude::Buffer::from(blob.data.clone()))
+    }
+
+    /// Read file content as a UTF-8 string at a specific revision.
+    #[napi]
+    pub fn read_text_at_revision(&self, rev: String, path: String) -> Result<String> {
+        let buf = self.read_blob_at_revision(rev, path)?;
+        Ok(lossy(&buf))
+    }
+
     /// Walk all reachable commits from the given tip ids (newest first).
     #[napi]
     pub fn rev_walk(&self, tips: Vec<String>) -> Result<Vec<String>> {

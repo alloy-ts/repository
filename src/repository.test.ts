@@ -65,7 +65,7 @@ describe("Repository static constructors and initialization", () => {
   });
 });
 
-describe("Reading git logs with Repository", () => {
+describe("Reading git logs and revision objects with Repository", () => {
   test("repo.log() fetches commit entries in reverse chronological order", () => {
     const repo = Repository.open(process.cwd());
     const entries: LogEntry[] = repo.log(undefined, 10, false);
@@ -97,6 +97,17 @@ describe("Reading git logs with Repository", () => {
     expect(typeof commit.message).toBe("string");
     expect(typeof commit.author.name).toBe("string");
   });
+
+  test("readTextAtRevision reads file content from HEAD or SHA revision", () => {
+    const repo = Repository.open(process.cwd());
+    const headId = repo.headId();
+
+    const readmeFromHead = repo.readTextAtRevision("HEAD", "ReadMe.md");
+    expect(readmeFromHead).toContain("# repository");
+
+    const readmeFromSha = repo.readTextAtRevision(headId, "ReadMe.md");
+    expect(readmeFromSha).toBe(readmeFromHead);
+  });
 });
 
 describe("Manifest remote setup helper", () => {
@@ -116,6 +127,15 @@ remote:
 
       const names = repo.setupRemotesFromManifest(manifestPath);
       expect(names).toEqual(["origin", "github"]);
+
+      // Test setupRemotesFromManifest using workspace repo revision
+      const workspaceRepo = Repository.open(process.cwd());
+      const namesFromRev = workspaceRepo.setupRemotesFromManifest(
+        "repository.manifest.yml",
+        "HEAD",
+      );
+      expect(namesFromRev).toContain("origin");
+      expect(namesFromRev).toContain("github");
 
       const reloaded = Repository.open(tmp);
       const remotes = reloaded.remotes();

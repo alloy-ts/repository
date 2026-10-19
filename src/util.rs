@@ -60,27 +60,39 @@ pub fn parse_remote_urls_from_manifest(content: &str) -> Vec<String> {
     urls
 }
 
-/// Sets up git remotes in `repo` based on the given `repository.manifest.yml` file path.
+/// Sets up git remotes in `repo` based on `repository.manifest.yml`.
 ///
-/// Reads the `remote:` array from the manifest, determines remote names (e.g. `origin`, `github`, `codeberg`),
-/// and adds or updates the remote configurations in the repository's `.git/config`.
+/// If `revision` is provided (e.g. `"HEAD"`, `"main"`, or a commit SHA), the manifest is read
+/// from that git revision. Otherwise, it falls back to reading `manifest_path` from the working tree.
 #[napi]
 pub fn setup_remotes_from_manifest(
     repo: &Repository,
     manifest_path: Option<String>,
+    revision: Option<String>,
 ) -> Result<Vec<String>> {
     let path_str = manifest_path.unwrap_or_else(|| "repository.manifest.yml".to_string());
-    let path = Path::new(&path_str);
 
-    if !path.exists() {
-        return Err(napi::Error::from_reason(format!(
-            "Manifest file not found at {}",
-            path.display()
-        )));
-    }
-
-    let content = fs::read_to_string(path)
-        .map_err(|e| napi::Error::from_reason(format!("Failed to read manifest file: {e}")))?;
+    let content = if let Some(rev) = revision {
+        let spec = format!("{rev}:{path_str}");
+        let r = thread_local(&repo.inner);
+        let object_id = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("rev_parse_single", e))?;
+        let blob = r
+            .find_blob(object_id)
+            .map_err(|e| err("find_blob", e))?;
+        String::from_utf8_lossy(&blob.data).into_owned()
+    } else {
+        let path = Path::new(&path_str);
+        if !path.exists() {
+            return Err(napi::Error::from_reason(format!(
+                "Manifest file not found at {}",
+                path.display()
+            )));
+        }
+        fs::read_to_string(path)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to read manifest file: {e}")))?
+    };
 
     let remote_urls = parse_remote_urls_from_manifest(&content);
     let r = thread_local(&repo.inner);
@@ -123,12 +135,13 @@ pub fn setup_remotes_from_manifest(
 
 #[napi]
 impl Repository {
-    /// Read `repository.manifest.yml` and set up git remotes on this repository instance.
+    /// Read `repository.manifest.yml` (from filesystem or optional `revision`) and set up git remotes.
     #[napi]
     pub fn setup_remotes_from_manifest(
         &self,
         manifest_path: Option<String>,
+        revision: Option<String>,
     ) -> Result<Vec<String>> {
-        setup_remotes_from_manifest(self, manifest_path)
+        setup_remotes_from_manifest(self, manifest_path, revision)
     }
 }
