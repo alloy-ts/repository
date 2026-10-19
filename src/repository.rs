@@ -11,7 +11,7 @@ use crate::object::{
     build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Tag,
     Tree,
 };
-use crate::reference::{build_head, build_reference, Head, Reference};
+use crate::reference::{build_head, build_reference, Head, Reference, ReflogEntry};
 use crate::remote::build_remote;
 use crate::remote::Remote;
 
@@ -191,6 +191,30 @@ impl Repository {
             .find_reference(name.as_str())
             .map_err(|e| err("find_reference", e))?;
         build_reference(&self.inner, reference)
+    }
+
+    /// Read reflog entries for a reference by name.
+    #[napi]
+    pub fn reflog(&self, name: String) -> Result<Vec<ReflogEntry>> {
+        let r = thread_local(&self.inner);
+        let reference = r
+            .find_reference(name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let mut platform = reference.log_iter();
+        let mut entries = Vec::new();
+        if let Ok(Some(iter)) = platform.all() {
+            for entry in iter {
+                if let Ok(e) = entry {
+                    entries.push(ReflogEntry {
+                        previous_id: e.previous_oid.to_string(),
+                        new_id: e.new_oid.to_string(),
+                        signature: lossy(e.signature.name),
+                        message: lossy(e.message.as_ref()),
+                    });
+                }
+            }
+        }
+        Ok(entries)
     }
 
     /// Create (or, if `force`, overwrite) a reference pointing at `target`.

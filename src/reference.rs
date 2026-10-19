@@ -50,6 +50,40 @@ impl Reference {
         reference.delete().map_err(|e| err("delete reference", e))?;
         Ok(())
     }
+
+    /// Read reflog entries for this reference.
+    #[napi]
+    pub fn reflog(&self) -> Result<Vec<ReflogEntry>> {
+        let repo = thread_local(&self.repo);
+        let reference = repo
+            .find_reference(&self.name)
+            .map_err(|e| err("find_reference", e))?;
+        let mut platform = reference.log_iter();
+        let mut entries = Vec::new();
+        if let Ok(Some(iter)) = platform.all() {
+            for entry in iter {
+                if let Ok(e) = entry {
+                    entries.push(ReflogEntry {
+                        previous_id: e.previous_oid.to_string(),
+                        new_id: e.new_oid.to_string(),
+                        signature: lossy(e.signature.name),
+                        message: lossy(e.message.as_ref()),
+                    });
+                }
+            }
+        }
+        Ok(entries)
+    }
+}
+
+/// A single entry in a reflog.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ReflogEntry {
+    pub previous_id: String,
+    pub new_id: String,
+    pub signature: String,
+    pub message: String,
 }
 
 pub(crate) fn build_reference(

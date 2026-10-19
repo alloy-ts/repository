@@ -89,6 +89,12 @@ test("Repository.log & revWalk: reading git logs in JS/TS", () => {
     expect(commits[0].message).toBe("docs: third commit");
     expect(commits[1].message).toBe("fix: second commit");
     expect(commits[2].message).toBe("feat: first commit\n\nDetail line 1");
+
+    // Check reading reflogs directly from repo
+    const logs = repo.reflog("refs/heads/main");
+    expect(Array.isArray(logs)).toBe(true);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs[0].newId).toBe(c1);
   } finally {
     removeTmpDir(tmpDir);
   }
