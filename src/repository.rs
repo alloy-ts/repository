@@ -1287,6 +1287,17 @@ impl Repository {
             .collect())
     }
 
+    /// Information about the current worktree, or `null` if bare.
+    #[napi]
+    pub fn worktree(&self) -> Option<WorktreeInfo> {
+        let r = thread_local(&self.inner);
+        r.worktree().map(|wt| WorktreeInfo {
+            id: wt.id().ok().flatten().map(|i| i.to_string()),
+            path: wt.base().to_string_lossy().into_owned(),
+            is_main: wt.is_main(),
+        })
+    }
+
     /// List linked worktrees (the main worktree is not included).
     #[napi]
     pub fn worktrees(&self) -> Result<Vec<WorktreeInfo>> {
