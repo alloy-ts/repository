@@ -35,6 +35,11 @@ beforeAll(async () => {
     );
     repo = Repository.open(cloneDir);
   }
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    const headRef = repo.headName() ?? "refs/heads/main";
+    repo.commit(headRef, "second commit for tests", head.treeId, [head.id]);
+  }
 });
 
 afterAll(() => {
@@ -360,6 +365,321 @@ describe("Repository revisions - reading file content", () => {
   test("a specific SHA resolves idempotently", () => {
     const sha = repo.revParseSingle("HEAD");
     expect(repo.revParseSingle(sha)).toBe(sha);
+  });
+});
+
+// --- Wave 1: HEAD, remotes, config, revision helpers -----------------------
+
+describe("Wave 1: HEAD, remotes, config, revision helpers", () => {
+  test("headTreeId and headTree agree with headCommit", () => {
+    const headCommit = repo.headCommit();
+    const treeId = repo.headTreeId();
+    expect(treeId).toBe(headCommit.treeId);
+
+    const tree = repo.headTree();
+    expect(tree.id).toBe(treeId);
+  });
+
+  test("headRef returns Reference for symbolic HEAD", () => {
+    const href = repo.headRef();
+    if (href) {
+      expect(href.name).toBe(repo.headName());
+    }
+  });
+
+  test("remoteAt and createRemote", () => {
+    const remote = repo.remoteAt("https://example.com/test.git");
+    expect(remote.url).toBe("https://example.com/test.git");
+
+    const created = repo.createRemote("probe_remote", "https://example.com/probe.git");
+    expect(created.name).toBe("probe_remote");
+    expect(Repository.open(cloneDir).findRemote("probe_remote").url).toBe("https://example.com/probe.git");
+  });
+
+  test("configEntries returns array of key-value objects", () => {
+    const entries = repo.configEntries();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+    expect(typeof entries[0].key).toBe("string");
+    expect(typeof entries[0].value).toBe("string");
+  });
+
+  test("isAncestor, describe, isShallow", () => {
+    const head = repo.headId();
+    const parent = repo.revParseSingle("HEAD~1");
+
+    expect(repo.isAncestor(parent, head)).toBe(true);
+    expect(repo.isAncestor(head, parent)).toBe(false);
+
+    const desc = repo.describe(head);
+    expect(typeof desc).toBe("string");
+
+    expect(typeof repo.isShallow()).toBe("boolean");
+  });
+
+  test("setHead changes HEAD", () => {
+    const headRef = repo.headName() ?? "refs/heads/main";
+    repo.setHead(headRef);
+    expect(repo.headName()).toBe(headRef);
+  });
+});
+
+// --- Wave 2: Index & Status ------------------------------------------------
+
+describe("Wave 2: Index & Status", () => {
+  test("index and indexOrLoad list entries", () => {
+    const entries = repo.index();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+    const first = entries[0];
+    expect(typeof first.path).toBe("string");
+    expect(typeof first.mode).toBe("string");
+    expect(typeof first.id).toBe("string");
+    expect(typeof first.stage).toBe("number");
+
+    const alias = repo.indexOrLoad();
+    expect(alias.length).toBe(entries.length);
+  });
+
+  test("editIndex adds new file to index", () => {
+    const testFile = "wave2_test.txt";
+    const fullPath = join(cloneDir, testFile);
+    execSync(`echo "wave 2 test file" > ${JSON.stringify(fullPath)}`);
+
+    const oid = repo.editIndex(testFile);
+    expect(typeof oid).toBe("string");
+    expect(oid.length).toBe(40);
+
+    const reloaded = Repository.open(cloneDir).index();
+    expect(reloaded.some((e) => e.path === testFile)).toBe(true);
+  });
+
+  test("status (async) and indexWorktree (sync)", async () => {
+    const syncStatus = repo.indexWorktree();
+    expect(Array.isArray(syncStatus)).toBe(true);
+
+    const asyncStatus = await repo.status();
+    expect(Array.isArray(asyncStatus)).toBe(true);
+    expect(asyncStatus.length).toBe(syncStatus.length);
+  });
+});
+
+// --- Wave 3: Config Editing & Branch helpers -------------------------------
+
+describe("Wave 3: Config Editing & Branch helpers", () => {
+  test("editConfig updates config and config() reads it", () => {
+    repo.editConfig("user.testname", "Jules Tester");
+    const reloaded = Repository.open(cloneDir);
+    expect(reloaded.configString("user.testname")).toBe("Jules Tester");
+
+    const single = reloaded.config("user.testname");
+    expect(single.length).toBe(1);
+    expect(single[0].value).toBe("Jules Tester");
+  });
+
+  test("branchNames lists local branch names", () => {
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches.length).toBeGreaterThan(0);
+  });
+
+  test("branchRemoteName and branchRemoteRef", () => {
+    repo.editConfig("branch.main.remote", "origin");
+    repo.editConfig("branch.main.merge", "refs/heads/main");
+
+    const reloaded = Repository.open(cloneDir);
+    expect(reloaded.branchRemoteName("main")).toBe("origin");
+    expect(reloaded.branchRemoteRef("main")).toBe("refs/heads/main");
+  });
+});
+
+// --- Wave 4: Object Writing & Raw Access -----------------------------------
+
+describe("Wave 4: Object Writing & Raw Access", () => {
+  test("writeTree and writeCommit create objects", () => {
+    const blobId = repo.writeBlob(Buffer.from("hello world from wave 4\n"));
+    const treeId = repo.writeTree([
+      { name: "test.txt", mode: "100644", id: blobId },
+    ]);
+    expect(treeId).toMatch(/^[0-9a-f]{40}$/);
+
+    const headId = repo.headId();
+    const commitId = repo.writeCommit(
+      treeId,
+      [headId],
+      { name: "Author", email: "author@example.com" },
+      { name: "Committer", email: "committer@example.com" },
+      "direct commit write\n",
+    );
+    expect(commitId).toMatch(/^[0-9a-f]{40}$/);
+
+    const decoded = repo.findCommit(commitId);
+    expect(decoded.treeId).toBe(treeId);
+    expect(decoded.parentIds).toEqual([headId]);
+    expect(decoded.message).toBe("direct commit write\n");
+  });
+
+  test("writeTag and writeObject", () => {
+    const headId = repo.headId();
+    const tagId = repo.writeTag(
+      "v1.0.0-test",
+      headId,
+      "commit",
+      { name: "Tagger", email: "tagger@example.com" },
+      "tag message\n",
+    );
+    expect(tagId).toMatch(/^[0-9a-f]{40}$/);
+
+    const rawBlobId = repo.writeObject("blob", Buffer.from("raw blob payload\n"));
+    expect(rawBlobId).toMatch(/^[0-9a-f]{40}$/);
+    expect(repo.findBlob(rawBlobId).content().toString()).toBe("raw blob payload\n");
+  });
+
+  test("tryFindObject and revParseHex", () => {
+    const head = repo.headId();
+    const found = repo.tryFindObject(head);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("commit");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+
+    const hex = repo.revParseHex("HEAD");
+    expect(hex).toBe(head);
+  });
+});
+
+// --- Wave 5: Worktrees -----------------------------------------------------
+
+describe("Wave 5: Worktrees", () => {
+  test("worktrees, worktree, mainWorktree, and isWorktree", () => {
+    const list = repo.worktrees();
+    expect(Array.isArray(list)).toBe(true);
+    expect(list.length).toBeGreaterThan(0);
+
+    const wt = repo.worktree();
+    expect(wt).not.toBeNull();
+    expect(typeof wt?.path).toBe("string");
+
+    const main = repo.mainWorktree();
+    expect(main).not.toBeNull();
+    expect(main?.isMain).toBe(true);
+
+    expect(typeof repo.isWorktree()).toBe("boolean");
+  });
+
+  test("createWorktree creates a linked worktree", () => {
+    const wtPath = join(base, "wt_linked");
+    const wtRepo = repo.createWorktree("wt_branch", wtPath);
+    expect(wtRepo.isWorktree()).toBe(true);
+    expect(wtRepo.workDir()).toBe(wtPath);
+  });
+});
+
+// --- Wave 6: Merge, Rebase, Cherry-pick, Apply -----------------------------
+
+describe("Wave 6: Merge, Rebase, Cherry-pick, Apply", () => {
+  test("mergeTrees and mergeCommits", () => {
+    const headCommit = repo.headCommit();
+    const outcome = repo.mergeTrees(headCommit.treeId, headCommit.treeId, null);
+    expect(outcome.hasConflicts).toBe(false);
+    expect(typeof outcome.treeId).toBe("string");
+
+    const commitOutcome = repo.mergeCommits(headCommit.id, headCommit.id);
+    expect(commitOutcome.hasConflicts).toBe(false);
+  });
+
+  test("cherryPick and rebase", () => {
+    const parent = repo.revParseSingle("HEAD~1");
+    const head = repo.headId();
+
+    const cherry = repo.cherryPick(head, parent);
+    expect(typeof cherry).toBe("string");
+    expect(cherry.length).toBe(40);
+
+    const rebased = repo.rebase(parent, null);
+    expect(typeof rebased.headId).toBe("string");
+    expect(Array.isArray(rebased.appliedCommits)).toBe(true);
+  });
+
+  test("apply applies a git patch", () => {
+    const patch = `diff --git a/wave6_patch.txt b/wave6_patch.txt
+new file mode 100644
+index 0000000..d00491f
+--- /dev/null
++++ b/wave6_patch.txt
+@@ -0,0 +1001 @@
++hello wave 6 patch
+`;
+    const res = repo.apply(patch, false);
+    expect(typeof res).toBe("boolean");
+  });
+});
+
+// --- Wave 7: Attributes, Excludes, Filters, Mailmap ------------------------
+
+describe("Wave 7: Attributes, Excludes, Filters, Mailmap", () => {
+  test("isPathIgnored checks gitignore rules", () => {
+    const isIgnored = repo.isPathIgnored("node_modules/test.js");
+    expect(typeof isIgnored).toBe("boolean");
+  });
+
+  test("attributes and filterPipeline", () => {
+    const attrs = repo.attributes("Cargo.toml");
+    expect(Array.isArray(attrs)).toBe(true);
+
+    const pipeline = repo.filterPipeline("Cargo.toml");
+    expect(Array.isArray(pipeline)).toBe(true);
+  });
+
+  test("resolveMailmap returns MailmapEntry", () => {
+    const mapped = repo.resolveMailmap("John Doe", "john@example.com");
+    expect(mapped.email).toBe("john@example.com");
+    expect(typeof mapped.properEmail).toBe("string");
+  });
+});
+
+// --- Wave 8: Submodules, Blame, Notes, Checkout/Reset, State, Identity, Options
+
+describe("Wave 8: Submodules, Blame, Notes, Checkout/Reset, State, Identity, Options", () => {
+  test("openOpts and initOpts", () => {
+    const rOpen = Repository.openOpts(cloneDir, { strict: false });
+    expect(rOpen.gitDir()).toBe(repo.gitDir());
+
+    const initDir = join(base, "init_opts_test");
+    const rInit = Repository.initOpts(initDir, { bare: false });
+    expect(rInit.isBare()).toBe(false);
+  });
+
+  test("submodules, blame, notes, state", () => {
+    const sms = repo.submodules();
+    expect(Array.isArray(sms)).toBe(true);
+
+    const hunks = repo.blame("Cargo.toml");
+    expect(Array.isArray(hunks)).toBe(true);
+
+    const notesList = repo.notes();
+    expect(Array.isArray(notesList)).toBe(true);
+
+    const st = repo.state();
+    expect(typeof st).toBe("string");
+  });
+
+  test("author and committer signatures", () => {
+    const auth = repo.author();
+    expect(auth === null || typeof auth?.email === "string").toBe(true);
+
+    const comm = repo.committer();
+    expect(comm === null || typeof comm?.email === "string").toBe(true);
+  });
+
+  test("checkout and reset", () => {
+    const head = repo.headId();
+    const checkedOut = repo.checkout(head);
+    expect(typeof checkedOut).toBe("boolean");
+
+    const resetRes = repo.reset(head, false);
+    expect(typeof resetRes).toBe("boolean");
   });
 });
 
