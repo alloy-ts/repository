@@ -177,6 +177,25 @@ pub struct StatusEntry {
 }
 
 /// Map a gix status `Summary` to a JS-friendly change kind.
+fn build_index_entries(file: &gix::index::File) -> Result<Vec<IndexEntry>> {
+    let mut out = Vec::with_capacity(file.entries().len());
+    for entry in file.entries() {
+        let stage = match entry.flags.stage() {
+            gix::index::entry::Stage::Unconflicted => 0,
+            gix::index::entry::Stage::Base => 1,
+            gix::index::entry::Stage::Ours => 2,
+            gix::index::entry::Stage::Theirs => 3,
+        };
+        out.push(IndexEntry {
+            path: lossy(entry.path(file)),
+            mode: format!("{:?}", entry.mode),
+            id: entry.id.to_string(),
+            stage,
+        });
+    }
+    Ok(out)
+}
+
 fn summary_kind(s: Summary) -> String {
     match s {
         Summary::Conflict => "conflict",
@@ -696,6 +715,27 @@ impl Repository {
         Ok(build_remote(&self.inner, remote))
     }
 
+    /// Create and persist a named remote pointing to `url`.
+    #[napi]
+    pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
+        let mut r = thread_local(&self.inner);
+        let mut config = r.config_snapshot_mut();
+        let url_key = format!("remote.{}.url", name);
+        let fetch_key = format!("remote.{}.fetch", name);
+        let fetch_val = format!("+refs/heads/*:refs/remotes/{}/*", name);
+
+        config
+            .set_raw_value(url_key.as_str(), url.as_str())
+            .map_err(|e| err("create_remote set url", e))?;
+        config
+            .set_raw_value(fetch_key.as_str(), fetch_val.as_str())
+            .map_err(|e| err("create_remote set fetch", e))?;
+        config.commit().map_err(|e| err("create_remote commit", e))?;
+
+        let remote = r.find_remote(name.as_str()).map_err(|e| err("find_remote", e))?;
+        Ok(build_remote(&self.inner, remote))
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// All config entries visible to this repository (repo + global + system), in file order.
@@ -730,6 +770,45 @@ impl Repository {
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
     }
 
+    /// Edit config by setting a key to a raw string value.
+    #[napi]
+    pub fn set_config_string(&self, key: String, value: String) -> Result<()> {
+        let mut file = gix::config::File::from_git_dir(self.git_dir().into()).map_err(|e| err("config file", e))?;
+        file.set_raw_value(key.as_str(), value.as_str()).map_err(|e| err("set_config_string", e))?;
+        let config_path = std::path::Path::new(&self.git_dir()).join("config");
+        let mut f = std::fs::File::create(config_path).map_err(|e| err("create config file", e))?;
+        file.write_to(&mut f).map_err(|e| err("write config", e))?;
+        Ok(())
+    }
+
+    /// Edit config by unsetting/removing a section.
+    #[napi]
+    pub fn unset_config(&self, section: String, subsection: Option<String>) -> Result<bool> {
+        let mut file = gix::config::File::from_git_dir(self.git_dir().into()).map_err(|e| err("config file", e))?;
+        let sub_bstr = subsection.as_deref().map(|s| gix::bstr::BStr::new(s));
+        let removed = file.remove_section(section.as_str(), sub_bstr).is_some();
+        if removed {
+            let config_path = std::path::Path::new(&self.git_dir()).join("config");
+            let mut f = std::fs::File::create(config_path).map_err(|e| err("create config file", e))?;
+            file.write_to(&mut f).map_err(|e| err("write config", e))?;
+        }
+        Ok(removed)
+    }
+
+    /// Get names of branches in the repository.
+    #[napi]
+    pub fn branch_names(&self) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        let platform = r.references().map_err(|e| err("branch_names", e))?;
+        let branches = platform.local_branches().map_err(|e| err("branch_names local", e))?;
+        let mut out = Vec::new();
+        for b in branches {
+            let b = b.map_err(|e| err("branch_names item", e))?;
+            out.push(lossy(b.name().shorten()));
+        }
+        Ok(out)
+    }
+
     // ---- index (staging area) ----------------------------------------------
 
     /// All entries currently in the index (staging area).
@@ -737,20 +816,38 @@ impl Repository {
     pub fn index(&self) -> Result<Vec<IndexEntry>> {
         let r = thread_local(&self.inner);
         let file = r.index().map_err(|e| err("index", e))?;
-        let mut out = Vec::with_capacity(file.entries().len());
-        for entry in file.entries() {
-            let stage = match entry.flags.stage() {
-                gix::index::entry::Stage::Unconflicted => 0,
-                gix::index::entry::Stage::Base => 1,
-                gix::index::entry::Stage::Ours => 2,
-                gix::index::entry::Stage::Theirs => 3,
-            };
-            out.push(IndexEntry {
-                path: lossy(entry.path(&file)),
-                mode: format!("{:?}", entry.mode),
-                id: entry.id.to_string(),
-                stage,
-            });
+        build_index_entries(&file)
+    }
+
+    /// Load or open the index file (or load from HEAD if missing), returning all entries.
+    #[napi]
+    pub fn index_or_load(&self) -> Result<Vec<IndexEntry>> {
+        let r = thread_local(&self.inner);
+        let file = r.index_or_load_from_head().map_err(|e| err("index_or_load", e))?;
+        build_index_entries(&file)
+    }
+
+    /// Compute index-worktree status changes directly.
+    #[napi]
+    pub fn index_worktree(&self) -> Result<Vec<StatusEntry>> {
+        let r = thread_local(&self.inner);
+        let progress = gix::progress::Discard;
+        let mut iter = r
+            .status(progress)
+            .map_err(|e| err("status", e))?
+            .into_iter(Vec::<BString>::new())
+            .map_err(|e| err("status.iter", e))?;
+        let mut out = Vec::new();
+        while let Some(item) = iter.next() {
+            let item = item.map_err(|e| err("status.item", e))?;
+            if let gix::status::Item::IndexWorktree(iw) = item {
+                if let Some(summary) = iw.summary() {
+                    out.push(StatusEntry {
+                        path: lossy(iw.rela_path()),
+                        kind: summary_kind(summary),
+                    });
+                }
+            }
         }
         Ok(out)
     }

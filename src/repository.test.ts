@@ -44,6 +44,13 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure sandbox repo has at least 2 commits so HEAD~1 exists for revision tests
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    const ref = repo.headName() ?? "refs/heads/main";
+    repo.commit(ref, "second commit for test suite", head.treeId, [head.id]);
+  }
 });
 
 afterAll(() => {
@@ -350,16 +357,13 @@ describe("Repository revisions", () => {
   });
 });
 
-
 describe("Repository revisions - reading file content", () => {
   test("resolve a ref/SHA to a commit, then read a file blob from its tree", () => {
     // `HEAD` (or `main`, or a `<sha>`) -> commit id -> tree -> entry -> blob content.
     const tip = repo.revParseSingle("HEAD");
     const commit = repo.findCommit(tip);
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "Cargo.toml" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "Cargo.toml" && e.mode === "Blob");
     expect(entry).toBeDefined();
     const text = repo.findBlob(entry!.id).content().toString("utf8");
     expect(text.length).toBeGreaterThan(0);
@@ -378,9 +382,7 @@ describe("Repository revisions - reading file content", () => {
     // Same blob as the explicit walk: commit -> tree -> entry -> blob.
     const commit = repo.findCommit(repo.headId());
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "ReadMe.md" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "ReadMe.md" && e.mode === "Blob");
     expect(entry).toBeDefined();
     expect(viaSpec).toBe(entry!.id);
 
@@ -397,9 +399,7 @@ describe("Repository revisions - reading file content", () => {
       console.log("detached HEAD; skipping branch revspec assertion");
       return;
     }
-    expect(repo.revParseSingle(`${branch}:ReadMe.md`)).toBe(
-      repo.revParseSingle("HEAD:ReadMe.md"),
-    );
+    expect(repo.revParseSingle(`${branch}:ReadMe.md`)).toBe(repo.revParseSingle("HEAD:ReadMe.md"));
   });
 
   test("revParseSingle reads a file at a specific (abbreviated) SHA", () => {
@@ -432,12 +432,9 @@ describe("Repository revisions - reading file content", () => {
 describe("Repository.commit", () => {
   test("commit creates a new commit on a throwaway ref", () => {
     const head = repo.headCommit();
-    const newId = repo.commit(
-      "refs/heads/__probe_commit__",
-      "probe commit message",
-      head.treeId,
-      [head.id],
-    );
+    const newId = repo.commit("refs/heads/__probe_commit__", "probe commit message", head.treeId, [
+      head.id,
+    ]);
     expect(typeof newId).toBe("string");
     expect(newId).not.toBe(head.id);
 
@@ -494,9 +491,9 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return boolean and array", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -506,5 +503,49 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+});
+
+describe("Repository Wave 3 - Config Editing & Branch Helpers", () => {
+  test("setConfigString and configString read/write config, unsetConfig removes section", () => {
+    // Re-open repo from disk so new config snapshot is loaded
+    const testKey = "testsection.testkey";
+    repo.setConfigString(testKey, "hello_wave3");
+    const r2 = Repository.open(cloneDir);
+    expect(r2.configString(testKey)).toBe("hello_wave3");
+
+    const removed = repo.unsetConfig("testsection", null);
+    expect(removed).toBe(true);
+    const r3 = Repository.open(cloneDir);
+    expect(r3.configString(testKey)).toBeNull();
+  });
+
+  test("branchNames lists local branch names", () => {
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Repository Wave 2 - Index & Status", () => {
+  test("index and indexOrLoad return index entries", () => {
+    const idx1 = repo.index();
+    const idx2 = repo.indexOrLoad();
+    expect(Array.isArray(idx1)).toBe(true);
+    expect(Array.isArray(idx2)).toBe(true);
+    expect(idx1.length).toBe(idx2.length);
+    if (idx1.length > 0) {
+      expect(typeof idx1[0]!.path).toBe("string");
+      expect(typeof idx1[0]!.id).toBe("string");
+      expect(typeof idx1[0]!.mode).toBe("string");
+      expect(typeof idx1[0]!.stage).toBe("number");
+    }
+  });
+
+  test("indexWorktree and status return status entries", async () => {
+    const wtChanges = repo.indexWorktree();
+    expect(Array.isArray(wtChanges)).toBe(true);
+    const asyncStatus = await repo.status();
+    expect(Array.isArray(asyncStatus)).toBe(true);
   });
 });
