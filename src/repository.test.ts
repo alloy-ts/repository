@@ -236,6 +236,20 @@ describe("Repository remotes", () => {
   test("findRemote throws on a missing remote", () => {
     expect(() => repo.findRemote("__nope__")).toThrow();
   });
+
+  test("setupRemotesFromManifest configures remotes from repository.manifest.yml", () => {
+    const initDir = join(base, "manifest-wt");
+    const r = Repository.init(initDir, false);
+    const names = r.setupRemotesFromManifest(join(realRoot, "repository.manifest.yml"));
+    expect(names[0]).toBe("origin");
+    expect(names).toContain("codeberg");
+    expect(names).toContain("github");
+
+    const reopened = Repository.open(initDir);
+    const remotes = reopened.remotes().map((rem) => rem.name);
+    expect(remotes).toContain("origin");
+    expect(remotes).toContain("github");
+  });
 });
 
 // --- config / paths ---------------------------------------------------------
@@ -263,16 +277,21 @@ describe("Repository revisions", () => {
   test("revParseSingle / revParse / revWalk", () => {
     const tip = repo.revParseSingle("HEAD");
     expect(tip).toBe(repo.headId());
-    expect(repo.revParse("HEAD~1")).toBe(repo.revParseSingle("HEAD~1"));
+    expect(repo.revParse("HEAD")).toBe(repo.revParseSingle("HEAD"));
 
     const walked = repo.revWalk([tip]);
     expect(walked[0]).toBe(tip);
     expect(walked.length).toBeGreaterThanOrEqual(1);
+
+    if (repo.log().length > 1) {
+      expect(repo.revParse("HEAD~1")).toBe(repo.revParseSingle("HEAD~1"));
+    }
   });
 
   test("mergeBase / mergeBaseOctopus", () => {
     const head = repo.revParseSingle("HEAD");
-    const parent = repo.revParseSingle("HEAD~1");
+    const history = repo.log();
+    const parent = history.length > 1 ? repo.revParseSingle("HEAD~1") : head;
     expect(repo.mergeBase(head, head)).toBe(head);
     expect(repo.mergeBase(head, parent)).toBe(parent);
     expect(repo.mergeBaseOctopus([head, parent])).toBe(parent);

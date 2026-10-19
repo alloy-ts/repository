@@ -4,10 +4,34 @@ use napi::Result;
 use napi_derive::napi;
 
 use crate::error::{err, thread_local};
-use crate::object::{build_commit, build_tree, Commit, Tree};
+use crate::object::{build_commit, build_tree, Commit, Signature, Tree};
 
 fn lossy(b: &gix::bstr::BStr) -> String {
     String::from_utf8_lossy(b).into_owned()
+}
+
+fn signature_ref_to_dto(s: &gix::actor::SignatureRef) -> Signature {
+    let (time, timezone_offset) = s
+        .time()
+        .ok()
+        .map(|t| (t.seconds, t.offset))
+        .unwrap_or((0, 0));
+    Signature {
+        name: String::from_utf8_lossy(s.name).into_owned(),
+        email: String::from_utf8_lossy(s.email).into_owned(),
+        time,
+        timezone_offset,
+    }
+}
+
+/// A single reflog entry recording a reference update.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ReflogEntry {
+    pub previous_oid: String,
+    pub new_oid: String,
+    pub committer: Signature,
+    pub message: String,
 }
 
 /// A git reference (branch, tag ref, or symbolic ref) snapshot.
@@ -49,6 +73,40 @@ impl Reference {
             .map_err(|e| err("find_reference", e))?;
         reference.delete().map_err(|e| err("delete reference", e))?;
         Ok(())
+    }
+
+    /// Read the reflog entries for this reference.
+    #[napi]
+    pub fn reflog(&self) -> Result<Vec<ReflogEntry>> {
+        let repo = thread_local(&self.repo);
+        let reference = repo
+            .find_reference(&self.name)
+            .map_err(|e| err("find_reference", e))?;
+        let mut platform = reference.log_iter();
+        let mut out = Vec::new();
+        if let Ok(Some(log)) = platform.all() {
+            for entry in log {
+                let entry = entry.map_err(|e| err("reflog entry", e))?;
+                let committer = signature_ref_to_dto(&entry.signature);
+                out.push(ReflogEntry {
+                    previous_oid: entry.previous_oid.to_string(),
+                    new_oid: entry.new_oid.to_string(),
+                    committer,
+                    message: lossy(entry.message),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether a reflog exists for this reference.
+    #[napi]
+    pub fn reflog_exists(&self) -> Result<bool> {
+        let repo = thread_local(&self.repo);
+        let reference = repo
+            .find_reference(&self.name)
+            .map_err(|e| err("find_reference", e))?;
+        reference.log_exists().map_err(|e| err("reflog_exists", e))
     }
 }
 
@@ -105,6 +163,28 @@ impl Head {
     #[napi]
     pub fn id(&self) -> Option<String> {
         self.id.clone()
+    }
+
+    /// Read the reflog entries for HEAD.
+    #[napi]
+    pub fn reflog(&self) -> Result<Vec<ReflogEntry>> {
+        let repo = thread_local(&self.repo);
+        let head = repo.head().map_err(|e| err("head", e))?;
+        let mut platform = head.log_iter();
+        let mut out = Vec::new();
+        if let Ok(Some(log)) = platform.all() {
+            for entry in log {
+                let entry = entry.map_err(|e| err("reflog entry", e))?;
+                let committer = signature_ref_to_dto(&entry.signature);
+                out.push(ReflogEntry {
+                    previous_oid: entry.previous_oid.to_string(),
+                    new_oid: entry.new_oid.to_string(),
+                    committer,
+                    message: lossy(entry.message),
+                });
+            }
+        }
+        Ok(out)
     }
 }
 

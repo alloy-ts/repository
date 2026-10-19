@@ -20,7 +20,7 @@ fn lossy(b: &[u8]) -> String {
 }
 
 /// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
-struct CloneTask {
+pub struct CloneTask {
     url: String,
     path: String,
     bare: bool,
@@ -337,6 +337,15 @@ impl Repository {
             .find_remote(name.as_str())
             .map_err(|e| err("find_remote", e))?;
         Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Read `repository.manifest.yml` and set up remotes for this repository.
+    #[napi]
+    pub fn setup_remotes_from_manifest(&self, manifest_path: Option<String>) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        let path = manifest_path.unwrap_or_else(|| "repository.manifest.yml".to_string());
+        crate::util::setup_repository_from_manifest(&r, path)
+            .map_err(|e| napi::Error::from_reason(e))
     }
 
     // ---- config / paths --------------------------------------------------
