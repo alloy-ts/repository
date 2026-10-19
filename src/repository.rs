@@ -11,6 +11,7 @@ use gix::progress::{Count, Id, MessageLevel, NestedProgress, Progress, Step, Ste
 
 use gix::bstr::BString;
 use gix::diff::index::Change as TreeIndexChange;
+use gix::prelude::Write;
 use gix::status::index_worktree::iter::Summary;
 
 use crate::error::{err, parse_oid, thread_local};
@@ -48,6 +49,14 @@ pub struct ProgressEvent {
     pub message: Option<String>,
     /// Message level: `info`, `success`, or `failure`.
     pub level: Option<String>,
+}
+
+/// Input entry for creating/writing trees in `write_tree`.
+#[napi(object)]
+pub struct TreeItemInput {
+    pub name: String,
+    pub mode: String,
+    pub id: String,
 }
 
 /// A single entry in the repository index (staging area).
@@ -557,6 +566,188 @@ impl Repository {
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    /// Try to find an object of any kind, returning `null` if not found (does not throw).
+    #[napi]
+    pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
+        let r = thread_local(&self.inner);
+        let oid = match parse_oid(&id) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        };
+        match r.try_find_object(oid).map_err(|e| err("try_find_object", e))? {
+            Some(obj) => Ok(Some(build_object(&self.inner, obj)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Write raw object bytes with a specified kind ("commit" | "tree" | "blob" | "tag").
+    #[napi]
+    pub fn write_object(&self, kind: String, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+        let gix_kind = match kind.as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            _ => return Err(err("write_object", "invalid object kind")),
+        };
+        let r = thread_local(&self.inner);
+        let id = r
+            .write_buf(gix_kind, &data)
+            .map_err(|e| err("write_object", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write a tree object from array of entries.
+    #[napi]
+    pub fn write_tree(&self, entries: Vec<TreeItemInput>) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let mut tree_entries = Vec::with_capacity(entries.len());
+        for e in entries {
+            let mode = match e.mode.as_str() {
+                "100644" | "Blob" => gix::objs::tree::EntryKind::Blob,
+                "100755" | "BlobExecutable" => gix::objs::tree::EntryKind::BlobExecutable,
+                "040000" | "Tree" => gix::objs::tree::EntryKind::Tree,
+                "120000" | "Link" | "Symlink" => gix::objs::tree::EntryKind::Link,
+                "160000" | "Commit" => gix::objs::tree::EntryKind::Commit,
+                _ => return Err(err("write_tree", format!("unknown mode {}", e.mode))),
+            };
+            tree_entries.push(gix::objs::tree::Entry {
+                mode: mode.into(),
+                filename: e.name.into(),
+                oid: parse_oid(&e.id)?,
+            });
+        }
+        tree_entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+        let tree = gix::objs::Tree { entries: tree_entries };
+        let id = r.write(&tree).map_err(|e| err("write_tree", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write a commit object (and optionally update `reference`).
+    #[napi]
+    pub fn write_commit(
+        &self,
+        tree: String,
+        parents: Vec<String>,
+        message: String,
+        reference: Option<String>,
+    ) -> Result<String> {
+        if let Some(ref_name) = reference {
+            self.commit(ref_name, message, tree, parents)
+        } else {
+            let r = thread_local(&self.inner);
+            let parent_ids: Vec<gix::ObjectId> = parents
+                .iter()
+                .map(|p| parse_oid(p))
+                .collect::<Result<Vec<_>>>()?;
+            let default_sig = gix::actor::Signature {
+                name: "gitoxide".into(),
+                email: "gitoxide@localhost".into(),
+                time: gix::date::Time::now_local_or_utc(),
+            };
+            let author_sig = match r.author() {
+                Some(Ok(sig)) => sig.to_owned().unwrap_or_else(|_| default_sig.clone()),
+                _ => default_sig.clone(),
+            };
+            let committer_sig = match r.committer() {
+                Some(Ok(sig)) => sig.to_owned().unwrap_or_else(|_| default_sig.clone()),
+                _ => default_sig,
+            };
+            let commit_obj = gix::objs::Commit {
+                tree: parse_oid(&tree)?,
+                parents: parent_ids.into(),
+                author: author_sig,
+                committer: committer_sig,
+                encoding: None,
+                message: message.into(),
+                extra_headers: Vec::new(),
+            };
+            let id = r.write(&commit_obj).map_err(|e| err("write_commit", e))?;
+            Ok(id.to_string())
+        }
+    }
+
+    /// Write an annotated tag object into the object database.
+    #[napi]
+    pub fn write_tag(
+        &self,
+        target: String,
+        target_kind: String,
+        name: String,
+        message: String,
+    ) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let target_oid = parse_oid(&target)?;
+        let kind = match target_kind.to_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            _ => return Err(err("write_tag", "invalid target_kind")),
+        };
+        let tagger_sig = match r.committer() {
+            Some(Ok(sig)) => sig.to_owned().ok(),
+            _ => None,
+        };
+        let tag_obj = gix::objs::Tag {
+            target: target_oid,
+            target_kind: kind,
+            name: name.into(),
+            tagger: tagger_sig,
+            message: message.into(),
+            signature: None,
+        };
+        let id = r.write(&tag_obj).map_err(|e| err("write_tag", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Edit and save the index file with updated entries.
+    #[napi]
+    pub fn edit_index(&self, entries: Vec<IndexEntry>) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let index_path = r.index_path();
+        let mut file = r.index_or_load_from_head().map_err(|e| err("load index", e))?.into_owned();
+        file.remove_entries(|_, _, _| true);
+        for e in entries {
+            let mode = match e.mode.as_str() {
+                "100644" | "Blob" => gix::index::entry::Mode::FILE,
+                "100755" | "BlobExecutable" => gix::index::entry::Mode::FILE_EXECUTABLE,
+                "120000" | "Link" | "Symlink" => gix::index::entry::Mode::SYMLINK,
+                "160000" | "Commit" => gix::index::entry::Mode::COMMIT,
+                _ => gix::index::entry::Mode::FILE,
+            };
+            let stage = match e.stage {
+                0 => gix::index::entry::Stage::Unconflicted,
+                1 => gix::index::entry::Stage::Base,
+                2 => gix::index::entry::Stage::Ours,
+                3 => gix::index::entry::Stage::Theirs,
+                _ => gix::index::entry::Stage::Unconflicted,
+            };
+            let flags = gix::index::entry::Flags::from_stage(stage);
+            file.dangerously_push_entry(
+                gix::index::entry::Stat::default(),
+                parse_oid(&e.id)?,
+                flags,
+                mode,
+                gix::bstr::BStr::new(e.path.as_bytes()),
+            );
+        }
+        let mut f = std::fs::File::create(&index_path).map_err(|e| err("create index file", e))?;
+        file.write_to(&mut f, gix::index::write::Options::default())
+            .map_err(|e| err("write index", e))?;
+        Ok(())
+    }
+
+    /// Resolve revspec to full hex OID, or `null` if resolution fails.
+    #[napi]
+    pub fn rev_parse_hex(&self, spec: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        match r.rev_parse_single(spec.as_str()) {
+            Ok(id) => Ok(Some(id.to_string())),
+            Err(_) => Ok(None),
+        }
     }
 
     // ---- references -------------------------------------------------------
@@ -1075,12 +1266,30 @@ impl Repository {
         Ok(out)
     }
 
+    /// Whether this repository instance is a linked worktree.
+    #[napi]
+    pub fn is_worktree(&self) -> bool {
+        let r = thread_local(&self.inner);
+        matches!(r.kind(), gix::repository::Kind::LinkedWorkTree { .. })
+    }
+
     /// The git directory of the main repository when this handle is a linked worktree.
     #[napi]
     pub fn main_repo_path(&self) -> Result<String> {
         let r = thread_local(&self.inner);
         let main = r.main_repo().map_err(|e| err("main_repo", e))?;
         Ok(main.path().to_string_lossy().to_string())
+    }
+
+    /// Path to the main worktree directory if this handle is a linked worktree, or `null`.
+    #[napi]
+    pub fn main_worktree_path(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        if let Ok(main) = r.main_repo() {
+            Ok(main.workdir().map(|p| p.to_string_lossy().into_owned()))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Three-way tree merge of `ancestor`, `our`, and `their` (revspecs), writing the result
@@ -1177,15 +1386,43 @@ impl Repository {
 
     /// Set a value (e.g. `user.name`) in the local config file.
     #[napi]
-    pub fn set_config_value(&self, key: String, value: String) -> Result<()> {
-        let mut r = thread_local(&self.inner);
+    pub fn set_config_value(&mut self, key: String, value: String) -> Result<()> {
+        let r = thread_local(&self.inner);
         let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
-        let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
-        let _ = config_file.set_raw_value(key.as_str(), value.as_str());
-        config_file.commit().map_err(|e| err("commit_config", e))?;
-        r.reload().map_err(|e| err("reload", e))?;
+        let git_dir = r.git_dir().to_path_buf();
+        let mut file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
+        file.set_raw_value(key.as_str(), value.as_str()).map_err(|e| err("set_raw_value", e))?;
+        file.commit().map_err(|e| err("commit_config", e))?;
+        let reloaded = gix::ThreadSafeRepository::open(git_dir).map_err(|e| err("reopen", e))?;
+        self.inner = Arc::new(reloaded);
         Ok(())
     }
+
+    /// Create a new branch `name` pointing at `target` (revspec or object id).
+    #[napi]
+    pub fn create_branch(&self, name: String, target: String, force: Option<bool>) -> Result<Reference> {
+        let ref_name = if name.starts_with("refs/heads/") {
+            name
+        } else {
+            format!("refs/heads/{}", name)
+        };
+        let r = thread_local(&self.inner);
+        let target_id = r.rev_parse_single(target.as_str()).map_err(|e| err("rev_parse target", e))?;
+        self.create_reference(ref_name, target_id.to_string(), force)
+    }
+
+    /// Delete a branch by `name` (short name or full ref path).
+    #[napi]
+    pub fn delete_branch(&self, name: String) -> Result<()> {
+        let ref_name = if name.starts_with("refs/heads/") {
+            name
+        } else {
+            format!("refs/heads/{}", name)
+        };
+        let reference = self.find_reference(ref_name)?;
+        reference.delete()
+    }
+
     /// Names of local branches (short form, e.g. `main`).
     #[napi]
     pub fn branch_names(&self) -> Result<Vec<String>> {
@@ -1238,7 +1475,7 @@ impl Repository {
     /// Returns whether a section was removed. The file is rewritten atomically (temp + rename) so a
     /// failure can't leave a truncated config behind.
     #[napi]
-    pub fn unset_config(&self, section: String, subsection: Option<String>) -> Result<bool> {
+    pub fn unset_config(&mut self, section: String, subsection: Option<String>) -> Result<bool> {
         let git_dir = self.git_dir();
         let config_path = std::path::Path::new(&git_dir).join("config");
         let mut file = gix::config::File::from_git_dir(git_dir.clone().into())
@@ -1252,6 +1489,9 @@ impl Repository {
                 file.write_to(&mut f).map_err(|e| err("write config", e))?;
             }
             std::fs::rename(&tmp, &config_path).map_err(|e| err("rename config", e))?;
+            if let Ok(reloaded) = gix::ThreadSafeRepository::open(&git_dir) {
+                self.inner = Arc::new(reloaded);
+            }
         }
         Ok(removed)
     }

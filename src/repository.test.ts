@@ -44,6 +44,20 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Remove .git/shallow if present so sandbox behaves as full clone
+  rmSync(join(cloneDir, ".git", "shallow"), { force: true });
+
+  // If source was a shallow clone, the HEAD commit in the sandbox references
+  // a parent SHA that does not exist in the ODB. Create a synthetic history using a temporary ref,
+  // then update HEAD/branch to point to it.
+  const headCommit = repo.headCommit();
+  const branchName = repo.headName() ?? "refs/heads/main";
+  const rootCommitId = repo.commit("refs/heads/__probe_init_root__", "sandbox root commit", headCommit.treeId, []);
+  const tipCommitId = repo.commit("refs/heads/__probe_init_tip__", "sandbox tip commit", headCommit.treeId, [rootCommitId]);
+  repo.createReference(branchName, tipCommitId, true);
+  repo.findReference("refs/heads/__probe_init_root__").delete();
+  repo.findReference("refs/heads/__probe_init_tip__").delete();
 });
 
 afterAll(() => {
@@ -506,5 +520,148 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+});
+
+// --- wave-2 additions: Index & Status ---------------------------------------
+
+describe("Repository wave-2 additions: Index & Status", () => {
+  test("index and indexOrLoad return array of IndexEntry", () => {
+    const idx = repo.index();
+    expect(Array.isArray(idx)).toBe(true);
+    expect(idx.length).toBeGreaterThan(0);
+    const entry = idx[0]!;
+    expect(typeof entry.path).toBe("string");
+    expect(typeof entry.mode).toBe("string");
+    expect(typeof entry.id).toBe("string");
+    expect(typeof entry.stage).toBe("number");
+
+    const loaded = repo.indexOrLoad();
+    expect(Array.isArray(loaded)).toBe(true);
+    expect(loaded.length).toBe(idx.length);
+  });
+
+  test("status and indexWorktree return status entries", async () => {
+    const s = await repo.status();
+    expect(Array.isArray(s)).toBe(true);
+
+    const iw = repo.indexWorktree();
+    expect(Array.isArray(iw)).toBe(true);
+  });
+});
+
+// --- wave-3 additions: Config read/edit & Branch helpers --------------------
+
+describe("Repository wave-3 additions: Config & Branch helpers", () => {
+  test("setConfigValue and unsetConfig mutate local config", () => {
+    repo.setConfigValue("user.testname", "testvalue");
+    expect(repo.configString("user.testname")).toBe("testvalue");
+
+    const unset = repo.unsetConfig("user");
+    expect(unset).toBe(true);
+    expect(repo.configString("user.testname")).toBeNull();
+  });
+
+  test("createBranch, branchNames, and deleteBranch manage branches", () => {
+    const head = repo.headId();
+    const branchRef = repo.createBranch("probe-branch-wave3", head);
+    expect(branchRef.name).toBe("refs/heads/probe-branch-wave3");
+
+    const names = repo.branchNames();
+    expect(names).toContain("probe-branch-wave3");
+
+    repo.deleteBranch("probe-branch-wave3");
+    expect(repo.branchNames()).not.toContain("probe-branch-wave3");
+  });
+});
+
+// --- wave-4 additions: Object writing & raw lookups -------------------------
+
+describe("Repository wave-4 additions: Object writing & raw lookups", () => {
+  test("tryFindObject returns GitObject or null without throwing", () => {
+    const head = repo.headId();
+    const found = repo.tryFindObject(head);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("commit");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+  });
+
+  test("revParseHex resolves revspec to hex or null", () => {
+    const head = repo.headId();
+    expect(repo.revParseHex("HEAD")).toBe(head);
+    expect(repo.revParseHex("nonexistent-ref-xyz")).toBeNull();
+  });
+
+  test("writeObject, writeTree, writeCommit round-trip", () => {
+    const blobId = repo.writeBlob(Buffer.from("wave 4 content\n"));
+    expect(typeof blobId).toBe("string");
+
+    const treeId = repo.writeTree([{ name: "test.txt", mode: "Blob", id: blobId }]);
+    expect(typeof treeId).toBe("string");
+
+    const headCommit = repo.headCommit();
+    const commitId = repo.writeCommit(
+      treeId,
+      [headCommit.id],
+      "wave 4 commit message",
+      "refs/heads/__probe_wave4__",
+    );
+    expect(typeof commitId).toBe("string");
+
+    const created = repo.findCommit(commitId);
+    expect(created.message).toBe("wave 4 commit message");
+    expect(created.treeId).toBe(treeId);
+
+    repo.findReference("refs/heads/__probe_wave4__").delete();
+  });
+
+  test("writeCommit without reference writes commit object without mutating HEAD", () => {
+    const headBefore = repo.headId();
+    const headCommit = repo.headCommit();
+    const looseCommitId = repo.writeCommit(
+      headCommit.treeId,
+      [headCommit.id],
+      "standalone loose commit",
+    );
+    expect(typeof looseCommitId).toBe("string");
+    expect(repo.headId()).toBe(headBefore);
+    expect(repo.findCommit(looseCommitId).message).toBe("standalone loose commit");
+  });
+
+  test("writeTag creates an annotated tag object", () => {
+    const head = repo.headId();
+    const tagObjId = repo.writeTag(head, "commit", "v9.9.9", "annotated tag object");
+    expect(typeof tagObjId).toBe("string");
+    const tagObj = repo.findTag(tagObjId);
+    expect(tagObj.message).toBe("annotated tag object");
+    expect(tagObj.targetId).toBe(head);
+  });
+});
+
+describe("Repository editIndex", () => {
+  test("editIndex updates index entries", () => {
+    const current = repo.index();
+    expect(current.length).toBeGreaterThan(0);
+    const first = current[0]!;
+    repo.editIndex([first]);
+    const updated = repo.index();
+    expect(updated.length).toBe(1);
+    expect(updated[0]!.path).toBe(first.path);
+  });
+});
+
+// --- wave-5 additions: Worktree ---------------------------------------------
+
+describe("Repository wave-5 additions: Worktree", () => {
+  test("isWorktree reports false for main repository sandbox", () => {
+    expect(repo.isWorktree()).toBe(false);
+    expect(repo.mainWorktreePath()).toBe(repo.workDir());
+  });
+
+  test("worktrees returns array of WorktreeInfo", () => {
+    const wts = repo.worktrees();
+    expect(Array.isArray(wts)).toBe(true);
   });
 });
