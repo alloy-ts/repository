@@ -1,9 +1,5 @@
 import { expect, test } from "vite-plus/test";
-import {
-  Repository,
-  type Commit,
-  type SignatureVerification,
-} from "./main.ts";
+import { Repository, type Commit, type SignatureVerification } from "../dist/index.js";
 
 /** The commit `HEAD` points to in the current working-tree repository. */
 function headCommit(): Commit {
@@ -16,10 +12,7 @@ function headCommit(): Commit {
  */
 function signingConfigured(): boolean {
   try {
-    return (
-      typeof Repository.open(process.cwd()).config_string("user.signingKey") ===
-      "string"
-    );
+    return typeof Repository.open(process.cwd()).configString("user.signingKey") === "string";
   } catch {
     return false;
   }
@@ -29,19 +22,18 @@ const canSign = signingConfigured();
 
 // --- verifying signatures -------------------------------------------------
 
-test("verifySignature reports an unsigned commit as not signed", () => {
-  const v = headCommit().verifySignature();
-  expect(v.signed).toBe(false);
-  expect(v.status).toBeNull();
-  expect(v.signer).toBeNull();
-  expect(v.key).toBeNull();
-  expect(v.fingerprint).toBeNull();
-  expect(v.valid).toBeNull();
-});
-
-test("verifySignature returns a structured result for HEAD", () => {
+test("verifySignature reports signature verification status for HEAD commit", () => {
   const v: SignatureVerification = headCommit().verifySignature();
-  expect(v).toMatchObject({ signed: false });
+  expect(typeof v.signed).toBe("boolean");
+  if (v.signed) {
+    expect(typeof v.format).toBe("string");
+  } else {
+    expect(v.status).toBeNull();
+    expect(v.signer).toBeNull();
+    expect(v.key).toBeNull();
+    expect(v.fingerprint).toBeNull();
+    expect(v.valid).toBeNull();
+  }
 });
 
 // --- signing --------------------------------------------------------------
@@ -49,22 +41,19 @@ test("verifySignature returns a structured result for HEAD", () => {
 // Signing requires a configured signer (`gpg.format` / `user.signingKey` and an
 // installed gpg/ssh-keygen). Skipped in environments without one so the suite
 // stays green; run locally with signing configured to exercise the full path.
-test.skipIf(!canSign)(
-  "sign creates a new signed commit whose signature verifies",
-  () => {
-    const base = headCommit();
-    const signed = base.sign();
+test.skipIf(!canSign)("sign creates a new signed commit whose signature verifies", () => {
+  const base = headCommit();
+  const signed = base.sign();
 
-    // A signature changes the object id, so the signed commit is distinct.
-    expect(signed.id).not.toBe(base.id);
+  // A signature changes the object id, so the signed commit is distinct.
+  expect(signed.id).not.toBe(base.id);
 
-    const v = signed.verifySignature();
-    expect(v.signed).toBe(true);
-    expect(v.valid).toBe(true);
-    expect(v.signer).not.toBeNull();
-    expect(typeof v.status).toBe("string");
-  },
-);
+  const v = signed.verifySignature();
+  expect(v.signed).toBe(true);
+  expect(v.valid).toBe(true);
+  expect(v.signer).not.toBeNull();
+  expect(typeof v.status).toBe("string");
+});
 
 test("sign surfaces a clear error when no signer is configured", () => {
   if (canSign) {

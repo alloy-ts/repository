@@ -4,7 +4,7 @@ use napi::bindgen_prelude::{Buffer, Error as NapiError};
 use napi::Result;
 use napi_derive::napi;
 
-use gix::object::signature::{Format, sign::Options};
+use gix::commit::sign::{Format, Options};
 
 use crate::error::{err, parse_oid, thread_local};
 
@@ -57,8 +57,8 @@ fn signature_to_dto(s: &gix::actor::SignatureRef) -> Signature {
     }
 }
 
-fn lossy(b: &gix::bstr::BStr) -> String {
-    String::from_utf8_lossy(b).into_owned()
+fn lossy(b: impl AsRef<[u8]>) -> String {
+    String::from_utf8_lossy(b.as_ref()).into_owned()
 }
 
 /// A decoded commit object, holding owned data plus a back-link to its repository.
@@ -154,9 +154,10 @@ impl Commit {
     #[napi]
     pub fn sign(&self) -> Result<Commit> {
         let repo = thread_local(&self.repo);
-        let decoded = repo
+        let commit_obj = repo
             .find_commit(parse_oid(&self.id)?)
-            .map_err(|e| err("find_commit", e))?
+            .map_err(|e| err("find_commit", e))?;
+        let decoded = commit_obj
             .decode()
             .map_err(|e| err("decode", e))?;
         let config = repo.config_snapshot();

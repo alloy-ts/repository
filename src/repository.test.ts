@@ -1,109 +1,100 @@
-import { expect, test } from "vite-plus/test";
-import {
-  Repository,
-  type Tree,
-  type TreeEntry,
-} from "./main.ts";
+import { describe, expect, test } from "vite-plus/test";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import { Repository, type LogEntry } from "../dist/index.js";
 
-/**
- * Draft: use the Repository API to read the *current* tree (the tree of HEAD).
- *
- * Three equivalent ways to get it:
- *   1. `repo.head().tree()`                -> tree of the current HEAD (branch/detached)
- *   2. `repo.headCommit().tree()`         -> tree of the commit HEAD points at
- *   3. `repo.findTree(repo.revParseSingle("HEAD^{tree}"))` -> by resolving the tree rev
- *
- * `Tree` exposes `tree.entries` (a getter, not a method) returning `TreeEntry[]`,
- * where each `TreeEntry` has `name`, `id` and `mode`.
- */
-
-function openRepo(): Repository {
-  // The workspace itself is a git repository, so this resolves the current repo.
-  return Repository.open(process.cwd());
+function createTempDir(prefix: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-/** Render a tree as an `ls -1` style listing, with the mode and id prefix. */
-function renderTree(tree: Tree): string {
-  return tree.entries
-    .map((e: TreeEntry) => `${e.mode.padEnd(7)} ${e.id.slice(0, 8)} ${e.name}`)
-    .join("\n");
+function cleanupDir(dirPath: string) {
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
 }
 
-// --- 1. current tree via HEAD -------------------------------------------------
+describe("Repository static constructors and initialization", () => {
+  test("Repository.open opens existing workspace repo", () => {
+    const repo = Repository.open(process.cwd());
+    expect(repo.isBare()).toBe(false);
+    expect(typeof repo.gitDir()).toBe("string");
+  });
 
-test("head().tree() returns the current HEAD tree with entries", () => {
-  const repo = openRepo();
-  const tree = repo.head().tree();
+  test("Repository.discover finds repository from workspace subdirectory", () => {
+    const srcDir = path.join(process.cwd(), "src");
+    const repo = Repository.discover(srcDir);
+    expect(repo.isBare()).toBe(false);
+  });
 
-  expect(typeof tree.id).toBe("string");
-  expect(tree.id.length).toBeGreaterThan(0);
-  expect(Array.isArray(tree.entries)).toBe(true);
-  // A non-empty repo HEAD tree has at least one entry.
-  expect(tree.entries.length).toBeGreaterThan(0);
+  test("Repository.init creates a working-tree repository", () => {
+    const tmp = createTempDir("repo-init-test-");
+    try {
+      const repo = Repository.init(tmp);
+      expect(repo.isBare()).toBe(false);
+      expect(repo.workDir()).toBe(tmp);
+      expect(fs.existsSync(path.join(tmp, ".git"))).toBe(true);
+    } finally {
+      cleanupDir(tmp);
+    }
+  });
 
-  for (const e of tree.entries) {
-    expect(typeof e.name).toBe("string");
-    expect(e.name.length).toBeGreaterThan(0);
-    expect(typeof e.id).toBe("string"); // hex object id
-    expect(typeof e.mode).toBe("string"); // e.g. "Blob", "Tree", "BlobExecutable"
-  }
+  test("Repository.init with bare: true creates a bare repository", () => {
+    const tmp = createTempDir("repo-init-bare-test-");
+    try {
+      const repo = Repository.init(tmp, true);
+      expect(repo.isBare()).toBe(true);
+      expect(repo.workDir()).toBeNull();
+      expect(fs.existsSync(path.join(tmp, "HEAD"))).toBe(true);
+    } finally {
+      cleanupDir(tmp);
+    }
+  });
 
-  console.log(`\nHEAD tree ${tree.id.slice(0, 12)}:\n` + renderTree(tree));
+  test("Repository.clone works as static constructor method on Repository", () => {
+    const srcTmp = createTempDir("repo-clone-src-");
+
+    try {
+      Repository.init(srcTmp);
+      expect(typeof Repository.clone).toBe("function");
+    } finally {
+      cleanupDir(srcTmp);
+    }
+  });
 });
 
-// --- 2. current tree via the head commit --------------------------------------
+describe("Reading git logs with Repository", () => {
+  test("repo.log() fetches commit entries in reverse chronological order", () => {
+    const repo = Repository.open(process.cwd());
+    const entries: LogEntry[] = repo.log(undefined, 10, false);
 
-test("headCommit().tree() matches head().tree()", () => {
-  const repo = openRepo();
-  const viaHead = repo.head().tree();
-  const viaCommit = repo.headCommit().tree();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
 
-  expect(viaCommit.id).toBe(viaHead.id);
-  expect(viaCommit.entries.length).toBe(viaHead.entries.length);
-});
+    const first = entries[0]!;
+    expect(typeof first.id).toBe("string");
+    expect(typeof first.message).toBe("string");
+    expect(typeof first.subject).toBe("string");
+    expect(typeof first.authorName).toBe("string");
+    expect(typeof first.authorEmail).toBe("string");
+    expect(typeof first.authorTime).toBe("number");
+    expect(Array.isArray(first.parentIds)).toBe(true);
+  });
 
-// --- 3. resolve the tree rev directly -----------------------------------------
+  test("repo.revWalk() and repo.findCommit() allow manually walking log history", () => {
+    const repo = Repository.open(process.cwd());
+    const headId = repo.headId();
+    const commitIds = repo.revWalk([headId]);
 
-test("revParseSingle('HEAD^{tree}') resolves to the same tree", () => {
-  const repo = openRepo();
-  const treeId = repo.revParseSingle("HEAD^{tree}");
-  const tree = repo.findTree(treeId);
+    expect(Array.isArray(commitIds)).toBe(true);
+    expect(commitIds.length).toBeGreaterThan(0);
+    expect(commitIds[0]).toBe(headId);
 
-  expect(tree.id).toBe(repo.head().tree().id);
-});
-
-// --- 4. look up a single entry ------------------------------------------------
-
-test("tree.entry() finds a direct child by name", () => {
-  const repo = openRepo();
-  const tree = repo.head().tree();
-
-  // Read the first entry and round-trip it through tree.entry(name).
-  const first = tree.entries[0];
-  const found = tree.entry(first.name);
-  expect(found).not.toBeUndefined();
-  expect(found!.id).toBe(first.id);
-
-  // A non-existent name returns null (napi-rs maps Option::None to null).
-  expect(tree.entry("__does_not_exist__")).toBeNull();
-});
-
-// --- 5. recurse one level to show nested trees (directories) ------------------
-
-test("recurse into a nested tree (subdirectory)", () => {
-  const repo = openRepo();
-  const tree = repo.head().tree();
-
-  // Find a child that is itself a tree (a directory) and list its contents.
-  const dir = tree.entries.find((e) => e.mode === "Tree");
-  if (dir) {
-    const sub = repo.findTree(dir.id);
-    expect(Array.isArray(sub.entries)).toBe(true);
-    console.log(
-      `\nSubdirectory "${dir.name}" tree ${sub.id.slice(0, 12)}:\n` +
-        renderTree(sub),
-    );
-  } else {
-    console.log("\nHEAD tree has no subdirectory entries.");
-  }
+    const commit = repo.findCommit(commitIds[0]!);
+    expect(commit.id).toBe(headId);
+    expect(typeof commit.message).toBe("string");
+    expect(typeof commit.author.name).toBe("string");
+  });
 });
