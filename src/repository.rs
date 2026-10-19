@@ -11,7 +11,7 @@ use crate::object::{
     build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Tag,
     Tree,
 };
-use crate::reference::{build_head, build_reference, Head, Reference};
+use crate::reference::{build_head, build_reference, Head, Reference, ReflogEntry};
 use crate::remote::build_remote;
 use crate::remote::Remote;
 
@@ -247,6 +247,16 @@ impl Repository {
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    // ---- reflog -----------------------------------------------------------
+
+    /// Read reflog entries for a reference by name (defaults to `"HEAD"` if omitted).
+    #[napi]
+    pub fn reflog(&self, name: Option<String>) -> Result<Vec<ReflogEntry>> {
+        let ref_name = name.unwrap_or_else(|| "HEAD".to_string());
+        let reference = self.find_reference(ref_name)?;
+        reference.reflog()
     }
 
     // ---- references -------------------------------------------------------

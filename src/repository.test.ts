@@ -185,6 +185,20 @@ describe("Repository references", () => {
     expect(repo.findReference("HEAD").name).toBe("HEAD");
   });
 
+  test("reflog() returns reflog entries for HEAD and named references", () => {
+    const headLogs = repo.reflog();
+    expect(Array.isArray(headLogs)).toBe(true);
+
+    const explicitHeadLogs = repo.reflog("HEAD");
+    expect(Array.isArray(explicitHeadLogs)).toBe(true);
+
+    const refs = repo.references();
+    if (refs.length > 0) {
+      const refLogs = repo.reflog(refs[0].name);
+      expect(Array.isArray(refLogs)).toBe(true);
+    }
+  });
+
   test("findReference throws on a missing ref", () => {
     expect(() => repo.findReference("refs/heads/__nope__")).toThrow();
   });
