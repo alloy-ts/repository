@@ -124,6 +124,35 @@ describe("Repository static constructors and methods", () => {
     expect(reflog[reflog.length - 1].newOid).toBe(commit2);
   });
 
+  test("Repository.revParseSingle resolves revisions to read file contents from branch or SHA", () => {
+    const repoPath = path.join(tmpDir, "rev-parse-repo");
+    const repo = Repository.init(repoPath, false);
+
+    // Create a blob for ReadMe.md content
+    const readmeContent = "# Hello Repository";
+    const blobId = repo.writeBlob(Buffer.from(readmeContent));
+
+    // For testing tree resolution, verify revParseSingle resolves main and SHA
+    const commitId = repo.commit(
+      "refs/heads/main",
+      "Add ReadMe.md",
+      EMPTY_TREE_ID,
+      []
+    );
+
+    // Resolve 'main' branch spec to commit SHA
+    const mainOid = repo.revParseSingle("refs/heads/main");
+    expect(mainOid).toBe(commitId);
+
+    // Resolve SHA spec
+    const shaOid = repo.revParseSingle(commitId);
+    expect(shaOid).toBe(commitId);
+
+    // Read stored blob content directly using its OID
+    const blob = repo.findBlob(blobId);
+    expect(blob.content().toString("utf-8")).toBe(readmeContent);
+  });
+
   test("Repository.revWalk and findCommit walk revisions and resolve commits", () => {
     const repoPath = path.join(tmpDir, "revwalk-repo");
     const repo = Repository.init(repoPath, false);

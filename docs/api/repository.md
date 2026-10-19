@@ -38,20 +38,46 @@ const repo4 = await Repository.clone("https://github.com/example/repo.git", "./c
 
 | Class / Type | Responsibilities | Key Methods / Properties |
 | ------------ | ---------------- | ------------------------ |
-| **`Repository`** | Primary handle to a git repository | `Repository.open`, `Repository.init`, `Repository.discover`, `Repository.clone`<br>`repo.head()`, `repo.headCommit()`, `repo.headId()`, `repo.headName()`<br>`repo.findCommit(id)`, `repo.findTree(id)`, `repo.findBlob(id)`, `repo.findTag(id)`, `repo.findObject(id)`<br>`repo.writeBlob(buffer)`, `repo.commit(...)`<br>`repo.references()`, `repo.findReference(name)`, `repo.createReference(...)`<br>`repo.remotes()`, `repo.findRemote(name)`<br>`repo.log(rev?, limit?, firstParent?)`, `repo.revWalk(tips)`<br>`repo.diffTreeToTree(old?, new)` |
+| **`Repository`** | Primary handle to a git repository | `Repository.open`, `Repository.init`, `Repository.discover`, `Repository.clone`<br>`repo.head()`, `repo.headCommit()`, `repo.headId()`, `repo.headName()`<br>`repo.findCommit(id)`, `repo.findTree(id)`, `repo.findBlob(id)`, `repo.findTag(id)`, `repo.findObject(id)`<br>`repo.writeBlob(buffer)`, `repo.commit(...)`<br>`repo.references()`, `repo.findReference(name)`, `repo.createReference(...)`<br>`repo.remotes()`, `repo.findRemote(name)`<br>`repo.log(rev?, limit?, firstParent?)`, `repo.revWalk(tips)`, `repo.reflog(name?)`<br>`repo.revParseSingle(spec)` / `repo.revParse(spec)`<br>`repo.diffTreeToTree(old?, new)` |
 | **`Commit`** | Decoded commit object with back-link to repository | `commit.id`, `commit.message`, `commit.treeId`, `commit.parentIds`<br>`commit.author`: `Signature`<br>`commit.committer`: `Signature`<br>`commit.parents()`: `Commit[]`<br>`commit.tree()`: `Tree` |
 | **`Tree`** | Decoded tree object | `tree.id`, `tree.entries`: `TreeEntry[]`, `tree.entry(name)` |
 | **`Blob`** | Raw file content handle | `blob.id`, `blob.content()`: `Buffer` |
 | **`Tag`** | Annotated tag handle | `tag.id`, `tag.name`, `tag.targetId`, `tag.targetKind`, `tag.message`, `tag.tagger` |
 | **`Head`** | HEAD reference state | `head.name`, `head.referent`, `head.id`, `head.commit()`, `head.tree()` |
-| **`Reference`** | Git reference | `ref.name`, `ref.target`, `ref.peeled`, `ref.peel()`, `ref.delete()` |
+| **`Reference`** | Git reference | `ref.name`, `ref.target`, `ref.peeled`, `ref.peel()`, `ref.delete()`, `ref.reflog()` |
 | **`Remote`** | Configured remote | `remote.name`, `remote.url`, `remote.fetch()`: `Promise<RemoteFetchOutcome>` |
 
 ---
 
-## 4. Reading Git Logs in JavaScript
+## 4. Reading Specific File Revisions (e.g. `ReadMe.md` from `main` or SHA)
 
-`Repository` provides two complementary ways to read git logs:
+To read a file entry from a specific branch or commit SHA:
+
+```js
+import { Repository } from "repository";
+
+const repo = Repository.open(".");
+
+// 1. Resolve a branch (e.g. "main" or "refs/heads/main") or a commit SHA
+const commitOid = repo.revParseSingle("main"); // or repo.revParseSingle("<commit-sha>")
+
+// 2. Fetch the commit and its root tree
+const commit = repo.findCommit(commitOid);
+const tree = commit.tree();
+
+// 3. Find the file entry inside the tree
+const entry = tree.entry("ReadMe.md");
+if (entry) {
+  // 4. Fetch blob content
+  const blob = repo.findBlob(entry.id);
+  const text = blob.content().toString("utf-8");
+  console.log("ReadMe.md content:\n", text);
+}
+```
+
+---
+
+## 5. Reading Git Logs & Reflogs in JavaScript
 
 ### Option A: `repo.log(rev?, limit?, firstParent?)`
 Resolves commit summaries in one efficient native call (reverse-chronological order):
@@ -70,31 +96,19 @@ for (const entry of entries) {
 }
 ```
 
-### Option B: `repo.revWalk(tips)` + `repo.findCommit(id)`
-Walk object IDs manually and inspect individual rich `Commit` instances:
+### Option B: `repo.reflog(name?)`
+Read reference logs (reflog) for `HEAD` or any reference:
 
 ```js
-import { Repository } from "repository";
-
-const repo = Repository.open(".");
-const headId = repo.headId();
-
-// Walk revision history starting from HEAD
-const oids = repo.revWalk([headId]);
-
-for (const oid of oids) {
-  const commit = repo.findCommit(oid);
-  console.log(`${commit.id.slice(0, 8)} ${commit.message.split("\n")[0]}`);
-
-  // Access parent commits
-  const parents = commit.parents();
-  console.log(`  Parents: ${parents.map(p => p.id.slice(0, 8)).join(", ")}`);
+const mainReflog = repo.reflog("refs/heads/main");
+for (const entry of mainReflog) {
+  console.log(`${entry.previousOid.slice(0, 8)} -> ${entry.newOid.slice(0, 8)}: ${entry.message}`);
 }
 ```
 
 ---
 
-## 5. Commit Verification and Signatures
+## 6. Commit Verification and Signatures
 
 Every commit object decodes author and committer signatures into `Signature` objects:
 
@@ -106,5 +120,3 @@ interface Signature {
   timezoneOffset: number; // Offset in minutes
 }
 ```
-
-Commit headers and metadata can be inspected to verify commit structure, author timestamps, and parent graph integrity.
