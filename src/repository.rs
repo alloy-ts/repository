@@ -474,6 +474,20 @@ impl Repository {
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
     }
 
+    /// Read a config value as a boolean (or `null` if omitted/invalid).
+    #[napi]
+    pub fn config_boolean(&self, key: String) -> Option<bool> {
+        let r = thread_local(&self.inner);
+        r.config_snapshot().boolean(key.as_str()).map(|b| b)
+    }
+
+    /// Read a config value as an integer (or `null` if omitted/invalid).
+    #[napi]
+    pub fn config_integer(&self, key: String) -> Option<i64> {
+        let r = thread_local(&self.inner);
+        r.config_snapshot().integer(key.as_str()).map(|i| i)
+    }
+
     /// The working directory, if this is not a bare repository.
     #[napi]
     pub fn work_dir(&self) -> Option<String> {

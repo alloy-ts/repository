@@ -290,10 +290,16 @@ describe("Repository config & paths", () => {
     expect(repo.workDir()).toBe(cloneDir);
   });
 
-  test("configString returns strings or null (never undefined)", () => {
+  test("configString / configBoolean / configInteger return parsed values or null", () => {
     const signing = repo.configString("user.signingKey");
     expect(typeof signing === "string" || signing === null).toBe(true);
     expect(repo.configString("this.key.does.not.exist.zzz")).toBeNull();
+
+    const gpgsign = repo.configBoolean("commit.gpgsign");
+    expect(typeof gpgsign === "boolean" || gpgsign === null).toBe(true);
+
+    const nonExistentInt = repo.configInteger("this.int.key.does.not.exist");
+    expect(nonExistentInt).toBeNull();
   });
 });
 
