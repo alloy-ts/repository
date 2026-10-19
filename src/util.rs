@@ -106,18 +106,36 @@ pub fn remote_name_from_url(url: &str, is_first: bool) -> String {
     }
 }
 
+/// Read `repository.manifest.yml` content via gix revision API (e.g. `HEAD:repository.manifest.yml`)
+/// or fall back to reading from disk.
+pub fn read_manifest_content(repo: &gix::Repository, manifest_path: &Path) -> Result<String> {
+    // 1. Try reading via gix revision API from HEAD:repository.manifest.yml or main:repository.manifest.yml
+    if let Ok(id) = repo.rev_parse_single("HEAD:repository.manifest.yml") {
+        if let Ok(blob) = repo.find_blob(id) {
+            return Ok(String::from_utf8_lossy(&blob.data).into_owned());
+        }
+    }
+    if let Ok(id) = repo.rev_parse_single("main:repository.manifest.yml") {
+        if let Ok(blob) = repo.find_blob(id) {
+            return Ok(String::from_utf8_lossy(&blob.data).into_owned());
+        }
+    }
+
+    // 2. Fall back to reading from disk
+    fs::read_to_string(manifest_path).map_err(|e| {
+        napi::Error::from_reason(format!(
+            "failed to read manifest at {}: {e}",
+            manifest_path.display()
+        ))
+    })
+}
+
 /// Setup remotes in `repo` according to the manifest file at `manifest_path`.
 pub fn setup_repository_remotes(
     repo: &gix::Repository,
     manifest_path: &Path,
 ) -> Result<Vec<(String, String)>> {
-    let content = fs::read_to_string(manifest_path).map_err(|e| {
-        napi::Error::from_reason(format!(
-            "failed to read manifest at {}: {e}",
-            manifest_path.display()
-        ))
-    })?;
-
+    let content = read_manifest_content(repo, manifest_path)?;
     let manifest = parse_manifest(&content);
     let mut configured = Vec::new();
 

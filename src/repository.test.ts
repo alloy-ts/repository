@@ -24,7 +24,11 @@ import { Repository, type LogEntry, type Tree, type TreeEntry } from "./main.ts"
  * 4. Manifest Remote Setup:
  *    - repo.setupRemotesFromManifest(manifestPath?) -> setup remotes from repository.manifest.yml
  *
- * 5. Inspection of Trees and Objects.
+ * 5. Revisions & Entry Reading:
+ *    - repo.revParseSingle("HEAD:ReadMe.md") -> get blob ID for path at revision
+ *    - repo.findBlob(blobId).content()       -> read raw buffer/text content at revision
+ *
+ * 6. Inspection of Trees and Objects.
  */
 
 function openRepo(): Repository {
@@ -200,7 +204,35 @@ test("setupRemotesFromManifest parses manifest and configures remotes", () => {
   }
 });
 
-// --- 5. Tree & object inspection ---------------------------------------------
+// --- 5. Revisions & Entry Reading ---------------------------------------------
+
+test("resolve revision for a path and read file content (e.g. ReadMe.md from main/HEAD)", () => {
+  const repo = openRepo();
+
+  // 1. Get blob ID for ReadMe.md directly from HEAD/main spec
+  const blobIdFromSpec = repo.revParseSingle("HEAD:ReadMe.md");
+  expect(typeof blobIdFromSpec).toBe("string");
+  expect(blobIdFromSpec.length).toBe(40);
+
+  // 2. Read the file content from the blob
+  const blob = repo.findBlob(blobIdFromSpec);
+  const content = blob.content().toString("utf-8");
+  expect(content).toContain("repository");
+
+  // 3. Resolve commit by branch name, tree entry, and read blob
+  const headCommit = repo.headCommit();
+  const tree = headCommit.tree();
+  const readmeEntry = tree.entry("ReadMe.md");
+  expect(readmeEntry).not.toBeNull();
+  expect(readmeEntry!.id).toBe(blobIdFromSpec);
+
+  // 4. Resolve file content from specific SHA revision spec
+  const shaSpec = `${headCommit.id}:ReadMe.md`;
+  const blobIdFromSha = repo.revParseSingle(shaSpec);
+  expect(blobIdFromSha).toBe(blobIdFromSpec);
+});
+
+// --- 6. Tree & object inspection ---------------------------------------------
 
 test("head().tree() returns the current HEAD tree with entries", () => {
   const repo = openRepo();
