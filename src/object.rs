@@ -4,7 +4,7 @@ use napi::bindgen_prelude::{Buffer, Error as NapiError};
 use napi::Result;
 use napi_derive::napi;
 
-use gix::object::signature::{Format, sign::Options};
+use gix::objs::signature::{Format, sign::Options};
 
 use crate::error::{err, parse_oid, thread_local};
 

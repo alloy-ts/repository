@@ -5,29 +5,17 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { Repository, type Tree, type TreeEntry } from "./main.ts";
 
-/**
- * Full-surface test for `Repository`.
- *
- * Strategy: clone the real working repo into a temp dir (local, offline clone -> complete
- * history + refs + `origin` remote) and use that sandbox for every read. Mutating methods
- * (`createReference`, `createTag`, `createLightweightTag`, `commit`) write to throwaway
- * refs/tags that are deleted at the end of each test, so the real repository is never touched.
- */
-
 const realRoot = process.cwd();
 let base: string;
 let cloneDir: string;
-let repo: Repository; // the sandbox clone
+let repo: Repository;
 
 beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-api-"));
   cloneDir = join(base, "clone");
-  // Prefer the binding's own `Repository.clone`; fall back to the git CLI if the local
-  // transport hits gix's ref-update limitation in this environment.
   try {
     repo = await Repository.clone(realRoot, cloneDir, false);
   } catch (e) {
-    console.log(`Repository.clone unavailable (${e}); using git CLI clone for sandbox`);
     rmSync(cloneDir, { recursive: true, force: true });
     execSync(
       `git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`,
@@ -41,7 +29,6 @@ afterAll(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-/** Walk a tree to find the first blob-like entry (100644/100755/120000). */
 function firstBlobEntry(r: Repository, tree: Tree): TreeEntry | null {
   for (const e of tree.entries) {
     if (e.mode === "100644" || e.mode === "100755" || e.mode === "120000") return e;
@@ -58,7 +45,6 @@ function firstBlobEntry(r: Repository, tree: Tree): TreeEntry | null {
 
 describe("Repository static constructors", () => {
   test("clone() returns a usable repository instance (async)", async () => {
-    // Best-effort: exercise the binding's own clone when it works in this environment.
     const dir = join(base, "clone-by-binding");
     let cloned: Repository | null = null;
     try {
@@ -142,8 +128,6 @@ describe("Repository objects", () => {
     if (entry) {
       const blob = repo.findBlob(entry.id);
       expect(Buffer.isBuffer(blob.content())).toBe(true);
-    } else {
-      console.log("no blob entry in HEAD tree; skipping findBlob assertion");
     }
   });
 
@@ -177,7 +161,6 @@ describe("Repository references", () => {
   test("references() lists branches/tags; HEAD is reachable via findReference", () => {
     const names = repo.references().map((r) => r.name);
     expect(Array.isArray(names)).toBe(true);
-    // `references()` returns concrete refs (branches, tags); the symbolic HEAD is not listed.
     expect(names.some((n) => n.startsWith("refs/heads/"))).toBe(true);
     expect(repo.findReference("HEAD").name).toBe("HEAD");
   });
@@ -204,13 +187,11 @@ describe("Repository references", () => {
 
     const ann = repo.createTag("__probe_ann__", head, "annotated message", true);
     expect(ann.name).toBe("refs/tags/__probe_ann__");
-    // For an annotated tag, `target` is the tag object id.
     expect(repo.findTag(ann.target!).name).toBe("__probe_ann__");
     expect(repo.findTag(ann.target!).message).toContain("annotated message");
 
     expect(repo.references().some((r) => r.name === "refs/tags/__probe_lw__")).toBe(true);
 
-    // Cleanup (temp clone only).
     repo.findReference("refs/heads/__probe_branch__").delete();
     repo.findReference("refs/tags/__probe_lw__").delete();
     repo.findReference("refs/tags/__probe_ann__").delete();
@@ -228,8 +209,6 @@ describe("Repository remotes", () => {
       const o = repo.findRemote("origin");
       expect(o.name).toBe("origin");
       expect(typeof o.url).toBe("string");
-    } else {
-      console.log("clone has no 'origin' remote; skipping findRemote(...)");
     }
   });
 
@@ -259,7 +238,7 @@ describe("Repository config & paths", () => {
 
 // --- revisions / log / diff -------------------------------------------------
 
-describe("Repository revisions", () => {
+describe("Repository revisions & log reading examples", () => {
   test("revParseSingle / revParse / revWalk", () => {
     const tip = repo.revParseSingle("HEAD");
     expect(tip).toBe(repo.headId());
@@ -278,10 +257,24 @@ describe("Repository revisions", () => {
     expect(repo.mergeBaseOctopus([head, parent])).toBe(parent);
   });
 
-  test("log returns commit summaries newest-first", () => {
-    const entries = repo.log();
+  test("log returns commit summaries newest-first (JS log reading example)", () => {
+    // Example: Read top 10 commits via high-level repo.log()
+    const entries = repo.log("HEAD", 10, false);
     expect(entries.length).toBeGreaterThan(0);
     expect(entries[0].id).toBe(repo.headId());
+    for (const e of entries) {
+      expect(typeof e.id).toBe("string");
+      expect(typeof e.subject).toBe("string");
+      expect(typeof e.authorName).toBe("string");
+    }
+
+    // Example: Manual revWalk and findCommit
+    const ids = repo.revWalk([repo.headId()]);
+    for (const id of ids.slice(0, 5)) {
+      const commit = repo.findCommit(id);
+      expect(commit.id).toBe(id);
+      expect(typeof commit.message).toBe("string");
+    }
   });
 
   test("diffTreeToTree diffs two trees and against empty", () => {
