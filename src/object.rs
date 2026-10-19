@@ -262,7 +262,8 @@ impl GitObject {
         if self.kind != "commit" {
             return Ok(None);
         }
-        let commit = thread_local(&self.repo)
+        let r = thread_local(&self.repo);
+        let commit = r
             .find_commit(parse_oid(&self.id)?)
             .map_err(|e| err("find_commit", e))?;
         Ok(Some(build_commit(&self.repo, commit)?))
@@ -289,7 +290,8 @@ impl GitObject {
         if self.kind != "tag" {
             return Ok(None);
         }
-        let tag = thread_local(&self.repo)
+        let r = thread_local(&self.repo);
+        let tag = r
             .find_tag(parse_oid(&self.id)?)
             .map_err(|e| err("find_tag", e))?;
         Ok(Some(build_tag(&self.repo, tag)?))

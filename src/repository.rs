@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
+use gix::bstr::ByteSlice;
+use napi::bindgen_prelude::AsyncTask;
 use napi::Result;
 use napi_derive::napi;
 
+use crate::clone::CloneTask;
 use crate::error::{err, parse_oid, thread_local};
 use crate::object::{
     build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Tag,
@@ -63,6 +66,12 @@ impl Repository {
         })
     }
 
+    /// Clone a repository from `url` into `path`.
+    #[napi(ts_return_type = "Promise<Repository>")]
+    pub fn clone(url: String, path: String, bare: Option<bool>) -> AsyncTask<CloneTask> {
+        crate::clone::clone(url, path, bare)
+    }
+
     // ---- head / objects --------------------------------------------------
 
     /// The repository `HEAD`.
@@ -111,7 +120,7 @@ impl Repository {
         let tree = r
             .find_tree(parse_oid(&id)?)
             .map_err(|e| err("find_tree", e))?;
-        build_tree(&self.inner, tree)
+        build_tree(&self.inner, tree.id)
     }
 
     /// Find a blob by id (content is read lazily via [`Blob::content`]).
@@ -284,7 +293,7 @@ impl Repository {
     #[napi]
     pub fn config_string(&self, key: String) -> Option<String> {
         let r = thread_local(&self.inner);
-        r.config_snapshot().string(key.as_str()).map(|v| lossy(v.as_bstr()))
+        r.config_snapshot().string(key.as_str()).map(|v| lossy(v.as_ref()))
     }
 
     /// The working directory, if this is not a bare repository.
@@ -475,14 +484,14 @@ impl Repository {
 
     /// Diff two trees (or one tree against empty when `old` is omitted).
     #[napi]
-    pub fn diff_tree_to_tree(&self, old: Option<String>, new: String) -> Result<Vec<Change>> {
+    pub fn diff_tree_to_tree(&self, old: Option<String>, new_tree_id: String) -> Result<Vec<Change>> {
         let r = thread_local(&self.inner);
         let old_tree = match old {
             Some(o) => Some(r.find_tree(parse_oid(&o)?).map_err(|e| err("find_tree", e))?),
             None => None,
         };
         let new_tree = r
-            .find_tree(parse_oid(&new)?)
+            .find_tree(parse_oid(&new_tree_id)?)
             .map_err(|e| err("find_tree", e))?;
         let changes = r
             .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
