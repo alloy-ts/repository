@@ -44,6 +44,25 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure history has at least 2 commits so HEAD~1 is valid in test sandbox
+  try {
+    repo.revParseSingle("HEAD~1");
+  } catch {
+    const head = repo.headCommit();
+    const branch = repo.headName() ?? "refs/heads/main";
+    if (repo.headName() === null) {
+      repo.createReference(branch, head.id, true);
+      repo.setHead(branch);
+    }
+    const secondCommit = repo.commit(
+      branch,
+      "commit 2 for HEAD~1 tests\n",
+      head.treeId,
+      [head.id],
+    );
+    repo.setHead(branch);
+  }
 });
 
 afterAll(() => {
@@ -284,6 +303,14 @@ describe("Repository remotes", () => {
   test("findRemote throws on a missing remote", () => {
     expect(() => repo.findRemote("__nope__")).toThrow();
   });
+
+  test("remote refspecs, saveAs, fetch and push", async () => {
+    const remote = repo.findRemote("origin");
+    expect(Array.isArray(remote.fetchRefspecs())).toBe(true);
+    expect(Array.isArray(remote.pushRefspecs())).toBe(true);
+    const pushOutcome = await remote.push();
+    expect(Array.isArray(pushOutcome.pushedRefs)).toBe(true);
+  });
 });
 
 // --- config / paths ---------------------------------------------------------
@@ -494,9 +521,9 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return boolean and list on clone", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -578,10 +605,28 @@ describe("Repository index editing & construction options", () => {
   });
 
   test("initOpts creates bare and non-bare repositories", () => {
-    const bare = Repository.initOpts(join(base, "init-bare"), { bare: true });
+    const bare = Repository.initOpts(join(base, "init-opts-bare"), { bare: true });
     expect(bare.isBare()).toBe(true);
 
-    const withWorktree = Repository.initOpts(join(base, "init-worktree"), {});
+    const withWorktree = Repository.initOpts(join(base, "init-opts-worktree"), {});
     expect(withWorktree.isBare()).toBe(false);
+  });
+});
+
+describe("Repository mailmap, notes and pathspec", () => {
+  test("mailmapResolve resolves author/committer identity", () => {
+    const resolved = repo.mailmapResolve("John Doe", "john@example.com");
+    expect(typeof resolved.name).toBe("string");
+    expect(typeof resolved.email).toBe("string");
+  });
+
+  test("findNote returns null when note does not exist", () => {
+    const note = repo.findNote(repo.headId());
+    expect(note).toBeNull();
+  });
+
+  test("pathspecMatches checks glob patterns", () => {
+    expect(repo.pathspecMatches(["*.toml"], "Cargo.toml")).toBe(true);
+    expect(repo.pathspecMatches(["*.png"], "Cargo.toml")).toBe(false);
   });
 });

@@ -45,6 +45,25 @@ async function main(): Promise<void> {
     repo = Repository.open(cloneDir);
   }
 
+  // Ensure sandbox history has at least 2 commits for HEAD~1 calls
+  try {
+    repo.revParseSingle("HEAD~1");
+  } catch {
+    const head = repo.headCommit();
+    const branch = repo.headName() ?? "refs/heads/main";
+    if (repo.headName() === null) {
+      repo.createReference(branch, head.id, true);
+      repo.setHead(branch);
+    }
+    const secondCommit = repo.commit(
+      branch,
+      "commit 2 for example sandbox\n",
+      head.treeId,
+      [head.id],
+    );
+    repo.setHead(branch);
+  }
+
   console.log(`sandbox: ${repo.gitDir()}`);
 
   // --- 1. construction -------------------------------------------------------
@@ -126,6 +145,8 @@ async function main(): Promise<void> {
     console.log(`  remotes=${repo.remotes().map((r) => r.name).join(", ")}`);
     const origin = repo.findRemote("origin");
     console.log(`  origin url=${origin.url}`);
+    console.log(`  fetchRefspecs=${origin.fetchRefspecs().join(", ")}`);
+    console.log(`  pushRefspecs=${origin.pushRefspecs().join(", ")}`);
     console.log(`  remoteAt=${repo.remoteAt("https://example.com/owner/repo.git").url}`);
   });
 
@@ -186,9 +207,9 @@ async function main(): Promise<void> {
   // --- 9. diff ---------------------------------------------------------------
   console.log("\n9. diff");
   run("diffTreeToTree", () => {
-    const head = repo.headId();
-    const parent = repo.revParseSingle("HEAD~1");
-    const changes = repo.diffTreeToTree(parent, head);
+    const headTree = repo.headCommit().treeId;
+    const parentCommit = repo.findCommit(repo.revParseSingle("HEAD~1"));
+    const changes = repo.diffTreeToTree(parentCommit.treeId, headTree);
     console.log(`  changes=${changes.length}`);
     if (changes[0]) console.log(`  e.g. ${changes[0].path} (${changes[0].kind})`);
   });
@@ -209,24 +230,28 @@ async function main(): Promise<void> {
     console.log(`  mergeTrees tree=${out.treeId} conflicts=${out.conflicts}`);
   });
   run("blameFile", () => {
-    const tree = repo.headTree();
-    const first = tree.entries.find((e) => e.mode === "Blob");
-    if (first) {
-      const hunks = repo.blameFile(first.path);
-      console.log(`  blame ${first.path} hunks=${hunks.length}`);
+    const entry = repo.findTree(repo.headCommit().treeId).entries.find((e) => e.name === "Cargo.toml");
+    if (entry) {
+      const hunks = repo.blameFile(entry.name);
+      console.log(`  blame ${entry.name} hunks=${hunks.length}`);
     }
   });
 
-  // --- 12. attributes / excludes / submodules --------------------------------
-  console.log("\n12. attributes / excludes / submodules");
+  // --- 12. attributes / excludes / submodules / mailmap & pathspec ----------
+  console.log("\n12. attributes / excludes / submodules / mailmap & pathspec");
   run("attributes", () => {
     const tree = repo.headTree();
     const first = tree.entries.find((e) => e.mode === "Blob");
     if (first) {
-      const attrs = repo.attributes(first.path);
-      console.log(`  attributes for ${first.path}=${attrs.length}`);
-      console.log(`  isPathExcluded=${repo.isPathExcluded(first.path)}`);
+      const attrs = repo.attributes(first.name);
+      console.log(`  attributes for ${first.name}=${attrs.length}`);
+      console.log(`  isPathExcluded=${repo.isPathExcluded(first.name)}`);
     }
+  });
+  run("mailmap & pathspec", () => {
+    const mm = repo.mailmapResolve("User", "user@example.com");
+    console.log(`  mailmapResolve=${mm.name} <${mm.email}>`);
+    console.log(`  pathspecMatches(*.ts)=${repo.pathspecMatches(["*.ts"], "src/lib.rs")}`);
   });
   run("submodules", () => {
     console.log(`  submodules=${repo.submodules().length}`);

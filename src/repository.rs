@@ -108,6 +108,23 @@ pub struct SubmoduleInfo {
     pub url: Option<String>,
 }
 
+/// An entry from a repository's `.mailmap` file (see [`Repository::mailmap_resolve`]).
+#[derive(Clone)]
+#[napi(object)]
+pub struct MailmapEntry {
+    pub name: String,
+    pub email: String,
+}
+
+/// A git note attached to an object (see [`Repository::notes`] / [`Repository::find_note`]).
+#[derive(Clone)]
+#[napi(object)]
+pub struct NoteEntry {
+    pub object_id: String,
+    pub note_id: String,
+    pub message: String,
+}
+
 /// A progress update delivered to JavaScript from a worker thread (e.g. during `clone`/`fetch`/
 /// `push`/`checkout`/`status`). It is forwarded via a `ThreadsafeFunction` — the only safe way to
 /// invoke a JS callback from a thread that is not the main Node.js thread.
@@ -162,11 +179,11 @@ pub struct RefLogEntry {
 /// runs off the main Node.js thread, where `napi_env`/`napi_value` do not exist, so we marshal the
 /// update as an owned `ProgressEvent` and hand it to the thread-safe function, which queues the JS
 /// call on the main thread's event loop.
-struct TsfnProgress {
-    tsfn: Option<Arc<ThreadsafeFunction<ProgressEvent, ()>>>,
-    step: AtomicU64,
-    max: Option<usize>,
-    name: Option<String>,
+pub(crate) struct TsfnProgress {
+    pub(crate) tsfn: Option<Arc<ThreadsafeFunction<ProgressEvent, ()>>>,
+    pub(crate) step: AtomicU64,
+    pub(crate) max: Option<usize>,
+    pub(crate) name: Option<String>,
 }
 
 impl TsfnProgress {
@@ -926,6 +943,14 @@ impl Repository {
         Ok(())
     }
 
+    /// Reload the in-memory repository state (e.g. config and refs) from disk.
+    #[napi]
+    pub fn reload(&self) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
     /// Names of branches that have their own configuration section (`branch.<name>.*`).
     #[napi]
     pub fn branch_names(&self) -> Result<Vec<String>> {
@@ -1408,21 +1433,23 @@ impl Repository {
     #[napi]
     pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
         let mut r = thread_local(&self.inner);
-        let mut config = r.config_snapshot_mut();
-        let url_key = format!("remote.{}.url", name);
-        let fetch_key = format!("remote.{}.fetch", name);
-        let fetch_val = format!("+refs/heads/*:refs/remotes/{}/*", name);
-
-        config
-            .set_raw_value(url_key.as_str(), url.as_str())
-            .map_err(|e| err("create_remote set url", e))?;
-        config
-            .set_raw_value(fetch_key.as_str(), fetch_val.as_str())
-            .map_err(|e| err("create_remote set fetch", e))?;
-        config
-            .commit()
-            .map_err(|e| err("create_remote commit", e))?;
-        r.reload().map_err(|e| err("create_remote reload", e))?;
+        let config_path = r
+            .config_path(gix::config::Source::Local)
+            .map_err(|e| err("config_path", e))?;
+        let mut tx = r
+            .config_file_mut(&config_path)
+            .map_err(|e| err("config_file_mut", e))?;
+        let fetch_spec = format!("+refs/heads/*:refs/remotes/{}/*", name);
+        let mut remote = r
+            .remote_at(url.as_str())
+            .map_err(|e| err("remote_at", e))?
+            .with_refspecs([fetch_spec.as_str()], gix::remote::Direction::Fetch)
+            .map_err(|e| err("with_refspecs", e))?;
+        remote
+            .save_as_to(name.as_str(), &mut tx)
+            .map_err(|e| err("save_as_to", e))?;
+        tx.commit().map_err(|e| err("commit", e))?;
+        r.reload().map_err(|e| err("reload", e))?;
 
         let remote = r
             .find_remote(name.as_str())
@@ -1789,6 +1816,68 @@ impl Repository {
             .map_err(|e| err("peel", e))?
             .id
             .to_string())
+    }
+
+    /// Resolve an author/committer identity using the repository's `.mailmap` file.
+    #[napi]
+    pub fn mailmap_resolve(&self, name: String, email: String) -> Result<MailmapEntry> {
+        let r = thread_local(&self.inner);
+        let mailmap = r.open_mailmap();
+        let sig = gix::actor::SignatureRef {
+            name: name.as_bytes().into(),
+            email: email.as_bytes().into(),
+            time: "",
+        };
+        let resolved = mailmap.resolve(sig);
+        Ok(MailmapEntry {
+            name: lossy(&resolved.name),
+            email: lossy(&resolved.email),
+        })
+    }
+
+    /// Find a git note for `id` in `refs/notes/commits` (or `notes_ref` if supplied).
+    #[napi]
+    pub fn find_note(&self, id: String, notes_ref: Option<String>) -> Result<Option<NoteEntry>> {
+        let r = thread_local(&self.inner);
+        let ref_name = notes_ref.unwrap_or_else(|| "refs/notes/commits".to_string());
+        if let Ok(rf) = r.find_reference(ref_name.as_str()) {
+            if let Ok(commit) = rf.id().object().and_then(|o| o.peel_to_kind(gix::objs::Kind::Commit)) {
+                if let Ok(tree) = commit.try_into_commit().unwrap().tree() {
+                    if let Ok(Some(entry)) = tree.lookup_entry_by_path(&id) {
+                        if let Ok(blob) = entry.object().and_then(|o| o.peel_to_kind(gix::objs::Kind::Blob)) {
+                            return Ok(Some(NoteEntry {
+                                object_id: id,
+                                note_id: entry.oid().to_string(),
+                                message: lossy(&blob.data),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Check whether `relative_path` matches any of the given `pathspecs`.
+    #[napi]
+    pub fn pathspec_matches(&self, pathspecs: Vec<String>, relative_path: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let index = r.index_or_load_from_head_or_empty().map_err(|e| err("index", e))?;
+        let mut search = r
+            .pathspec(
+                false,
+                pathspecs.iter().map(|s| s.as_str()),
+                true,
+                &*index,
+                gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+            )
+            .map_err(|e| err("pathspec", e))?;
+        let is_dir = relative_path.ends_with('/');
+        let pattern_matched = search.pattern_matching_relative_path(
+            relative_path.as_bytes(),
+            Some(is_dir),
+        );
+        Ok(pattern_matched.is_some())
     }
 }
 
