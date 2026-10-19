@@ -4,8 +4,6 @@ use napi::bindgen_prelude::{Buffer, Error as NapiError};
 use napi::Result;
 use napi_derive::napi;
 
-use gix::object::signature::{Format, sign::Options};
-
 use crate::error::{err, parse_oid, thread_local};
 
 /// A git signature (author / committer / tagger), copied out as owned data.
@@ -57,8 +55,8 @@ fn signature_to_dto(s: &gix::actor::SignatureRef) -> Signature {
     }
 }
 
-fn lossy(b: &gix::bstr::BStr) -> String {
-    String::from_utf8_lossy(b).into_owned()
+fn lossy(b: impl AsRef<[u8]>) -> String {
+    String::from_utf8_lossy(b.as_ref()).into_owned()
 }
 
 /// A decoded commit object, holding owned data plus a back-link to its repository.
@@ -154,56 +152,11 @@ impl Commit {
     #[napi]
     pub fn sign(&self) -> Result<Commit> {
         let repo = thread_local(&self.repo);
-        let decoded = repo
+        let commit = repo
             .find_commit(parse_oid(&self.id)?)
-            .map_err(|e| err("find_commit", e))?
-            .decode()
-            .map_err(|e| err("decode", e))?;
-        let config = repo.config_snapshot();
-        let format_str = config
-            .string("gpg.format")
-            .map(|b| lossy(&*b))
-            .unwrap_or_else(|| "openpgp".to_string());
-        let format = match format_str.as_str() {
-            "ssh" => Format::Ssh,
-            "x509" => Format::X509,
-            _ => Format::OpenPgp,
-        };
-        let prog_key = format!("gpg.{}.program", format_str);
-        let program = config
-            .string(prog_key.as_str())
-            .or_else(|| config.string("gpg.program"))
-            .map(|b| std::ffi::OsString::from(lossy(&*b)))
-            .unwrap_or_else(|| match format {
-                Format::Ssh => std::ffi::OsString::from("ssh-keygen"),
-                Format::X509 => std::ffi::OsString::from("gpgsm"),
-                Format::OpenPgp => std::ffi::OsString::from("gpg"),
-            });
-        let signing_key = config
-            .string("user.signingKey")
-            .map(|b| std::ffi::OsString::from(lossy(&*b)))
-            .ok_or_else(|| {
-                napi::Error::from_reason(
-                    "user.signingKey is not configured; cannot sign commit".to_string(),
-                )
-            })?;
-        let options = Options {
-            format,
-            program,
-            program_arguments: Vec::new(),
-            signing_key,
-            environment: Vec::new(),
-        };
-        let signed = decoded
-            .sign(options)
-            .map_err(|e| napi::Error::from_reason(format!("sign: {e}")))?;
-        let new_id = repo
-            .write_object(&signed)
-            .map_err(|e| err("write_object", e))?;
-        let new_commit = repo
-            .find_commit(new_id)
             .map_err(|e| err("find_commit", e))?;
-        build_commit(&self.repo, new_commit)
+        let signed = commit.signed().map_err(|e| err("sign", e))?;
+        build_commit(&self.repo, signed)
     }
 }
 

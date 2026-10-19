@@ -490,7 +490,10 @@ impl Repository {
         if first_parent.unwrap_or(false) {
             let mut current = Some(tip);
             while let Some(id) = current {
-                let (entry, parents) = log_summary(&r, id)?;
+                let (entry, parents) = match log_summary(&r, id) {
+                    Ok(res) => res,
+                    Err(_) => break, // Gracefully handle shallow repository boundaries
+                };
                 out.push(entry);
                 if let Some(l) = limit {
                     if out.len() >= l {
