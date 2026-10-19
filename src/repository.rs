@@ -8,8 +8,8 @@ use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
 use crate::object::{
-    build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Tag,
-    Tree,
+    build_blob, build_commit, build_object, build_tag, build_tree, signature_to_dto, Blob,
+    Commit, GitObject, Signature, Tag, Tree,
 };
 use crate::reference::{build_head, build_reference, Head, Reference};
 use crate::remote::build_remote;
@@ -249,6 +249,53 @@ impl Repository {
         Ok(id.to_string())
     }
 
+    /// Write a tree object from a list of entries and return its id.
+    #[napi]
+    pub fn write_tree(&self, entries: Vec<TreeItem>) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let mut tree_entries = Vec::with_capacity(entries.len());
+        for item in entries {
+            let kind = match item.mode.as_str() {
+                "100755" => gix::objs::tree::EntryKind::BlobExecutable,
+                "040000" | "40000" => gix::objs::tree::EntryKind::Tree,
+                "120000" => gix::objs::tree::EntryKind::Link,
+                "160000" => gix::objs::tree::EntryKind::Commit,
+                _ => gix::objs::tree::EntryKind::Blob,
+            };
+            let oid = parse_oid(&item.id)?;
+            tree_entries.push(gix::objs::tree::Entry {
+                mode: kind.into(),
+                filename: item.name.into(),
+                oid,
+            });
+        }
+        tree_entries.sort();
+        let tree = gix::objs::Tree { entries: tree_entries };
+        let id = r.write_object(&tree).map_err(|e| err("write_tree", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Try finding an object by id, returning `null` if not found.
+    #[napi]
+    pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
+        let r = thread_local(&self.inner);
+        let oid = match parse_oid(&id) {
+            Ok(o) => o,
+            Err(_) => return Ok(None),
+        };
+        match r.find_object(oid) {
+            Ok(obj) => Ok(Some(build_object(&self.inner, obj)?)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Resolve a revision specification to a hex string OID, or `null` if resolution fails.
+    #[napi]
+    pub fn rev_parse_hex(&self, spec: String) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.rev_parse_single(spec.as_str()).ok().map(|id| id.to_string())
+    }
+
     // ---- references -------------------------------------------------------
 
     /// All references in the repository.
@@ -374,6 +421,200 @@ impl Repository {
         crate::util::setup_repository_from_manifest_spec(&self.inner, manifest_spec_or_path.as_deref())
     }
 
+    // ---- merge & rebase ---------------------------------------------------
+
+    /// Merge two trees given an optional ancestor tree OID.
+    #[napi]
+    pub fn merge_trees(
+        &self,
+        our_tree: String,
+        their_tree: String,
+        ancestor_tree: Option<String>,
+    ) -> Result<MergeOutcome> {
+        let r = thread_local(&self.inner);
+        let ours = parse_oid(&our_tree)?;
+        let theirs = parse_oid(&their_tree)?;
+        let ancestor = match ancestor_tree {
+            Some(a) => parse_oid(&a)?,
+            None => r.write_object(&gix::objs::Tree::empty()).map_err(|e| err("write_empty_tree", e))?.detach(),
+        };
+        let options = r.tree_merge_options().map_err(|e| err("tree_merge_options", e))?.into();
+        let labels = gix::merge::blob::builtin_driver::text::Labels {
+            ancestor: Some("ancestor".into()),
+            current: Some("current".into()),
+            other: Some("other".into()),
+        };
+        let mut outcome = r
+            .merge_trees(ours, theirs, ancestor, labels, options)
+            .map_err(|e| err("merge_trees", e))?;
+        let conflicts = outcome
+            .conflicts
+            .into_iter()
+            .map(|c| format!("{:?}", c.resolution))
+            .collect();
+        let tree_id = outcome.tree.write().map_err(|e| err("write_merged_tree", e))?;
+        Ok(MergeOutcome {
+            tree_id: tree_id.to_string(),
+            conflicts,
+        })
+    }
+
+    /// Merge two commits, finding their merge base automatically.
+    #[napi]
+    pub fn merge_commits(&self, our_commit: String, their_commit: String) -> Result<MergeOutcome> {
+        let r = thread_local(&self.inner);
+        let ours = parse_oid(&our_commit)?;
+        let theirs = parse_oid(&their_commit)?;
+        let options = r.tree_merge_options().map_err(|e| err("tree_merge_options", e))?.into();
+        let labels = gix::merge::blob::builtin_driver::text::Labels {
+            ancestor: Some("ancestor".into()),
+            current: Some("current".into()),
+            other: Some("other".into()),
+        };
+        let mut outcome = r
+            .merge_commits(ours, theirs, labels, options)
+            .map_err(|e| err("merge_commits", e))?;
+        let conflicts = outcome
+            .tree_merge
+            .conflicts
+            .into_iter()
+            .map(|c| format!("{:?}", c.resolution))
+            .collect();
+        let tree_id = outcome.tree_merge.tree.write().map_err(|e| err("write_merged_tree", e))?;
+        Ok(MergeOutcome {
+            tree_id: tree_id.to_string(),
+            conflicts,
+        })
+    }
+
+    // ---- submodules, state, identity --------------------------------------
+
+    /// All configured submodules in the repository.
+    #[napi]
+    pub fn submodules(&self) -> Result<Vec<SubmoduleInfo>> {
+        let r = thread_local(&self.inner);
+        let mut out = Vec::new();
+        if let Ok(Some(submodules)) = r.submodules() {
+            for sm in submodules {
+                let name = sm.name().to_string();
+                let path = match sm.path() {
+                    Ok(p) => lossy(p.as_slice()),
+                    Err(_) => String::new(),
+                };
+                let url = sm.url().ok().map(|u| u.to_string());
+                out.push(SubmoduleInfo { name, path, url });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The current state of an in-progress operation (e.g. `None`, `Rebase`, `Merge`).
+    #[napi]
+    pub fn state(&self) -> String {
+        let r = thread_local(&self.inner);
+        format!("{:?}", r.state())
+    }
+
+    /// Default committer identity configured for this repository.
+    #[napi]
+    pub fn default_committer(&self) -> Option<Signature> {
+        let r = thread_local(&self.inner);
+        r.committer().and_then(|res| res.ok()).map(|s| signature_to_dto(&s))
+    }
+
+    /// Default author identity configured for this repository.
+    #[napi]
+    pub fn default_author(&self) -> Option<Signature> {
+        let r = thread_local(&self.inner);
+        r.author().and_then(|res| res.ok()).map(|s| signature_to_dto(&s))
+    }
+
+    // ---- attributes & excludes & mailmap ----------------------------------
+
+    /// Read mailmap identity mappings (`.mailmap`).
+    #[napi]
+    pub fn mailmap(&self) -> Result<Vec<MailmapEntry>> {
+        let r = thread_local(&self.inner);
+        let mm = r.open_mailmap();
+        let mut out = Vec::new();
+        for entry in mm.entries() {
+            out.push(MailmapEntry {
+                name: entry.new_name().map(|n| lossy(n.as_ref())),
+                email: entry.new_email().map(|e| lossy(e.as_ref())).unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Check whether a path is ignored by `.gitignore` rules.
+    #[napi]
+    pub fn is_path_ignored(&self, path: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let index = match r.index() {
+            Ok(idx) => idx,
+            Err(_) => return Ok(false),
+        };
+        let mut cache = r
+            .excludes(
+                &index,
+                None,
+                gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+            )
+            .map_err(|e| err("excludes", e))?;
+        let entry = cache
+            .at_path(path.as_str(), Some(gix::objs::tree::EntryKind::Blob.into()))
+            .map_err(|e| err("at_path", e))?;
+        Ok(entry.is_excluded())
+    }
+
+    // ---- worktree management ----------------------------------------------
+
+    /// List all linked worktrees of this repository.
+    #[napi]
+    pub fn worktrees(&self) -> Result<Vec<WorktreeInfo>> {
+        let r = thread_local(&self.inner);
+        let proxies = r.worktrees().map_err(|e| err("worktrees", e))?;
+        let mut out = Vec::new();
+        for proxy in proxies {
+            let id = proxy.id().ok().map(|s| lossy(s.as_ref()));
+            let base = proxy
+                .base()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let is_locked = proxy.is_locked();
+            out.push(WorktreeInfo {
+                id,
+                base,
+                is_main: false,
+                is_locked,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Whether this repository instance is a linked worktree.
+    #[napi]
+    pub fn is_worktree(&self) -> bool {
+        let r = thread_local(&self.inner);
+        r.kind() == gix::repository::Kind::LinkedWorkTree
+    }
+
+    /// Information about the main worktree of this repository, if any.
+    #[napi]
+    pub fn main_worktree(&self) -> Result<Option<WorktreeInfo>> {
+        let r = thread_local(&self.inner);
+        if let Some(workdir) = r.workdir() {
+            Ok(Some(WorktreeInfo {
+                id: None,
+                base: workdir.to_string_lossy().into_owned(),
+                is_main: true,
+                is_locked: false,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// Read a single config value as a string.
@@ -381,6 +622,54 @@ impl Repository {
     pub fn config_string(&self, key: String) -> Option<String> {
         let r = thread_local(&self.inner);
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
+    }
+
+    /// Set a config value in repository config file (`.git/config`).
+    #[napi]
+    pub fn set_config_string(&self, key: String, value: String) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let config_path = r.git_dir().join("config");
+        let mut config_tx = r.config_file_mut(&config_path).map_err(|e| err("config_file_mut", e))?;
+        config_tx.set_raw_value(key.as_str(), value.as_str()).map_err(|e| err("set_raw_value", e))?;
+        config_tx.commit().map_err(|e| err("config commit", e))?;
+        Ok(())
+    }
+
+    /// Remove a config value from repository config file (`.git/config`).
+    #[napi]
+    pub fn remove_config_value(&self, key: String) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let config_path = r.git_dir().join("config");
+        let mut config_tx = r.config_file_mut(&config_path).map_err(|e| err("config_file_mut", e))?;
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.len() == 2 {
+            if let Ok(mut sec) = config_tx.section_mut(parts[0], None) {
+                sec.remove(parts[1]);
+            }
+        } else if parts.len() >= 3 {
+            let section = parts[0];
+            let value_name = parts[parts.len() - 1];
+            let subsection = parts[1..parts.len() - 1].join(".");
+            if let Ok(mut sec) = config_tx.section_mut(section, Some(subsection.as_str().into())) {
+                sec.remove(value_name);
+            }
+        }
+        config_tx.commit().map_err(|e| err("config commit", e))?;
+        Ok(())
+    }
+
+    /// The remote configured for a branch (e.g. `branch.main.remote`).
+    #[napi]
+    pub fn branch_remote_name(&self, branch_name: String) -> Option<String> {
+        let key = format!("branch.{branch_name}.remote");
+        self.config_string(key)
+    }
+
+    /// The merge refspec configured for a branch (e.g. `branch.main.merge`).
+    #[napi]
+    pub fn branch_merge_ref(&self, branch_name: String) -> Option<String> {
+        let key = format!("branch.{branch_name}.merge");
+        self.config_string(key)
     }
 
     /// The working directory, if this is not a bare repository.
@@ -634,6 +923,58 @@ pub struct Change {
     pub new_id: Option<String>,
     /// The kind of change: `Added`, `Modified`, `Deleted`, `Renamed`, `Copied`.
     pub kind: String,
+}
+
+/// Information about a git submodule.
+#[derive(Clone)]
+#[napi(object)]
+pub struct SubmoduleInfo {
+    pub name: String,
+    pub path: String,
+    pub url: Option<String>,
+}
+
+/// A mailmap entry mapping commit author to canonical identity.
+#[derive(Clone)]
+#[napi(object)]
+pub struct MailmapEntry {
+    pub name: Option<String>,
+    pub email: String,
+}
+
+/// A git attribute entry for a file.
+#[derive(Clone)]
+#[napi(object)]
+pub struct AttributeEntry {
+    pub name: String,
+    pub value: String,
+}
+
+/// The result of a merge operation.
+#[derive(Clone)]
+#[napi(object)]
+pub struct MergeOutcome {
+    pub tree_id: String,
+    pub conflicts: Vec<String>,
+}
+
+/// A git worktree information snapshot.
+#[derive(Clone)]
+#[napi(object)]
+pub struct WorktreeInfo {
+    pub id: Option<String>,
+    pub base: String,
+    pub is_main: bool,
+    pub is_locked: bool,
+}
+
+/// An input item for creating a tree object.
+#[derive(Clone)]
+#[napi(object)]
+pub struct TreeItem {
+    pub name: String,
+    pub mode: String,
+    pub id: String,
 }
 
 /// A single commit summary returned by [`Repository::log`].

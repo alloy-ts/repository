@@ -43,7 +43,7 @@ pub struct SignatureVerification {
     pub output: Option<String>,
 }
 
-fn signature_to_dto(s: &gix::actor::SignatureRef) -> Signature {
+pub(crate) fn signature_to_dto(s: &gix::actor::SignatureRef) -> Signature {
     let (time, timezone_offset) = s
         .time()
         .ok()

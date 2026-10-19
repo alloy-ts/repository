@@ -282,6 +282,111 @@ describe("Repository.setupRemotesFromManifest", () => {
   });
 });
 
+// --- Wave 3: Config Mutations & Branch Config -----------------------------
+
+describe("Wave 3 methods", () => {
+  test("setConfigString and removeConfigValue", () => {
+    repo.setConfigString("test.custom.key", "hello-world");
+    const fresh = Repository.open(cloneDir);
+    expect(fresh.configString("test.custom.key")).toBe("hello-world");
+
+    fresh.removeConfigValue("test.custom.key");
+    const after = Repository.open(cloneDir);
+    expect(after.configString("test.custom.key")).toBeNull();
+  });
+
+  test("branchRemoteName and branchMergeRef", () => {
+    repo.setConfigString("branch.main.remote", "origin");
+    repo.setConfigString("branch.main.merge", "refs/heads/main");
+
+    const fresh = Repository.open(cloneDir);
+    expect(fresh.branchRemoteName("main")).toBe("origin");
+    expect(fresh.branchMergeRef("main")).toBe("refs/heads/main");
+  });
+});
+
+// --- Wave 4: Object Writing & Lookups ------------------------------------
+
+describe("Wave 4 methods", () => {
+  test("writeTree and tryFindObject and revParseHex", () => {
+    const blobId = repo.writeBlob(Buffer.from("sample content\n"));
+    const treeId = repo.writeTree([{ name: "sample.txt", mode: "100644", id: blobId }]);
+    expect(typeof treeId).toBe("string");
+    expect(treeId.length).toBe(40);
+
+    const found = repo.tryFindObject(treeId);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("tree");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+
+    expect(repo.revParseHex("HEAD")).toBe(repo.headId());
+    expect(repo.revParseHex("invalid_ref_zzz")).toBeNull();
+  });
+});
+
+// --- Wave 5: Worktree Management -----------------------------------------
+
+describe("Wave 5 methods", () => {
+  test("worktrees, isWorktree, mainWorktree", () => {
+    expect(typeof repo.isWorktree()).toBe("boolean");
+    const wts = repo.worktrees();
+    expect(Array.isArray(wts)).toBe(true);
+
+    const mainWt = repo.mainWorktree();
+    if (mainWt) {
+      expect(mainWt.isMain).toBe(true);
+      expect(typeof mainWt.base).toBe("string");
+    }
+  });
+});
+
+// --- Wave 6: Merge, Rebase & Apply ----------------------------------------
+
+describe("Wave 6 methods", () => {
+  test("mergeTrees and mergeCommits", () => {
+    const head = repo.headCommit();
+    const mergedTrees = repo.mergeTrees(head.treeId, head.treeId, head.treeId);
+    expect(typeof mergedTrees.treeId).toBe("string");
+    expect(Array.isArray(mergedTrees.conflicts)).toBe(true);
+
+    const mergedCommits = repo.mergeCommits(head.id, head.id);
+    expect(typeof mergedCommits.treeId).toBe("string");
+    expect(Array.isArray(mergedCommits.conflicts)).toBe(true);
+  });
+});
+
+// --- Wave 7: Attributes & Mailmap -----------------------------------------
+
+describe("Wave 7 methods", () => {
+  test("mailmap and isPathIgnored", () => {
+    const mm = repo.mailmap();
+    expect(Array.isArray(mm)).toBe(true);
+
+    const isIgnored = repo.isPathIgnored("node_modules/dummy.js");
+    expect(typeof isIgnored).toBe("boolean");
+  });
+});
+
+// --- Wave 8: Submodules, State, Identity ----------------------------------
+
+describe("Wave 8 methods", () => {
+  test("submodules, state, defaultCommitter, defaultAuthor", () => {
+    const sms = repo.submodules();
+    expect(Array.isArray(sms)).toBe(true);
+
+    const state = repo.state();
+    expect(typeof state).toBe("string");
+
+    const committer = repo.defaultCommitter();
+    expect(committer === null || typeof committer?.email === "string").toBe(true);
+
+    const author = repo.defaultAuthor();
+    expect(author === null || typeof author?.email === "string").toBe(true);
+  });
+});
+
 // --- remotes ----------------------------------------------------------------
 
 describe("Repository remotes", () => {
