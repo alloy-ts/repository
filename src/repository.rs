@@ -242,43 +242,16 @@ impl Repository {
     /// Set `HEAD` to point to a branch, tag, or commit target (e.g. `refs/heads/main` or `<sha>`).
     #[napi]
     pub fn set_head(&self, target: String) -> Result<()> {
-        let mut r = thread_local(&self.inner);
+        let r = thread_local(&self.inner);
+        let head_path = r.git_dir().join("HEAD");
         if target.starts_with("refs/") {
-            let name: gix::refs::FullName = target
-                .try_into()
-                .map_err(|e| err("invalid ref name", e))?;
-            r.edit_reference(gix::refs::transaction::RefEdit {
-                change: gix::refs::transaction::Change::Update {
-                    log: gix::refs::transaction::LogChange {
-                        mode: gix::refs::transaction::RefLog::Only,
-                        force_create_reflog: true,
-                        message: format!("set HEAD to {name}").into(),
-                    },
-                    expected: gix::refs::transaction::PreviousValue::Any,
-                    new: gix::refs::Target::Symbolic(name),
-                },
-                name: "HEAD".try_into().unwrap(),
-                deref: false,
-            })
-            .map_err(|e| err("set_head", e))?;
+            std::fs::write(&head_path, format!("ref: {target}\n"))
+                .map_err(|e| err("set_head write", e))?;
         } else {
             let oid = parse_oid(&target)?;
-            r.edit_reference(gix::refs::transaction::RefEdit {
-                change: gix::refs::transaction::Change::Update {
-                    log: gix::refs::transaction::LogChange {
-                        mode: gix::refs::transaction::RefLog::Only,
-                        force_create_reflog: true,
-                        message: format!("detach HEAD at {target}").into(),
-                    },
-                    expected: gix::refs::transaction::PreviousValue::Any,
-                    new: gix::refs::Target::Object(oid),
-                },
-                name: "HEAD".try_into().unwrap(),
-                deref: false,
-            })
-            .map_err(|e| err("set_head", e))?;
+            std::fs::write(&head_path, format!("{oid}\n"))
+                .map_err(|e| err("set_head write", e))?;
         }
-        r.reload().map_err(|e| err("reload after set_head", e))?;
         Ok(())
     }
 

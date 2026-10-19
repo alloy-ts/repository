@@ -136,13 +136,13 @@ describe("Repository Wave 1 APIs", () => {
     repo.createReference(probeBranch, head, true);
 
     repo.setHead(probeBranch);
-    const reopened1 = Repository.open(cloneDir);
-    expect(reopened1.headName()).toBe(probeBranch);
+    const refreshed1 = Repository.open(cloneDir);
+    expect(refreshed1.headName()).toBe(probeBranch);
 
     repo.setHead(head);
-    const reopened2 = Repository.open(cloneDir);
-    expect(reopened2.headName()).toBeNull();
-    expect(reopened2.headId()).toBe(head);
+    const refreshed2 = Repository.open(cloneDir);
+    expect(refreshed2.headName()).toBeNull();
+    expect(refreshed2.headId()).toBe(head);
 
     // Restore original HEAD
     if (initialBranch) {
