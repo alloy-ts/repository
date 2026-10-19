@@ -44,6 +44,13 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure sandbox has at least 2 commits for `HEAD~1` testing even if source repo is depth 1.
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    const branch = repo.headName() ?? "refs/heads/main";
+    repo.commit(branch, "synthetic second commit for testing", head.treeId, [head.id]);
+  }
 });
 
 afterAll(() => {
@@ -452,6 +459,18 @@ describe("Repository.commit", () => {
 
 // --- wave-1 additions: HEAD extras, remote_at, describe, is_ancestor, shallow ---
 
+describe("Repository Wave 2 & P1 additions", () => {
+  test("indexPath / objectsDir / remoteNames / configPath / revParseHex", () => {
+    expect(typeof repo.indexPath()).toBe("string");
+    expect(repo.indexPath()).toContain("index");
+    expect(typeof repo.objectsDir()).toBe("string");
+    expect(repo.objectsDir()).toContain("objects");
+    expect(Array.isArray(repo.remoteNames())).toBe(true);
+    expect(typeof repo.configPath("Local")).toBe("string");
+    expect(repo.revParseHex("HEAD")).toBe(repo.headId());
+  });
+});
+
 describe("Repository wave-1 additions", () => {
   test("headTreeId / headTree / headRef", () => {
     const tid = repo.headTreeId();
@@ -494,9 +513,16 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags reflect sandbox repository state", () => {
+    const isShallow = repo.isShallow();
+    expect(typeof isShallow).toBe("boolean");
+    const shallowCommits = repo.shallowCommits();
+    expect(Array.isArray(shallowCommits)).toBe(true);
+    if (isShallow) {
+      expect(shallowCommits.length).toBeGreaterThan(0);
+    } else {
+      expect(shallowCommits).toEqual([]);
+    }
   });
 
   test("config_entries returns flattened key/value pairs", () => {

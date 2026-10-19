@@ -877,6 +877,52 @@ impl Repository {
         r.common_dir().to_string_lossy().into_owned()
     }
 
+    /// Path to the repository index file (`.git/index`).
+    #[napi]
+    pub fn index_path(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.index_path().to_string_lossy().into_owned()
+    }
+
+    /// Path to the objects directory (`.git/objects`).
+    #[napi]
+    pub fn objects_dir(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.git_dir().join("objects").to_string_lossy().into_owned()
+    }
+
+    /// All configured remote names as a list of strings.
+    #[napi]
+    pub fn remote_names(&self) -> Vec<String> {
+        let r = thread_local(&self.inner);
+        r.remote_names().into_iter().map(|n| n.to_string()).collect()
+    }
+
+    /// Path to a configuration file for the given source (e.g. `Local`, `User`, `System`).
+    #[napi]
+    pub fn config_path(&self, source: Option<String>) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let src = match source.as_deref().unwrap_or("Local").to_lowercase().as_str() {
+            "user" | "global" => gix::config::Source::User,
+            "system" => gix::config::Source::System,
+            "git" => gix::config::Source::Git,
+            "installation" => gix::config::Source::GitInstallation,
+            _ => gix::config::Source::Local,
+        };
+        match r.config_path(src) {
+            Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Resolve a hex string or revision spec to a full object hex ID.
+    #[napi]
+    pub fn rev_parse_hex(&self, spec: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.rev_parse_single(spec.as_str()).map_err(|e| err("rev_parse_hex", e))?;
+        Ok(id.to_string())
+    }
+
     /// Whether this repository is bare.
     #[napi]
     pub fn is_bare(&self) -> bool {
