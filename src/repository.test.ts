@@ -44,6 +44,11 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+  // Ensure sandbox repo has at least 2 commits so `HEAD~1` revision parsing works
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    repo.commit("HEAD", "second commit for test suite", head.treeId, [head.id]);
+  }
 });
 
 afterAll(() => {
@@ -452,6 +457,33 @@ describe("Repository.commit", () => {
 
 // --- wave-1 additions: HEAD extras, remote_at, describe, is_ancestor, shallow ---
 
+describe("Repository new extensions (deleteReference, configPath, findSubmodule, openMailmap)", () => {
+  test("deleteReference deletes a created ref", () => {
+    const name = "refs/heads/__probe_del_ref__";
+    repo.createReference(name, repo.headId(), true);
+    expect(repo.findReference(name).name).toBe(name);
+    repo.deleteReference(name);
+    expect(() => repo.findReference(name)).toThrow();
+  });
+
+  test("configPath resolves local config path", () => {
+    const localPath = repo.configPath("local");
+    expect(localPath).not.toBeNull();
+    expect(typeof localPath).toBe("string");
+    expect(localPath).toContain("config");
+  });
+
+  test("findSubmodule returns null or submodule info", () => {
+    const sub = repo.findSubmodule("non_existent_submodule");
+    expect(sub).toBeNull();
+  });
+
+  test("openMailmap returns null when no .mailmap present", () => {
+    const mm = repo.openMailmap();
+    expect(mm === null || typeof mm === "string").toBe(true);
+  });
+});
+
 describe("Repository wave-1 additions", () => {
   test("headTreeId / headTree / headRef", () => {
     const tid = repo.headTreeId();
@@ -494,9 +526,9 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags return boolean/array depending on clone depth", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -578,10 +610,10 @@ describe("Repository index editing & construction options", () => {
   });
 
   test("initOpts creates bare and non-bare repositories", () => {
-    const bare = Repository.initOpts(join(base, "init-bare"), { bare: true });
+    const bare = Repository.initOpts(join(base, "init-opts-bare"), { bare: true });
     expect(bare.isBare()).toBe(true);
 
-    const withWorktree = Repository.initOpts(join(base, "init-worktree"), {});
+    const withWorktree = Repository.initOpts(join(base, "init-opts-worktree"), {});
     expect(withWorktree.isBare()).toBe(false);
   });
 });

@@ -776,6 +776,17 @@ impl Repository {
         Ok(out)
     }
 
+    /// Delete a reference by name (e.g. `refs/heads/feature` or `refs/tags/v1.0`).
+    #[napi]
+    pub fn delete_reference(&self, name: String) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let reference = r
+            .find_reference(name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        reference.delete().map_err(|e| err("delete_reference", e))?;
+        Ok(())
+    }
+
     /// Create an annotated tag `name` -> `target`.
     #[napi]
     pub fn create_tag(
@@ -934,6 +945,30 @@ impl Repository {
             .into_iter()
             .map(|s| s.to_string())
             .collect())
+    }
+
+    /// Resolve the file path for a given configuration source (e.g. `local`, `worktree`, `user`, `system`).
+    #[napi]
+    pub fn config_path(&self, source: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let src = match source.as_str() {
+            "local" => gix::config::Source::Local,
+            "worktree" => gix::config::Source::Worktree,
+            "user" => gix::config::Source::User,
+            "git" => gix::config::Source::Git,
+            "system" => gix::config::Source::System,
+            "api" => gix::config::Source::Api,
+            "cli" => gix::config::Source::Cli,
+            "env" => gix::config::Source::Env,
+            "git_installation" => gix::config::Source::GitInstallation,
+            _ => {
+                return Err(napi::Error::from_reason(format!(
+                    "config_path: unknown source {source}, expected local|worktree|user|git|system|api|cli|env|git_installation"
+                )));
+            }
+        };
+        let path = r.config_path(src).map_err(|e| err("config_path", e))?;
+        Ok(Some(path.to_string_lossy().into_owned()))
     }
 
     // ---- index (staging area) ----------------------------------------------
@@ -1225,6 +1260,38 @@ impl Repository {
             }
         }
         Ok(out)
+    }
+
+    /// Look up a submodule by name.
+    #[napi]
+    pub fn find_submodule(&self, name: String) -> Result<Option<SubmoduleInfo>> {
+        let r = thread_local(&self.inner);
+        if let Some(submodules) = r.submodules().map_err(|e| err("submodules", e))? {
+            for sm in submodules {
+                if lossy(sm.name()) == name {
+                    let path = lossy(sm.path().map_err(|e| err("submodule_path", e))?.as_ref());
+                    let url = sm.url().ok().map(|u| u.to_string());
+                    return Ok(Some(SubmoduleInfo {
+                        name,
+                        path,
+                        url,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Open mailmap from repository root (`.mailmap`), if present.
+    #[napi]
+    pub fn open_mailmap(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let mm = r.open_mailmap();
+        Ok(if !mm.entries().is_empty() {
+            Some(format!("{:?}", mm))
+        } else {
+            None
+        })
     }
 
     // ---- diff -------------------------------------------------------------
