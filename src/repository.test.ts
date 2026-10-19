@@ -111,6 +111,15 @@ describe("Repository static constructors", () => {
     const r = Repository.open(cloneDir);
     expect(r.headId()).toBe(repo.headId());
   });
+
+  test("openWith() and initOpts() support open/init options", () => {
+    const dir = join(base, "init-opts-wt");
+    const r = Repository.initOpts(dir, { bare: false });
+    expect(r.isBare()).toBe(false);
+
+    const opened = Repository.openWith(dir, { lossyConfig: true });
+    expect(opened.gitDir()).toBe(r.gitDir());
+  });
 });
 
 // --- HEAD / objects ---------------------------------------------------------
@@ -177,6 +186,44 @@ describe("Repository objects", () => {
     const id = repo.writeBlob(Buffer.from("probe blob content\n"));
     expect(repo.objectExists(id)).toBe(true);
     expect(repo.findBlob(id).content().toString()).toBe("probe blob content\n");
+  });
+
+  test("writeCommit, writeTag, peel, and editIndex", () => {
+    const head = repo.headCommit();
+
+    // 1. writeCommit
+    const commitId = repo.writeCommit({
+      tree: head.treeId,
+      parents: [head.id],
+      message: "Directly written commit\n",
+      author: { name: "Tester", email: "test@example.com", time: 1600000000, timezoneOffset: 0 },
+      committer: { name: "Tester", email: "test@example.com", time: 1600000000, timezoneOffset: 0 },
+    });
+    expect(repo.objectExists(commitId)).toBe(true);
+    const writtenCommit = repo.findCommit(commitId);
+    expect(writtenCommit.message).toBe("Directly written commit\n");
+
+    // 2. writeTag
+    const tagObjId = repo.writeTag(
+      commitId,
+      "commit",
+      "v1.0.0-test",
+      "Test tag message\n",
+      { name: "Tagger", email: "tagger@example.com", time: 1600000000, timezoneOffset: 0 },
+    );
+    expect(repo.objectExists(tagObjId)).toBe(true);
+    const writtenTag = repo.findTag(tagObjId);
+    expect(writtenTag.targetId).toBe(commitId);
+
+    // 3. peel
+    const peeledTree = repo.peel(tagObjId, "tree");
+    expect(peeledTree).toBe(head.treeId);
+
+    // 4. editIndex
+    const blobId = repo.writeBlob(Buffer.from("index test content\n"));
+    repo.editIndex([{ path: "edited_by_test.txt", id: blobId, mode: "100644" }]);
+    const idxEntries = repo.index();
+    expect(idxEntries.some((e) => e.path === "edited_by_test.txt" && e.id === blobId)).toBe(true);
   });
 });
 
@@ -279,6 +326,11 @@ describe("Repository remotes", () => {
     } else {
       console.log("clone has no 'origin' remote; skipping findRemote(...)");
     }
+    const defRemote = repo.defaultRemote();
+    if (origin) {
+      expect(defRemote).not.toBeNull();
+      expect(defRemote!.name).toBe("origin");
+    }
   });
 
   test("findRemote throws on a missing remote", () => {
@@ -296,12 +348,37 @@ describe("Repository config & paths", () => {
     expect(typeof repo.gitDir()).toBe("string");
     expect(typeof repo.commonDir()).toBe("string");
     expect(repo.workDir()).toBe(cloneDir);
+
+    const mainWt = repo.mainWorktree();
+    expect(mainWt).not.toBeNull();
+    expect(mainWt!.isMain).toBe(true);
+    expect(mainWt!.workDir).toBe(cloneDir);
+
+    expect(repo.worktree("non-existent-wt-id")).toBeNull();
   });
 
   test("configString returns strings or null (never undefined)", () => {
     const signing = repo.configString("user.signingKey");
     expect(typeof signing === "string" || signing === null).toBe(true);
     expect(repo.configString("this.key.does.not.exist.zzz")).toBeNull();
+  });
+
+  test("configPath resolves local config path", () => {
+    const localPath = repo.configPath("local");
+    expect(localPath).not.toBeNull();
+    expect(typeof localPath).toBe("string");
+    expect(localPath).toContain("config");
+  });
+});
+
+describe("Repository P2 revision & submodule additions", () => {
+  test("revParseWith resolves revision string", () => {
+    const headId = repo.headId();
+    expect(repo.revParseWith("HEAD")).toBe(headId);
+  });
+
+  test("submodule lookup returns null for non-existent submodule", () => {
+    expect(repo.submodule("non_existent_submodule")).toBeNull();
   });
 });
 

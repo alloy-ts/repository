@@ -33,6 +33,17 @@ pub struct ConfigEntry {
     pub value: String,
 }
 
+/// Input for constructing a commit object via [`Repository::write_commit`].
+#[derive(Clone)]
+#[napi(object)]
+pub struct CommitInput {
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub message: String,
+    pub author: Option<Signature>,
+    pub committer: Option<Signature>,
+}
+
 /// Input for constructing a tree entry via [`Repository::write_tree`].
 #[derive(Clone)]
 #[napi(object)]
@@ -41,6 +52,47 @@ pub struct TreeItemInput {
     /// Optional mode string (`100644`, `100755`, `40000`, `120000`, `160000`); defaults to `100644`.
     pub mode: Option<String>,
     pub id: String,
+}
+
+/// Input for mutating index entries via [`Repository::edit_index`].
+#[derive(Clone)]
+#[napi(object)]
+pub struct IndexEntryInput {
+    pub path: String,
+    pub id: String,
+    /// Mode string, e.g. `"100644"`, `"100755"`, `"120000"`, `"160000"`.
+    pub mode: Option<String>,
+    /// Stage: 0 (merged), 1 (base), 2 (ours), 3 (theirs). Defaults to 0.
+    pub stage: Option<u32>,
+}
+
+/// Options for opening a repository with [`Repository::open_with`].
+#[derive(Clone, Default)]
+#[napi(object)]
+pub struct OpenOptions {
+    /// Whether to open bare repository.
+    pub bare: Option<bool>,
+    /// Whether to lossy parse config files.
+    pub lossy_config: Option<bool>,
+}
+
+/// Options for initializing a repository with [`Repository::init_opts`].
+#[derive(Clone, Default)]
+#[napi(object)]
+pub struct InitOptions {
+    /// Whether to initialize a bare repository.
+    pub bare: Option<bool>,
+}
+
+/// Information about a worktree created or accessed via [`Repository`].
+#[derive(Clone)]
+#[napi(object)]
+pub struct WorktreeDetails {
+    pub id: Option<String>,
+    pub git_dir: String,
+    pub work_dir: String,
+    pub is_main: bool,
+    pub is_locked: bool,
 }
 
 /// The result of a merge (see [`Repository::merge_trees`] / [`Repository::merge_commits`]).
@@ -420,6 +472,42 @@ impl Repository {
         })
     }
 
+    /// Open a repository with explicit options.
+    #[napi]
+    pub fn open_with(path: String, options: Option<OpenOptions>) -> Result<Repository> {
+        let mut opts = gix::open::Options::default();
+        if let Some(opts_input) = options {
+            if let Some(lossy) = opts_input.lossy_config {
+                opts.lossy_config = lossy;
+            }
+        }
+        let ts = gix::ThreadSafeRepository::open_opts(path, opts)
+            .map_err(|e| err("open_with", e))?;
+        Ok(Repository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Initialize a repository with explicit initialization options.
+    #[napi]
+    pub fn init_opts(path: String, options: Option<InitOptions>) -> Result<Repository> {
+        let bare = options.and_then(|o| o.bare).unwrap_or(false);
+        let kind = if bare {
+            gix::create::Kind::Bare
+        } else {
+            gix::create::Kind::WithWorktree
+        };
+        let ts = gix::ThreadSafeRepository::init(
+            path,
+            kind,
+            gix::create::Options::default(),
+        )
+        .map_err(|e| err("init_opts", e))?;
+        Ok(Repository {
+            inner: Arc::new(ts),
+        })
+    }
+
     /// Discover a repository by walking up from `path` (or the current directory if omitted).
     #[napi]
     pub fn discover(path: Option<String>) -> Result<Repository> {
@@ -597,6 +685,193 @@ impl Repository {
         Ok(id.to_string())
     }
 
+    /// Write a commit object directly to the object database without moving any reference.
+    #[napi]
+    pub fn write_commit(&self, input: CommitInput) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let tree_id = parse_oid(&input.tree)?;
+        let parent_ids: Vec<gix::hash::ObjectId> = input
+            .parents
+            .iter()
+            .map(|p| parse_oid(p))
+            .collect::<Result<Vec<_>>>()?;
+
+        let author_sig = if let Some(a) = input.author {
+            gix::actor::Signature {
+                name: a.name.into(),
+                email: a.email.into(),
+                time: gix::date::Time {
+                    seconds: a.time,
+                    offset: a.timezone_offset,
+                    sign: if a.timezone_offset >= 0 {
+                        gix::date::time::Sign::Plus
+                    } else {
+                        gix::date::time::Sign::Minus
+                    },
+                },
+            }
+        } else {
+            r.author()
+                .and_then(|res| res.ok())
+                .map(|s| s.to_owned())
+                .unwrap_or_else(|| gix::actor::Signature {
+                    name: "Unknown".into(),
+                    email: "unknown@example.com".into(),
+                    time: gix::date::Time::now_local_or_utc(),
+                })
+        };
+
+        let committer_sig = if let Some(c) = input.committer {
+            gix::actor::Signature {
+                name: c.name.into(),
+                email: c.email.into(),
+                time: gix::date::Time {
+                    seconds: c.time,
+                    offset: c.timezone_offset,
+                    sign: if c.timezone_offset >= 0 {
+                        gix::date::time::Sign::Plus
+                    } else {
+                        gix::date::time::Sign::Minus
+                    },
+                },
+            }
+        } else {
+            r.committer()
+                .and_then(|res| res.ok())
+                .map(|s| s.to_owned())
+                .unwrap_or_else(|| gix::actor::Signature {
+                    name: "Unknown".into(),
+                    email: "unknown@example.com".into(),
+                    time: gix::date::Time::now_local_or_utc(),
+                })
+        };
+
+        let commit = gix::objs::Commit {
+            tree: tree_id,
+            parents: parent_ids.into_iter().collect(),
+            author: author_sig,
+            committer: committer_sig,
+            encoding: None,
+            message: input.message.into(),
+            extra_headers: Vec::new(),
+        };
+
+        let id = r.write_object(&commit).map_err(|e| err("write_commit", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write an annotated tag object directly to the object database.
+    #[napi]
+    pub fn write_tag(
+        &self,
+        target: String,
+        target_kind: String,
+        name: String,
+        message: String,
+        tagger: Option<Signature>,
+    ) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let target_id = parse_oid(&target)?;
+        let kind = match target_kind.to_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid object kind: {target_kind}"))),
+        };
+
+        let tagger_sig = if let Some(t) = tagger {
+            Some(gix::actor::Signature {
+                name: t.name.into(),
+                email: t.email.into(),
+                time: gix::date::Time {
+                    seconds: t.time,
+                    offset: t.timezone_offset,
+                    sign: if t.timezone_offset >= 0 {
+                        gix::date::time::Sign::Plus
+                    } else {
+                        gix::date::time::Sign::Minus
+                    },
+                },
+            })
+        } else {
+            r.committer().and_then(|res| res.ok()).map(|s| s.to_owned())
+        };
+
+        let tag = gix::objs::Tag {
+            target: target_id,
+            target_kind: kind,
+            name: name.into(),
+            tagger: tagger_sig,
+            message: message.into(),
+            pgp_signature: None,
+        };
+
+        let id = r.write_object(&tag).map_err(|e| err("write_tag", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Peel an object (commit, tag) down to the specified kind (`commit`, `tree`, `blob`, `tag`).
+    #[napi]
+    pub fn peel(&self, id: String, target_kind: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let kind = match target_kind.to_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("invalid target kind: {target_kind}"))),
+        };
+        let object = r.find_object(oid).map_err(|e| err("find_object", e))?;
+        let peeled = object.peel_to_kind(kind).map_err(|e| err("peel", e))?;
+        Ok(peeled.id.to_string())
+    }
+
+    /// Mutate and persist entries in the repository index.
+    #[napi]
+    pub fn edit_index(&self, entries: Vec<IndexEntryInput>) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let mut index = r.index_or_load_from_head_or_empty().map_err(|e| err("index_or_load", e))?;
+        for e in entries {
+            let mode = match e.mode.as_deref().unwrap_or("100644") {
+                "100755" => gix::index::entry::Mode::FILE_EXECUTABLE,
+                "040000" | "40000" => gix::index::entry::Mode::DIR,
+                "120000" => gix::index::entry::Mode::SYMLINK,
+                "160000" => gix::index::entry::Mode::COMMIT,
+                _ => gix::index::entry::Mode::FILE,
+            };
+            let stage = match e.stage.unwrap_or(0) {
+                1 => gix::index::entry::Stage::Base,
+                2 => gix::index::entry::Stage::Ours,
+                3 => gix::index::entry::Stage::Theirs,
+                _ => gix::index::entry::Stage::Unconflicted,
+            };
+            let oid = parse_oid(&e.id)?;
+            let path: BString = e.path.into();
+            let _ = index.dangerously_remove_entry(path.as_bstr());
+            index.dangerously_insert_entry(
+                gix::index::entry::Stat::default(),
+                oid,
+                mode,
+                stage,
+                path.as_bstr(),
+            );
+        }
+        let index_path = r.index_path();
+        let mut lock_file = gix::lock::File::acquire_to_update_at(
+            &index_path,
+            gix::lock::acquire::Fail::Immediately,
+            None,
+        )
+        .map_err(|e| err("lock_index", e))?;
+        index
+            .write_to(&mut lock_file, gix::index::write::Options::default())
+            .map_err(|e| err("write_index", e))?;
+        lock_file.commit().map_err(|e| err("commit_index_lock", e))?;
+        Ok(())
+    }
+
     // ---- references -------------------------------------------------------
 
     /// All references in the repository.
@@ -754,6 +1029,72 @@ impl Repository {
         Ok(build_remote(&self.inner, remote))
     }
 
+    /// The default remote for this repository (usually "origin" or configured default).
+    #[napi]
+    pub fn default_remote(&self) -> Result<Option<Remote>> {
+        let r = thread_local(&self.inner);
+        let name = r
+            .remote_names()
+            .into_iter()
+            .find(|n| *n == "origin")
+            .or_else(|| r.remote_names().into_iter().next());
+        match name {
+            Some(n) => match r.find_remote(&*n) {
+                Ok(remote) => Ok(Some(build_remote(&self.inner, remote))),
+                Err(_) => Ok(None),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Access a worktree by its id.
+    #[napi]
+    pub fn worktree(&self, id: String) -> Result<Option<WorktreeDetails>> {
+        let r = thread_local(&self.inner);
+        let proxy = match r.find_worktree(id.as_str()) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        let is_main = proxy.is_main();
+        let is_locked = proxy.is_locked();
+        let git_dir = proxy.git_dir().to_string_lossy().to_string();
+        let work_dir = proxy
+            .base()
+            .map_err(|e| err("worktree_base", e))?
+            .to_string_lossy()
+            .to_string();
+        let id_opt = proxy.id().ok().map(|i| i.to_string());
+        Ok(Some(WorktreeDetails {
+            id: id_opt,
+            git_dir,
+            work_dir,
+            is_main,
+            is_locked,
+        }))
+    }
+
+    /// Get details of the main worktree.
+    #[napi]
+    pub fn main_worktree(&self) -> Result<Option<WorktreeDetails>> {
+        let r = thread_local(&self.inner);
+        let main = match r.main_repo() {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+        let work_dir = match main.workdir() {
+            Some(w) => w.to_string_lossy().to_string(),
+            None => return Ok(None),
+        };
+        let git_dir = main.git_dir().to_string_lossy().to_string();
+        Ok(Some(WorktreeDetails {
+            id: None,
+            git_dir,
+            work_dir,
+            is_main: true,
+            is_locked: false,
+        }))
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// All config entries visible to this repository (repo + global + system), in file order.
@@ -828,6 +1169,55 @@ impl Repository {
     pub fn branch_names(&self) -> Result<Vec<String>> {
         let r = thread_local(&self.inner);
         Ok(r.branch_names().into_iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Path to a specific configuration file source (e.g. `Local`, `User`, `System`).
+    #[napi]
+    pub fn config_path(&self, source: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let src = match source.to_lowercase().as_str() {
+            "local" => gix::config::Source::Local,
+            "worktree" => gix::config::Source::Worktree,
+            "user" => gix::config::Source::User,
+            "git" => gix::config::Source::Git,
+            "system" => gix::config::Source::System,
+            "gitinstallation" | "installation" => gix::config::Source::GitInstallation,
+            _ => return Err(napi::Error::from_reason(format!("unknown config source: {source}"))),
+        };
+        match r.config_path(src) {
+            Ok(p) => Ok(Some(p.to_string_lossy().to_string())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Resolve a revision specification using full options (e.g. `HEAD~1`, `main`).
+    #[napi]
+    pub fn rev_parse_with(&self, spec: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("rev_parse_with", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Look up a submodule by its name.
+    #[napi]
+    pub fn submodule(&self, name: String) -> Result<Option<SubmoduleInfo>> {
+        let r = thread_local(&self.inner);
+        if let Ok(Some(submodules)) = r.submodules() {
+            for sm in submodules {
+                if lossy(sm.name()) == name {
+                    let path = lossy(sm.path().map_err(|e| err("submodule_path", e))?.as_ref());
+                    let url = sm.url().ok().map(|u| u.to_string());
+                    return Ok(Some(SubmoduleInfo {
+                        name,
+                        path,
+                        url,
+                    }));
+                }
+            }
+        }
+        Ok(None)
     }
 
     // ---- index (staging area) ----------------------------------------------
