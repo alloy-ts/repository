@@ -4,10 +4,24 @@ use napi::Result;
 use napi_derive::napi;
 
 use crate::error::{err, thread_local};
-use crate::object::{build_commit, build_tree, Commit, Tree};
+use crate::object::{build_commit, build_tree, Commit, Signature, Tree};
 
 fn lossy(b: &gix::bstr::BStr) -> String {
     String::from_utf8_lossy(b).into_owned()
+}
+
+/// A single entry inside a reference log (reflog).
+#[derive(Clone)]
+#[napi(object)]
+pub struct ReflogEntry {
+    /// Old target OID before this change.
+    pub previous_oid: String,
+    /// New target OID after this change.
+    pub new_oid: String,
+    /// Committer signature for this reflog entry.
+    pub committer: Signature,
+    /// Reflog message describing the operation.
+    pub message: String,
 }
 
 /// A git reference (branch, tag ref, or symbolic ref) snapshot.
@@ -38,6 +52,49 @@ impl Reference {
             .map_err(|e| err("peel_to_id", e))?
             .to_string();
         Ok(id)
+    }
+
+    /// Read the reference log (reflog) entries for this reference.
+    #[napi]
+    pub fn reflog(&self) -> Result<Vec<ReflogEntry>> {
+        let repo = thread_local(&self.repo);
+        let reference = repo
+            .find_reference(&self.name)
+            .map_err(|e| err("find_reference", e))?;
+
+        let mut platform = reference.log_iter();
+        let maybe_iter = platform
+            .all()
+            .map_err(|e| err("reflog iter", e))?;
+
+        let mut entries = Vec::new();
+        if let Some(iter) = maybe_iter {
+            for line_res in iter {
+                let line = line_res.map_err(|e| err("reflog line", e))?;
+                let (time, offset) = line
+                    .signature
+                    .time()
+                    .ok()
+                    .map(|t| (t.seconds, t.offset))
+                    .unwrap_or((0, 0));
+
+                let committer = Signature {
+                    name: lossy(line.signature.name),
+                    email: lossy(line.signature.email),
+                    time,
+                    timezone_offset: offset,
+                };
+
+                entries.push(ReflogEntry {
+                    previous_oid: line.previous_oid.to_string(),
+                    new_oid: line.new_oid.to_string(),
+                    committer,
+                    message: lossy(line.message),
+                });
+            }
+        }
+
+        Ok(entries)
     }
 
     /// Delete this reference. Fails if it changed since it was observed.

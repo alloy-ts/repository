@@ -101,6 +101,29 @@ describe("Repository static constructors and methods", () => {
     expect(entries[1].subject).toBe("First commit");
   });
 
+  test("Repository.reflog reads reflog entries from Repository", () => {
+    const repoPath = path.join(tmpDir, "repo-reflog");
+    const repo = Repository.init(repoPath, false);
+
+    const commit1 = repo.commit(
+      "refs/heads/main",
+      "Commit 1",
+      EMPTY_TREE_ID,
+      []
+    );
+    const commit2 = repo.commit(
+      "refs/heads/main",
+      "Commit 2",
+      EMPTY_TREE_ID,
+      [commit1]
+    );
+
+    const reflog = repo.reflog("refs/heads/main");
+    expect(Array.isArray(reflog)).toBe(true);
+    expect(reflog.length).toBeGreaterThanOrEqual(1);
+    expect(reflog[reflog.length - 1].newOid).toBe(commit2);
+  });
+
   test("Repository.revWalk and findCommit walk revisions and resolve commits", () => {
     const repoPath = path.join(tmpDir, "revwalk-repo");
     const repo = Repository.init(repoPath, false);

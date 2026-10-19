@@ -8,10 +8,10 @@ use napi_derive::napi;
 use crate::clone::CloneTask;
 use crate::error::{err, parse_oid, thread_local};
 use crate::object::{
-    build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Tag,
+    build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Signature, Tag,
     Tree,
 };
-use crate::reference::{build_head, build_reference, Head, Reference};
+use crate::reference::{build_head, build_reference, Head, Reference, ReflogEntry};
 use crate::remote::build_remote;
 use crate::remote::Remote;
 
@@ -170,6 +170,47 @@ impl Repository {
     }
 
     // ---- references -------------------------------------------------------
+
+    /// Read the reference log (reflog) entries for `name` (defaults to `"HEAD"` if omitted).
+    #[napi]
+    pub fn reflog(&self, name: Option<String>) -> Result<Vec<ReflogEntry>> {
+        let r = thread_local(&self.inner);
+        let ref_name = name.unwrap_or_else(|| "HEAD".to_string());
+        let reference = r
+            .find_reference(ref_name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let mut platform = reference.log_iter();
+        let maybe_iter = platform.all().map_err(|e| err("reflog iter", e))?;
+
+        let mut entries = Vec::new();
+        if let Some(iter) = maybe_iter {
+            for line_res in iter {
+                let line = line_res.map_err(|e| err("reflog line", e))?;
+                let (time, offset) = line
+                    .signature
+                    .time()
+                    .ok()
+                    .map(|t| (t.seconds, t.offset))
+                    .unwrap_or((0, 0));
+
+                let committer = Signature {
+                    name: lossy(line.signature.name),
+                    email: lossy(line.signature.email),
+                    time,
+                    timezone_offset: offset,
+                };
+
+                entries.push(ReflogEntry {
+                    previous_oid: line.previous_oid.to_string(),
+                    new_oid: line.new_oid.to_string(),
+                    committer,
+                    message: lossy(line.message),
+                });
+            }
+        }
+
+        Ok(entries)
+    }
 
     /// All references in the repository.
     #[napi]
