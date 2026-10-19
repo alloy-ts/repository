@@ -44,6 +44,18 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure sandbox has at least 2 commits so HEAD~1 exists for revision tests
+  if (repo.log().length < 2) {
+    const headCommit = repo.headCommit();
+    const branchName = repo.headName() ?? "refs/heads/main";
+    repo.commit(
+      branchName,
+      "second commit in sandbox for HEAD~1 tests",
+      headCommit.treeId,
+      [headCommit.id],
+    );
+  }
 });
 
 afterAll(() => {
@@ -295,6 +307,8 @@ describe("Repository config & paths", () => {
     expect(repo.objectHash()).toBe("Sha1");
     expect(typeof repo.gitDir()).toBe("string");
     expect(typeof repo.commonDir()).toBe("string");
+    expect(typeof repo.indexPath()).toBe("string");
+    expect(typeof repo.objectsDir()).toBe("string");
     expect(repo.workDir()).toBe(cloneDir);
   });
 
@@ -302,6 +316,12 @@ describe("Repository config & paths", () => {
     const signing = repo.configString("user.signingKey");
     expect(typeof signing === "string" || signing === null).toBe(true);
     expect(repo.configString("this.key.does.not.exist.zzz")).toBeNull();
+  });
+
+  test("reload, tagNames, and remoteNames helper methods", () => {
+    expect(() => repo.reload()).not.toThrow();
+    expect(Array.isArray(repo.tagNames())).toBe(true);
+    expect(Array.isArray(repo.remoteNames())).toBe(true);
   });
 });
 
@@ -495,8 +515,9 @@ describe("Repository wave-1 additions", () => {
   });
 
   test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+    const fresh = Repository.init(join(base, "fresh-full-repo"), false);
+    expect(fresh.isShallow()).toBe(false);
+    expect(fresh.shallowCommits()).toEqual([]);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -578,10 +599,10 @@ describe("Repository index editing & construction options", () => {
   });
 
   test("initOpts creates bare and non-bare repositories", () => {
-    const bare = Repository.initOpts(join(base, "init-bare"), { bare: true });
+    const bare = Repository.initOpts(join(base, "init-opts-bare"), { bare: true });
     expect(bare.isBare()).toBe(true);
 
-    const withWorktree = Repository.initOpts(join(base, "init-worktree"), {});
+    const withWorktree = Repository.initOpts(join(base, "init-opts-worktree"), {});
     expect(withWorktree.isBare()).toBe(false);
   });
 });

@@ -1028,6 +1028,51 @@ impl Repository {
         r.common_dir().to_string_lossy().into_owned()
     }
 
+    /// Path to the index file (`.git/index`).
+    #[napi]
+    pub fn index_path(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.index_path().to_string_lossy().into_owned()
+    }
+
+    /// Path to the objects directory (`.git/objects`).
+    #[napi]
+    pub fn objects_dir(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.git_dir().join("objects").to_string_lossy().into_owned()
+    }
+
+    /// Reload configuration, references, and object store state for this repository.
+    #[napi]
+    pub fn reload(&self) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
+    /// All tag names in the repository (e.g. `["v1.0.0"]`).
+    #[napi]
+    pub fn tag_names(&self) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        let platform = r.references().map_err(|e| err("tag_names refs", e))?;
+        let mut out = Vec::new();
+        for reference in platform.tags().map_err(|e| err("tag_names iter", e))? {
+            let reference = reference.map_err(|e| err("tag_names ref", e))?;
+            out.push(reference.name().shorten().to_string());
+        }
+        Ok(out)
+    }
+
+    /// Names of all configured remotes (e.g. `["origin"]`).
+    #[napi]
+    pub fn remote_names(&self) -> Vec<String> {
+        let r = thread_local(&self.inner);
+        r.remote_names()
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect()
+    }
+
     /// Whether this repository is bare.
     #[napi]
     pub fn is_bare(&self) -> bool {
