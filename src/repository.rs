@@ -19,6 +19,39 @@ fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+fn signature_from_dto(s: &Signature) -> Result<gix::actor::Signature> {
+    Ok(gix::actor::Signature {
+        name: s.name.clone().into(),
+        email: s.email.clone().into(),
+        time: gix::date::Time {
+            seconds: s.time,
+            offset: s.timezone_offset,
+        },
+    })
+}
+
+/// Input for writing a loose commit object.
+#[derive(Clone)]
+#[napi(object)]
+pub struct CommitInput {
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub message: String,
+    pub author: Option<Signature>,
+    pub committer: Option<Signature>,
+}
+
+/// Input for writing an annotated tag object.
+#[derive(Clone)]
+#[napi(object)]
+pub struct TagInput {
+    pub name: String,
+    pub target: String,
+    pub target_kind: String,
+    pub message: String,
+    pub tagger: Option<Signature>,
+}
+
 /// A single entry in the git index.
 #[derive(Clone)]
 #[napi(object)]
@@ -79,12 +112,60 @@ pub struct SubmoduleInfo {
     pub url: Option<String>,
 }
 
+/// A git note attached to an object.
+#[derive(Clone)]
+#[napi(object)]
+pub struct NoteInfo {
+    pub id: String,
+    pub message: String,
+}
+
+/// Input structure for editing an index entry.
+#[derive(Clone)]
+#[napi(object)]
+pub struct IndexEntryInput {
+    pub path: String,
+    pub id: String,
+    pub mode: Option<String>,
+}
+
 /// A single configuration key/value entry.
 #[derive(Clone)]
 #[napi(object)]
 pub struct ConfigEntry {
     pub key: String,
     pub value: String,
+}
+
+/// Checkout task running on libuv thread pool.
+pub struct CheckoutTask {
+    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
+    pub(crate) target: String,
+}
+
+impl Task for CheckoutTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<String> {
+        let r = thread_local(&self.repo);
+        let oid = parse_oid(&self.target)?;
+        let commit = r.find_commit(oid).map_err(|e| err("find_commit", e))?;
+        let tree_id = commit.tree_id().map_err(|e| err("tree_id", e))?;
+
+        let label = format!("checkout {}", self.target);
+        r.reference("HEAD", oid, gix::refs::transaction::PreviousValue::Any, label)
+            .map_err(|e| err("checkout_head", e))?;
+
+        let mut file = r.index_from_tree(&tree_id).map_err(|e| err("index_from_tree", e))?;
+        file.write(Default::default()).map_err(|e| err("write_index", e))?;
+
+        Ok(oid.to_string())
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: String) -> Result<String> {
+        Ok(output)
+    }
 }
 
 /// Status computation task running on libuv thread pool.
@@ -183,6 +264,23 @@ impl Repository {
         Ok(Repository {
             inner: Arc::new(ts),
         })
+    }
+
+    /// Open a repository with options.
+    #[napi]
+    pub fn open_opts(path: String, _bare: Option<bool>) -> Result<Repository> {
+        let opts = gix::open::Options::default();
+        let ts = gix::ThreadSafeRepository::open_opts(path, opts)
+            .map_err(|e| err("open_opts", e))?;
+        Ok(Repository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Initialize a repository with options.
+    #[napi]
+    pub fn init_opts(path: String, bare: Option<bool>) -> Result<Repository> {
+        Repository::init(path, bare)
     }
 
     /// Initialize a repository at `path`. Pass `bare: true` for a bare repository.
@@ -355,6 +453,96 @@ impl Repository {
         Ok(id.to_string())
     }
 
+    /// Write a loose commit object directly to the object database without moving references.
+    #[napi]
+    pub fn write_commit(&self, input: CommitInput) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let tree = parse_oid(&input.tree)?;
+        let parents = input
+            .parents
+            .iter()
+            .map(|p| parse_oid(p))
+            .collect::<Result<Vec<_>>>()?;
+
+        let default_author = r.author().and_then(|res| res.ok());
+        let default_committer = r.committer().and_then(|res| res.ok());
+
+        let author = match input.author {
+            Some(s) => signature_from_dto(&s)?,
+            None => default_author
+                .map(|s| s.into())
+                .ok_or_else(|| err("author", "no author configured"))?,
+        };
+        let committer = match input.committer {
+            Some(s) => signature_from_dto(&s)?,
+            None => default_committer
+                .map(|s| s.into())
+                .ok_or_else(|| err("committer", "no committer configured"))?,
+        };
+
+        let commit = gix::objs::Commit {
+            tree,
+            parents: parents.into(),
+            author,
+            committer,
+            encoding: None,
+            message: input.message.into(),
+            extra_headers: Vec::new(),
+        };
+
+        let oid = r.write_object(&commit).map_err(|e| err("write_commit", e))?;
+        Ok(oid.to_string())
+    }
+
+    /// Write an annotated tag object directly to the object database.
+    #[napi]
+    pub fn write_tag(&self, input: TagInput) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let target = parse_oid(&input.target)?;
+        let target_kind = match input.target_kind.to_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(err("write_tag", format!("invalid target_kind {}", input.target_kind))),
+        };
+
+        let default_tagger = r.committer().and_then(|res| res.ok()).map(|s| s.into());
+        let tagger = match input.tagger {
+            Some(s) => Some(signature_from_dto(&s)?),
+            None => default_tagger,
+        };
+
+        let tag = gix::objs::Tag {
+            target,
+            target_kind,
+            name: input.name.into(),
+            tagger,
+            message: input.message.into(),
+            signature: None,
+        };
+
+        let oid = r.write_object(&tag).map_err(|e| err("write_tag", e))?;
+        Ok(oid.to_string())
+    }
+
+    /// Peel an object to a target object kind (`commit`, `tree`, `blob`, `tag`).
+    #[napi]
+    pub fn peel(&self, id: String, kind: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let target_kind = match kind.to_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(err("peel", format!("invalid target kind {kind}"))),
+        };
+        let obj = r.find_object(oid).map_err(|e| err("find_object", e))?;
+        let peeled = obj.peel_to_kind(target_kind).map_err(|e| err("peel", e))?;
+        Ok(peeled.id().to_string())
+    }
+
     /// Write a tree object constructed from tree item inputs and return its OID.
     #[napi]
     pub fn write_tree(&self, entries: Vec<TreeItemInput>) -> Result<String> {
@@ -411,6 +599,30 @@ impl Repository {
             out.push(build_reference(&self.inner, reference)?);
         }
         Ok(out)
+    }
+
+    /// Find a submodule by name.
+    #[napi]
+    pub fn submodule_by_name(&self, name: String) -> Result<Option<SubmoduleInfo>> {
+        let submodules = self.submodules()?;
+        Ok(submodules.into_iter().find(|s| s.name == name))
+    }
+
+    /// Find a git note for an object.
+    #[napi]
+    pub fn find_note(&self, target_id: String) -> Result<Option<NoteInfo>> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&target_id)?;
+        let mut platform = r.notes().map_err(|e| err("notes", e))?;
+        if let Ok(notes) = platform.get(oid) {
+            if let Some(n) = notes.into_iter().next() {
+                return Ok(Some(NoteInfo {
+                    id: n.blob.id.to_string(),
+                    message: lossy(&n.blob.data),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// Find a single reference by name (e.g. `main`, `refs/heads/main`, `HEAD`).
@@ -670,6 +882,32 @@ impl Repository {
         Ok(out)
     }
 
+    /// Reset HEAD, index, and optionally working tree to target.
+    #[napi]
+    pub fn reset(&self, target: String, hard: Option<bool>) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&target)?;
+        let commit = r.find_commit(oid).map_err(|e| err("find_commit", e))?;
+        let tree_id = commit.tree_id().map_err(|e| err("tree_id", e))?;
+
+        let label = format!("reset {target}");
+        r.reference("HEAD", oid, gix::refs::transaction::PreviousValue::Any, label)
+            .map_err(|e| err("reset_head", e))?;
+
+        let mut file = r.index_from_tree(&tree_id).map_err(|e| err("index_from_tree", e))?;
+        file.write(Default::default())
+            .map_err(|e| err("write_index", e))?;
+
+        if hard.unwrap_or(false) {
+            if let Some(workdir) = r.workdir() {
+                let _ = std::fs::remove_dir_all(workdir);
+                let _ = std::fs::create_dir_all(workdir);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Whether this repository instance is a linked worktree.
     #[napi]
     pub fn is_worktree(&self) -> bool {
@@ -790,6 +1028,39 @@ impl Repository {
         Ok(out)
     }
 
+    /// Add or update index entries in the repository index file.
+    #[napi]
+    pub fn edit_index(&self, entries: Vec<IndexEntryInput>) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let index_path = r.index_path();
+        let mut file = match gix::index::File::at(&index_path, r.object_hash(), false, Default::default()) {
+            Ok(file) => file,
+            Err(_) => gix::index::File::from_state(gix::index::State::new(r.object_hash()), index_path),
+        };
+
+        for e in entries {
+            let mode = match e.mode.as_deref().unwrap_or("100644") {
+                "100755" => gix::index::entry::Mode::FILE_EXECUTABLE,
+                "040000" | "40000" => gix::index::entry::Mode::DIR,
+                "120000" => gix::index::entry::Mode::SYMLINK,
+                "160000" => gix::index::entry::Mode::COMMIT,
+                _ => gix::index::entry::Mode::FILE,
+            };
+            let oid = parse_oid(&e.id)?;
+            let path = gix::bstr::BString::from(e.path);
+            file.dangerously_push_entry(
+                gix::index::entry::Stat::default(),
+                oid,
+                gix::index::entry::Flags::empty(),
+                mode,
+                path.as_ref(),
+            );
+        }
+
+        file.write(Default::default()).map_err(|e| err("write_index", e))?;
+        Ok(())
+    }
+
     /// Read entries from index, or load from HEAD if index doesn't exist.
     #[napi]
     pub fn index_or_load_from_head_entries(&self) -> Result<Vec<IndexEntry>> {
@@ -814,6 +1085,15 @@ impl Repository {
     pub fn status(&self) -> Result<AsyncTask<StatusTask>> {
         Ok(AsyncTask::new(StatusTask {
             repo: Arc::clone(&self.inner),
+        }))
+    }
+
+    /// Checkout a target commit asynchronously.
+    #[napi(ts_return_type = "Promise<String>")]
+    pub fn checkout(&self, target: String) -> Result<AsyncTask<CheckoutTask>> {
+        Ok(AsyncTask::new(CheckoutTask {
+            repo: Arc::clone(&self.inner),
+            target,
         }))
     }
 

@@ -217,6 +217,32 @@ describe("Repository remotes", () => {
   });
 });
 
+// --- index editing & options constructors (Phase 2) -----------------------
+
+describe("Index editing & options constructors (Phase 2)", () => {
+  test("openOpts() / initOpts() / editIndex() work as expected", () => {
+    const opened = Repository.openOpts(cloneDir, false);
+    expect(opened.gitDir()).toBe(repo.gitDir());
+
+    const blobId = repo.writeBlob(Buffer.from("staged file content\n"));
+    repo.editIndex([{ path: "staged.txt", id: blobId, mode: "100644" }]);
+
+    const indexEntries = repo.indexEntries();
+    expect(indexEntries.some((e) => e.path === "staged.txt")).toBe(true);
+  });
+});
+
+// --- async checkout (Phase 5) ----------------------------------------------
+
+describe("Async checkout (Phase 5)", () => {
+  test("checkout() checks out target commit asynchronously", async () => {
+    const head = repo.headId();
+    const checkedOut = await repo.checkout(head);
+    expect(checkedOut).toBe(head);
+    expect(repo.headId()).toBe(head);
+  });
+});
+
 // --- index & status ---------------------------------------------------------
 
 describe("Repository index & status (Wave 2)", () => {
@@ -256,6 +282,12 @@ describe("Submodules & default identity (Wave 8)", () => {
 
     const committer = repo.defaultCommitter();
     expect(committer === null || typeof committer === "object").toBe(true);
+
+    const note = repo.findNote(repo.headId());
+    expect(note === null || typeof note === "object").toBe(true);
+
+    const sm = repo.submoduleByName("nonexistent_submodule");
+    expect(sm).toBeNull();
   });
 });
 
@@ -274,11 +306,15 @@ describe("Repository attributes & excludes (Wave 7)", () => {
 // --- worktrees (Wave 5) ------------------------------------------------------
 
 describe("Repository worktrees (Wave 5)", () => {
-  test("worktrees() and isWorktree() return worktree state", () => {
+  test("worktrees(), isWorktree(), and reset() work as expected", () => {
     const wts = repo.worktrees();
     expect(Array.isArray(wts)).toBe(true);
     expect(typeof repo.isWorktree()).toBe("boolean");
     expect(repo.isWorktree()).toBe(false);
+
+    const head = repo.headId();
+    repo.reset(head, false);
+    expect(repo.headId()).toBe(head);
   });
 });
 
@@ -417,6 +453,34 @@ describe("Repository merge & tree operations (Wave 6)", () => {
 // --- object writing & retrieval (Wave 4) ------------------------------------
 
 describe("Object writing & object retrieval (Wave 4)", () => {
+  test("writeCommit(), writeTag(), and peel() roundtrip (Phase 1)", () => {
+    const head = repo.headCommit();
+    const newCommitId = repo.writeCommit({
+      tree: head.treeId,
+      parents: [head.id],
+      message: "custom loose commit message\n",
+    });
+    expect(typeof newCommitId).toBe("string");
+    expect(newCommitId).toMatch(/^[0-9a-f]{40}$/);
+
+    const commitObj = repo.findCommit(newCommitId);
+    expect(commitObj.message).toBe("custom loose commit message\n");
+
+    const tagObjId = repo.writeTag({
+      name: "v1.0.0-custom",
+      target: newCommitId,
+      targetKind: "commit",
+      message: "custom annotated tag\n",
+    });
+    expect(typeof tagObjId).toBe("string");
+
+    const peeledTree = repo.peel(tagObjId, "tree");
+    expect(peeledTree).toBe(head.treeId);
+
+    const peeledCommit = repo.peel(tagObjId, "commit");
+    expect(peeledCommit).toBe(newCommitId);
+  });
+
   test("writeTree() creates a tree and tryFindObject() retrieves it", () => {
     const blobId = repo.writeBlob(Buffer.from("sample content\n"));
     const treeId = repo.writeTree([{ path: "file.txt", mode: "100644", id: blobId }]);

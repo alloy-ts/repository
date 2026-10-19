@@ -24,7 +24,7 @@ This document details the API exported by the [`gix`](https://docs.rs/gix/latest
 
 ### `gix::ThreadSafeRepository`
 * **Purpose**: Immutable, shareable reference-counted core holding open object database (ODB) handles, pack indexes, and reference database handles.
-* **Thread Safety**: Implements `Send` and `Sync`. Safe to wrap in `Arc<ThreadSafeRepository>` and pass across thread boundaries (e.g., to libuv background worker threads for async clone/fetch/push).
+* **Thread Safety**: Implements `Send` and `Sync`. Safe to wrap in `Arc<ThreadSafeRepository>` and pass across thread boundaries (e.g., to libuv background worker threads for async clone/fetch/push/checkout/status).
 
 ### `gix::Repository`
 * **Purpose**: Thread-local view created from a `ThreadSafeRepository` via `ts_repo.to_thread_local()` or `ts_repo.into()`.
@@ -39,7 +39,7 @@ When interacting with a `gix::Repository`, operations yield rich handle objects:
 
 | Domain Object | `gix` Struct | Description / Key Capabilities |
 |---|---|---|
-| **`Commit`** | `gix::Commit<'repo>` | Decodes commit objects (`author`, `committer`, `message`, `tree_id`, `parents`). Provides cryptographic signing (`sign`) and signature verification (`verify_signature`). |
+| **`Commit`** | `gix::Commit<'repo>` | Decodes commit objects (`author`, `committer`, `message`, `tree_id`, `parents`, `decode()`). Provides cryptographic signing (`sign`) and signature verification (`verify_signature`). |
 | **`Tree`** | `gix::Tree<'repo>` | Decodes directory trees and lists entries (`TreeEntry`: name, OID, mode). |
 | **`Blob`** | `gix::Blob<'repo>` | Accesses raw file content bytes (`data`). |
 | **`Tag`** | `gix::Tag<'repo>` | Decodes annotated tag objects (`tagger`, `target_id`, `target_kind`, `message`). |
@@ -53,25 +53,40 @@ When interacting with a `gix::Repository`, operations yield rich handle objects:
 
 ### Log & Revision Walking
 * `repo.rev_walk([tip_ids])`: Instantiates a revision walker iterating backwards through commit history.
-* `repo.rev_parse_single(spec)`: Resolves revision specifications (e.g. `HEAD`, `HEAD~1`, `main`, `<sha>`) to an `ObjectId`.
+* `repo.rev_parse_single(spec)` / `repo.rev_parse_hex(spec)`: Resolves revision specifications (e.g. `HEAD`, `HEAD~1`, `main`, `<sha>`) to an `ObjectId`.
 * `repo.merge_base(a, b)` / `repo.merge_base_octopus(ids)`: Computes common ancestor commits.
+* `repo.is_ancestor(a, b)`: Checks if a commit is an ancestor of another.
+* `repo.describe(id?)`: Generates human-readable descriptions for commits (git describe).
 
-### Object Database (ODB)
+### Object Database (ODB) & Writing
 * `repo.find_commit(id)` / `repo.find_tree(id)` / `repo.find_blob(id)` / `repo.find_tag(id)`: Look up decoded objects by OID.
-* `repo.find_object(id)`: Look up an object of arbitrary type.
-* `repo.has_object(id)`: Fast non-decoding existence check.
-* `repo.write_blob(data)` / `repo.commit(...)`: Write new objects to the OID store.
+* `repo.find_object(id)` / `repo.try_find_object(id)`: Look up an object of arbitrary type.
+* `repo.write_blob(data)` / `repo.write_tree(entries)` / `repo.write_commit(input)` / `repo.write_tag(input)`: Write loose objects directly to the OID store.
+* `repo.peel(id, kind)`: Peels tags or commits to a target object kind (`commit`, `tree`, `blob`, `tag`).
 
-### Cryptographic Signatures
-* `commit.verify_signature()`: Checks commit signature using `gpg`, `gpgsm`, or `ssh-keygen` based on `gpg.format` configuration.
-* `commit.sign(options)` / `repo.commit_signing_options()`: Generates PGP/SSH signatures for commits using configured keys (`user.signingKey`).
+### Index & Status
+* `repo.index_entries()` / `repo.index_or_load_from_head_entries()`: Reads index entries.
+* `repo.edit_index(entries)`: Modifies index entries in memory and persists to `.git/index`.
+* `repo.status()`: Computes working tree status asynchronously on the libuv thread pool.
+
+### Merges & Resets
+* `repo.merge_trees(ours, theirs, ancestor)`: Merges two trees using a common ancestor.
+* `repo.merge_commits(ours, theirs)`: Merges two commit trees and reports conflict status.
+* `repo.reset(target, hard?)`: Resets HEAD and index (and working tree if `hard: true`).
+* `repo.checkout(target)`: Asynchronously checks out a target commit.
+
+### Attributes, Excludes & Submodules
+* `repo.attributes(path)`: Retrieves assigned git attributes for a path.
+* `repo.is_path_excluded(path)`: Checks if a path is ignored by `.gitignore`.
+* `repo.submodules()` / `repo.submodule_by_name(name)`: Lists and inspects submodules.
+* `repo.find_note(target_id)`: Retrieves attached git notes.
 
 ---
 
 ## 5. Node.js Binding Mapping Rationale
 
 1. **Static Factories vs Constructors**: `napi-rs` constructors (`constructor()`) cannot return errors cleanly or perform asynchronous fallible creation. Therefore, `Repository` exposes static factory methods (`Repository.open`, `Repository.init`, `Repository.discover`, `Repository.clone`) that throw idiomatic JS `Error` objects on failure.
-2. **Thread Offloading**: Network operations like `clone()` and `remote.fetch()` run asynchronously on libuv worker threads via `napi::Task` / `AsyncTask`, returning JavaScript `Promise` instances without blocking the main event loop.
+2. **Thread Offloading**: Heavy operations like `clone()`, `remote.fetch()`, `status()`, and `checkout()` run asynchronously on libuv worker threads via `napi::Task` / `AsyncTask`, returning JavaScript `Promise` instances without blocking the main event loop.
 
 ---
 
