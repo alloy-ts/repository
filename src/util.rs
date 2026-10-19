@@ -43,7 +43,20 @@ impl Manifest {
             .map_err(|e| napi::Error::from_reason(format!("parse {}: {e}", path.display())))
     }
     pub fn read_at(repo: &gix::Repository, revision: &str, rel_path: &str) -> Result<Manifest> {
-        // 1) Resolve the revision spec to a single object id (commit/tag/tree/blob).
+        // Try direct revision path spec: e.g. "HEAD:repository.manifest.yml" or "main:repository.manifest.yml"
+        let spec = format!("{revision}:{rel_path}");
+        if let Ok(id) = repo.rev_parse_single(spec.as_str()) {
+            if let Ok(obj) = id.object() {
+                if let Ok(blob) = obj.try_into_blob() {
+                    let text = String::from_utf8_lossy(&blob.data).into_owned();
+                    return serde_yaml::from_str(&text).map_err(|e| {
+                        napi::Error::from_reason(format!("parse {rel_path} at {revision}: {e}"))
+                    });
+                }
+            }
+        }
+
+        // Fallback: 1) Resolve the revision spec to a single object id (commit/tag/tree/blob).
         let id = repo
             .rev_parse_single(revision)
             .map_err(|e| napi::Error::from_reason(format!("rev_parse {revision}: {e}")))?;

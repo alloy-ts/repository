@@ -27,13 +27,16 @@ beforeAll(async () => {
   try {
     repo = await Repository.clone(realRoot, cloneDir, false);
   } catch (e) {
-    console.log(`Repository.clone unavailable (${e}); using git CLI clone for sandbox`);
+    console.log(`Repository.clone unavailable (${String(e)}); using git CLI clone for sandbox`);
     rmSync(cloneDir, { recursive: true, force: true });
-    execSync(
-      `git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`,
-      { stdio: "ignore" },
-    );
+    execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
+      stdio: "ignore",
+    });
     repo = Repository.open(cloneDir);
+  }
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    repo.commit("HEAD", "second commit for tests", head.treeId, [head.id]);
   }
 });
 
@@ -64,7 +67,7 @@ describe("Repository static constructors", () => {
     try {
       cloned = await Repository.clone(realRoot, dir, false);
     } catch (e) {
-      console.log(`Repository.clone not exercised in this environment (${e})`);
+      console.log(`Repository.clone not exercised in this environment (${String(e)})`);
     }
     if (cloned) {
       expect(typeof cloned.headId()).toBe("string");
@@ -229,14 +232,17 @@ describe("Repository.reflog", () => {
     expect(entries.length).toBeGreaterThan(0);
     // Most recent entry first, and its shape matches RefLogEntry.
     const e = entries[0];
-    expect(typeof e.oldId).toBe("string");
-    expect(typeof e.newId).toBe("string");
-    expect(typeof e.name).toBe("string");
-    expect(typeof e.email).toBe("string");
-    expect(typeof e.time).toBe("number");
-    expect(typeof e.timezoneOffset).toBe("number");
-    expect(typeof e.message).toBe("string");
-    expect(e.message.length).toBeGreaterThan(0);
+    expect(e).toBeDefined();
+    if (e) {
+      expect(typeof e.oldId).toBe("string");
+      expect(typeof e.newId).toBe("string");
+      expect(typeof e.name).toBe("string");
+      expect(typeof e.email).toBe("string");
+      expect(typeof e.time).toBe("number");
+      expect(typeof e.timezoneOffset).toBe("number");
+      expect(typeof e.message).toBe("string");
+      expect(e.message.length).toBeGreaterThan(0);
+    }
   });
 
   test("createReference writes a reflog entry for the new ref", () => {
@@ -246,8 +252,11 @@ describe("Repository.reflog", () => {
     const entries = repo.reflog(name);
     expect(entries.length).toBeGreaterThan(0);
     const latest = entries[0];
-    expect(latest.newId).toBe(head);
-    expect(latest.message).toContain("create reference");
+    expect(latest).toBeDefined();
+    if (latest) {
+      expect(latest.newId).toBe(head);
+      expect(latest.message).toContain("create reference");
+    }
     repo.findReference(name).delete();
   });
 
@@ -320,7 +329,7 @@ describe("Repository revisions", () => {
   test("log returns commit summaries newest-first", () => {
     const entries = repo.log();
     expect(entries.length).toBeGreaterThan(0);
-    expect(entries[0].id).toBe(repo.headId());
+    expect(entries[0]?.id).toBe(repo.headId());
   });
 
   test("diffTreeToTree diffs two trees and against empty", () => {
@@ -341,16 +350,13 @@ describe("Repository revisions", () => {
   });
 });
 
-
 describe("Repository revisions - reading file content", () => {
   test("resolve a ref/SHA to a commit, then read a file blob from its tree", () => {
     // `HEAD` (or `main`, or a `<sha>`) -> commit id -> tree -> entry -> blob content.
     const tip = repo.revParseSingle("HEAD");
     const commit = repo.findCommit(tip);
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "Cargo.toml" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "Cargo.toml" && e.mode === "Blob");
     expect(entry).toBeDefined();
     const text = repo.findBlob(entry!.id).content().toString("utf8");
     expect(text.length).toBeGreaterThan(0);
@@ -368,12 +374,9 @@ describe("Repository revisions - reading file content", () => {
 describe("Repository.commit", () => {
   test("commit creates a new commit on a throwaway ref", () => {
     const head = repo.headCommit();
-    const newId = repo.commit(
-      "refs/heads/__probe_commit__",
-      "probe commit message",
-      head.treeId,
-      [head.id],
-    );
+    const newId = repo.commit("refs/heads/__probe_commit__", "probe commit message", head.treeId, [
+      head.id,
+    ]);
     expect(typeof newId).toBe("string");
     expect(newId).not.toBe(head.id);
 
@@ -383,5 +386,150 @@ describe("Repository.commit", () => {
     expect(c.treeId).toBe(head.treeId);
 
     repo.findReference("refs/heads/__probe_commit__").delete();
+  });
+});
+
+describe("Wave 8 APIs - Submodules, Identity & State", () => {
+  test("submodules / committer / author / state", () => {
+    const sms = repo.submodules();
+    expect(Array.isArray(sms)).toBe(true);
+
+    const state = repo.state();
+    expect(typeof state).toBe("string");
+
+    const committer = repo.committer();
+    expect(committer === null || typeof committer?.name === "string").toBe(true);
+
+    const author = repo.author();
+    expect(author === null || typeof author?.name === "string").toBe(true);
+  });
+});
+
+describe("Wave 7 APIs - Attributes, Excludes, Mailmap", () => {
+  test("isIgnored / resolveMailmap", () => {
+    expect(typeof repo.isIgnored("node_modules")).toBe("boolean");
+    const sig = repo.resolveMailmap("John Doe", "john@example.com");
+    expect(sig.name).toBe("John Doe");
+    expect(sig.email).toBe("john@example.com");
+  });
+});
+
+describe("Wave 6 APIs - Merge & Rebase", () => {
+  test("mergeTrees", () => {
+    const headCommit = repo.headCommit();
+    const result = repo.mergeTrees(headCommit.treeId, headCommit.treeId, null);
+    expect(typeof result.treeId).toBe("string");
+    expect(result.hasConflicts).toBe(false);
+  });
+});
+
+describe("Wave 5 APIs - Worktrees", () => {
+  test("worktrees / mainWorktree / isLinkedWorktree", () => {
+    const wts = repo.worktrees();
+    expect(Array.isArray(wts)).toBe(true);
+
+    const main = repo.mainWorktree();
+    expect(main).not.toBeNull();
+    expect(main?.isMain).toBe(true);
+    expect(typeof main?.gitDir).toBe("string");
+
+    expect(repo.isLinkedWorktree()).toBe(false);
+  });
+});
+
+describe("Wave 4 APIs - Object writing & lookup", () => {
+  test("writeTree / writeObject / tryFindObject", () => {
+    const blobId = repo.writeBlob(Buffer.from("wave4 content\n"));
+    const treeId = repo.writeTree([{ name: "wave4.txt", mode: "Blob", id: blobId }]);
+    expect(typeof treeId).toBe("string");
+    expect(treeId.length).toBe(40);
+
+    const rawBlobId = repo.writeObject("blob", Buffer.from("raw blob\n"));
+    expect(repo.objectExists(rawBlobId)).toBe(true);
+
+    const found = repo.tryFindObject(rawBlobId);
+    expect(found).not.toBeNull();
+    expect(found?.kind).toBe("blob");
+
+    const missing = repo.tryFindObject("0".repeat(40));
+    expect(missing).toBeNull();
+  });
+});
+
+describe("Wave 3 APIs - Config & Branch helpers", () => {
+  test("setConfigString / branchNames / branchRemoteName / branchRemoteRef", () => {
+    repo.setConfigString("user.customTestKey", "helloValue");
+    expect(repo.configString("user.customTestKey")).toBe("helloValue");
+
+    const branches = repo.branchNames();
+    expect(Array.isArray(branches)).toBe(true);
+    expect(branches.length).toBeGreaterThan(0);
+
+    const mainBranch = branches[0] ?? "main";
+    const remoteName = repo.branchRemoteName(mainBranch);
+    expect(remoteName === null || typeof remoteName === "string").toBe(true);
+    const remoteRef = repo.branchRemoteRef(mainBranch);
+    expect(remoteRef === null || typeof remoteRef === "string").toBe(true);
+  });
+});
+
+describe("Wave 2 APIs - Index & Status", () => {
+  test("index / indexOrLoadFromHead / status", () => {
+    const idx = repo.index();
+    expect(Array.isArray(idx)).toBe(true);
+    expect(idx.length).toBeGreaterThan(0);
+    const first = idx[0];
+    expect(first).toBeDefined();
+    if (first) {
+      expect(typeof first.path).toBe("string");
+      expect(typeof first.mode).toBe("string");
+      expect(typeof first.id).toBe("string");
+    }
+
+    const idxHead = repo.indexOrLoadFromHead();
+    expect(Array.isArray(idxHead)).toBe(true);
+
+    const st = repo.status();
+    expect(Array.isArray(st)).toBe(true);
+  });
+});
+
+describe("Wave 1 APIs", () => {
+  test("headTreeId / headRef / headTree / setHead", () => {
+    const treeId = repo.headTreeId();
+    expect(treeId).toBe(repo.headCommit().treeId);
+    expect(repo.headTree().id).toBe(treeId);
+
+    const headRef = repo.headRef();
+    if (headRef) {
+      expect(headRef.name.startsWith("refs/")).toBe(true);
+    }
+
+    const headId = repo.headId();
+    repo.setHead(headId);
+    expect(repo.headId()).toBe(headId);
+    if (headRef) {
+      repo.setHead(headRef.name);
+    }
+  });
+
+  test("remoteAt / createRemote", () => {
+    const anon = repo.remoteAt("https://github.com/example/anon.git");
+    expect(anon.url).toBe("https://github.com/example/anon.git");
+
+    const created = repo.createRemote("wave1-remote", "https://github.com/example/wave1.git");
+    expect(created.name).toBe("wave1-remote");
+    expect(repo.findRemote("wave1-remote").url).toBe("https://github.com/example/wave1.git");
+  });
+
+  test("configEntries / isAncestor / describe / isShallow", () => {
+    const entries = repo.configEntries();
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries.length).toBeGreaterThan(0);
+
+    const head = repo.headId();
+    expect(repo.isAncestor(head, head)).toBe(true);
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(typeof repo.describe(head)).toBe("string");
   });
 });
