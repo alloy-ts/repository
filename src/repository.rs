@@ -1497,6 +1497,22 @@ impl Repository {
         }
         Ok(out)
     }
+
+    /// The ID of the empty tree object for this repository's hash algorithm.
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        let r = thread_local(&self.inner);
+        gix::ObjectId::empty_tree(r.object_hash()).to_string()
+    }
+
+    /// The empty tree object for this repository.
+    #[napi]
+    pub fn empty_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let id = gix::ObjectId::empty_tree(r.object_hash());
+        build_tree(&self.inner, id)
+    }
+
 }
 
 /// A linked worktree (see [`Repository::worktrees`]).

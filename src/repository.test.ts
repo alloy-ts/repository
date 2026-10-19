@@ -44,6 +44,16 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // If the sandbox repo has only 1 commit (e.g. shallow checkout in CI), create a second commit
+  // on top of HEAD so that HEAD~1 and ancestor/mergeBase tests can run.
+  if (repo.log().length < 2) {
+    const currentBranch = repo.headName();
+    if (currentBranch) {
+      const head = repo.headCommit();
+      repo.commit(currentBranch, "synthetic child commit", head.treeId, [head.id]);
+    }
+  }
 });
 
 afterAll(() => {
@@ -494,9 +504,14 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags match repository shallow state", () => {
+    const isShallowEnv = execSync("git rev-parse --is-shallow-repository", { cwd: realRoot })
+      .toString()
+      .trim() === "true";
+    expect(repo.isShallow()).toBe(isShallowEnv);
+    if (!isShallowEnv) {
+      expect(repo.shallowCommits()).toEqual([]);
+    }
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -506,5 +521,14 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+
+  test("emptyTreeId / emptyTree", () => {
+    const emptyId = repo.emptyTreeId();
+    expect(emptyId).toMatch(/^[0-9a-f]{40}$/);
+
+    const emptyTree = repo.emptyTree();
+    expect(emptyTree.id).toBe(emptyId);
+    expect(emptyTree.entries).toEqual([]);
   });
 });
