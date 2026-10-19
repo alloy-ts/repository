@@ -1,10 +1,6 @@
 import { execSync } from "node:child_process";
 import { expect, test } from "vite-plus/test";
-import {
-  Repository,
-  type Commit,
-  type SignatureVerification,
-} from "../dist/index.js";
+import { Repository, type Commit, type SignatureVerification } from "../dist/index.js";
 
 /** The commit `HEAD` points to in the current working-tree repository. */
 function headCommit(): Commit {
@@ -21,8 +17,7 @@ function signerAvailable(): boolean {
     const repo = Repository.open(process.cwd());
     if (typeof repo.configString("user.signingKey") !== "string") return false;
     const format = repo.configString("gpg.format") ?? "openpgp";
-    const program =
-      format === "ssh" ? "ssh-keygen" : format === "x509" ? "gpgsm" : "gpg";
+    const program = format === "ssh" ? "ssh-keygen" : format === "x509" ? "gpgsm" : "gpg";
     execSync(`command -v ${program}`, { stdio: "ignore" });
     return true;
   } catch {
@@ -73,22 +68,19 @@ test("verifySignature reports an unsigned commit as not signed", () => {
 // Signing requires a configured signer (`gpg.format` / `user.signingKey` and an installed
 // gpg/ssh-keygen). Skipped in environments without one so the suite stays green; run locally
 // with a working signer to exercise the full sign+verify path.
-test.skipIf(!canSign)(
-  "sign creates a new signed commit whose signature verifies",
-  () => {
-    const base = headCommit();
-    const signed = base.sign();
+test.skipIf(!canSign)("sign creates a new signed commit whose signature verifies", () => {
+  const base = headCommit();
+  const signed = base.sign();
 
-    // A signature changes the object id, so the signed commit is distinct.
-    expect(signed.id).not.toBe(base.id);
+  // A signature changes the object id, so the signed commit is distinct.
+  expect(signed.id).not.toBe(base.id);
 
-    const v = signed.verifySignature();
-    expect(v.signed).toBe(true);
-    expect(v.valid).toBe(true);
-    expect(v.signer).not.toBeNull();
-    expect(typeof v.status).toBe("string");
-  },
-);
+  const v = signed.verifySignature();
+  expect(v.signed).toBe(true);
+  expect(v.valid).toBe(true);
+  expect(v.signer).not.toBeNull();
+  expect(typeof v.status).toBe("string");
+});
 
 test("sign surfaces a clear error when no signer is available", () => {
   if (canSign) {

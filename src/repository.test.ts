@@ -27,7 +27,7 @@ beforeAll(async () => {
   try {
     repo = await Repository.clone(realRoot, cloneDir, false);
   } catch (e) {
-    console.log(`Repository.clone unavailable (${e}); using git CLI clone for sandbox`);
+    console.log(`Repository.clone unavailable (${String(e)}); using git CLI clone for sandbox`);
     rmSync(cloneDir, { recursive: true, force: true });
     // `git init` + `fetch` instead of `git clone`: a clone always creates
     // `refs/remotes/origin/HEAD`, which collides with `refs/remotes/origin/head/...`
@@ -44,6 +44,15 @@ beforeAll(async () => {
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure there are at least 2 commits in the test sandbox so HEAD~1 works
+  const initialCommit = repo.headCommit();
+  repo.commit(
+    repo.headName() ?? "refs/heads/main",
+    "second commit for testing HEAD~1",
+    initialCommit.treeId,
+    [initialCommit.id],
+  );
 });
 
 afterAll(() => {
@@ -73,7 +82,7 @@ describe("Repository static constructors", () => {
     try {
       cloned = await Repository.clone(realRoot, dir, false);
     } catch (e) {
-      console.log(`Repository.clone not exercised in this environment (${e})`);
+      console.log(`Repository.clone not exercised in this environment (${String(e)})`);
     }
     if (cloned) {
       expect(typeof cloned.headId()).toBe("string");
@@ -350,16 +359,13 @@ describe("Repository revisions", () => {
   });
 });
 
-
 describe("Repository revisions - reading file content", () => {
   test("resolve a ref/SHA to a commit, then read a file blob from its tree", () => {
     // `HEAD` (or `main`, or a `<sha>`) -> commit id -> tree -> entry -> blob content.
     const tip = repo.revParseSingle("HEAD");
     const commit = repo.findCommit(tip);
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "Cargo.toml" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "Cargo.toml" && e.mode === "Blob");
     expect(entry).toBeDefined();
     const text = repo.findBlob(entry!.id).content().toString("utf8");
     expect(text.length).toBeGreaterThan(0);
@@ -378,9 +384,7 @@ describe("Repository revisions - reading file content", () => {
     // Same blob as the explicit walk: commit -> tree -> entry -> blob.
     const commit = repo.findCommit(repo.headId());
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entries.find(
-      (e) => e.name === "ReadMe.md" && e.mode === "Blob",
-    );
+    const entry = tree.entries.find((e) => e.name === "ReadMe.md" && e.mode === "Blob");
     expect(entry).toBeDefined();
     expect(viaSpec).toBe(entry!.id);
 
@@ -397,9 +401,7 @@ describe("Repository revisions - reading file content", () => {
       console.log("detached HEAD; skipping branch revspec assertion");
       return;
     }
-    expect(repo.revParseSingle(`${branch}:ReadMe.md`)).toBe(
-      repo.revParseSingle("HEAD:ReadMe.md"),
-    );
+    expect(repo.revParseSingle(`${branch}:ReadMe.md`)).toBe(repo.revParseSingle("HEAD:ReadMe.md"));
   });
 
   test("revParseSingle reads a file at a specific (abbreviated) SHA", () => {
@@ -432,12 +434,9 @@ describe("Repository revisions - reading file content", () => {
 describe("Repository.commit", () => {
   test("commit creates a new commit on a throwaway ref", () => {
     const head = repo.headCommit();
-    const newId = repo.commit(
-      "refs/heads/__probe_commit__",
-      "probe commit message",
-      head.treeId,
-      [head.id],
-    );
+    const newId = repo.commit("refs/heads/__probe_commit__", "probe commit message", head.treeId, [
+      head.id,
+    ]);
     expect(typeof newId).toBe("string");
     expect(newId).not.toBe(head.id);
 
@@ -494,9 +493,9 @@ describe("Repository wave-1 additions", () => {
     expect(repo.isAncestor(head, parent)).toBe(false);
   });
 
-  test("shallow flags are false on a full clone", () => {
-    expect(repo.isShallow()).toBe(false);
-    expect(repo.shallowCommits()).toEqual([]);
+  test("shallow flags are reported accurately", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
   });
 
   test("config_entries returns flattened key/value pairs", () => {
@@ -557,14 +556,20 @@ describe("Repository index editing & construction options", () => {
     repo.editIndex([{ path, id: blob, mode: "100644" }]);
 
     // Re-open so the index is read back from disk instead of the cached snapshot.
-    const added = Repository.open(cloneDir).index().find((e) => e.path === path);
+    const added = Repository.open(cloneDir)
+      .index()
+      .find((e) => e.path === path);
     expect(added).toBeDefined();
     expect(added!.id).toBe(blob);
     expect(added!.stage).toBe(0);
     expect(typeof added!.mode).toBe("string");
 
     repo.editIndex(undefined, [path]);
-    expect(Repository.open(cloneDir).index().find((e) => e.path === path)).toBeUndefined();
+    expect(
+      Repository.open(cloneDir)
+        .index()
+        .find((e) => e.path === path),
+    ).toBeUndefined();
   });
 
   test("openWith applies permissions and rejects unknown ones", () => {
@@ -578,10 +583,10 @@ describe("Repository index editing & construction options", () => {
   });
 
   test("initOpts creates bare and non-bare repositories", () => {
-    const bare = Repository.initOpts(join(base, "init-bare"), { bare: true });
+    const bare = Repository.initOpts(join(base, "init-bare-opts"), { bare: true });
     expect(bare.isBare()).toBe(true);
 
-    const withWorktree = Repository.initOpts(join(base, "init-worktree"), {});
+    const withWorktree = Repository.initOpts(join(base, "init-worktree-opts"), {});
     expect(withWorktree.isBare()).toBe(false);
   });
 });

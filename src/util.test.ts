@@ -51,16 +51,16 @@ test("setupRemotes derives remote names from the manifest URLs", () => {
 
     // Remotes are persisted and discoverable on a fresh open (order is gix's, not manifest's).
     const reopened = Repository.open(dir);
-    expect(reopened.remotes().map((r) => r.name).sort()).toEqual([...names].sort());
-    expect(reopened.findRemote("origin").url).toBe(
-      "https://repo.example.com/acme/test",
-    );
-    expect(reopened.findRemote("github").url).toBe(
-      "https://github.com/acme/test",
-    );
-    expect(reopened.findRemote("azure").url).toBe(
-      "https://dev.azure.com/acme/test",
-    );
+    const namesReopened = reopened
+      .remotes()
+      .map((r) => r.name)
+      .filter((n): n is string => n !== undefined);
+    namesReopened.sort((a, b) => a.localeCompare(b));
+    const sortedNames = [...names].sort((a, b) => a.localeCompare(b));
+    expect(namesReopened).toEqual(sortedNames);
+    expect(reopened.findRemote("origin").url).toBe("https://repo.example.com/acme/test");
+    expect(reopened.findRemote("github").url).toBe("https://github.com/acme/test");
+    expect(reopened.findRemote("azure").url).toBe("https://dev.azure.com/acme/test");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
