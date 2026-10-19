@@ -190,6 +190,22 @@ describe("Repository references", () => {
     expect(() => repo.findReference("refs/heads/__nope__")).toThrow();
   });
 
+  test("reflog() and reflogExists() query reflogs on repository", () => {
+    const log = repo.reflog();
+    expect(Array.isArray(log)).toBe(true);
+    expect(typeof repo.reflogExists("HEAD")).toBe("boolean");
+
+    const headCommit = repo.headCommit();
+    const branchName = "refs/heads/__repo_reflog_probe__";
+    repo.createReference(branchName, headCommit.id, true);
+
+    expect(typeof repo.reflogExists(branchName)).toBe("boolean");
+    const branchLog = repo.reflog(branchName);
+    expect(Array.isArray(branchLog)).toBe(true);
+
+    repo.findReference(branchName).delete();
+  });
+
   test("createReference / createLightweightTag / createTag and cleanup", () => {
     const head = repo.headId();
 

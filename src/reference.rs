@@ -10,7 +10,7 @@ fn lossy(b: &gix::bstr::BStr) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-fn signature_ref_to_dto(s: &gix::actor::SignatureRef) -> Signature {
+pub(crate) fn signature_ref_to_dto(s: &gix::actor::SignatureRef) -> Signature {
     let (time, timezone_offset) = s
         .time()
         .ok()

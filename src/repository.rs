@@ -11,7 +11,7 @@ use crate::object::{
     build_blob, build_commit, build_object, build_tag, build_tree, Blob, Commit, GitObject, Tag,
     Tree,
 };
-use crate::reference::{build_head, build_reference, Head, Reference};
+use crate::reference::{build_head, build_reference, signature_ref_to_dto, Head, Reference, ReflogEntry};
 use crate::remote::build_remote;
 use crate::remote::Remote;
 
@@ -346,6 +346,68 @@ impl Repository {
         let path = manifest_path.unwrap_or_else(|| "repository.manifest.yml".to_string());
         crate::util::setup_repository_from_manifest(&r, path)
             .map_err(|e| napi::Error::from_reason(e))
+    }
+
+    // ---- reflogs -----------------------------------------------------------
+
+    /// Read reflog entries for a reference (defaults to `"HEAD"`).
+    #[napi]
+    pub fn reflog(&self, name: Option<String>) -> Result<Vec<ReflogEntry>> {
+        let r = thread_local(&self.inner);
+        let name = name.unwrap_or_else(|| "HEAD".to_string());
+        if name == "HEAD" {
+            let head = r.head().map_err(|e| err("head", e))?;
+            let mut platform = head.log_iter();
+            let mut out = Vec::new();
+            if let Ok(Some(log)) = platform.all() {
+                for entry in log {
+                    let entry = entry.map_err(|e| err("reflog entry", e))?;
+                    let committer = signature_ref_to_dto(&entry.signature);
+                    out.push(ReflogEntry {
+                        previous_oid: entry.previous_oid.to_string(),
+                        new_oid: entry.new_oid.to_string(),
+                        committer,
+                        message: lossy(entry.message.as_ref()),
+                    });
+                }
+            }
+            Ok(out)
+        } else {
+            let reference = r
+                .find_reference(name.as_str())
+                .map_err(|e| err("find_reference", e))?;
+            let mut platform = reference.log_iter();
+            let mut out = Vec::new();
+            if let Ok(Some(log)) = platform.all() {
+                for entry in log {
+                    let entry = entry.map_err(|e| err("reflog entry", e))?;
+                    let committer = signature_ref_to_dto(&entry.signature);
+                    out.push(ReflogEntry {
+                        previous_oid: entry.previous_oid.to_string(),
+                        new_oid: entry.new_oid.to_string(),
+                        committer,
+                        message: lossy(entry.message.as_ref()),
+                    });
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// Whether a reflog exists for a reference (defaults to `"HEAD"`).
+    #[napi]
+    pub fn reflog_exists(&self, name: Option<String>) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let name = name.unwrap_or_else(|| "HEAD".to_string());
+        if name == "HEAD" {
+            let head = r.head().map_err(|e| err("head", e))?;
+            Ok(head.log_iter().all().ok().flatten().is_some())
+        } else {
+            let reference = r
+                .find_reference(name.as_str())
+                .map_err(|e| err("find_reference", e))?;
+            reference.log_exists().map_err(|e| err("reflog_exists", e))
+        }
     }
 
     // ---- config / paths --------------------------------------------------
