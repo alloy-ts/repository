@@ -368,6 +368,13 @@ impl Repository {
         Ok(build_remote(&self.inner, remote))
     }
 
+    /// Read a manifest file (e.g. `repository.manifest.yml`) and set up remotes and configuration.
+    #[napi]
+    pub fn setup_remotes_from_manifest(&self, manifest_path: Option<String>) -> Result<()> {
+        let path = manifest_path.unwrap_or_else(|| "repository.manifest.yml".to_string());
+        crate::util::setup_repository_from_manifest_file(&self.inner, path)
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// Read a single config value as a string.

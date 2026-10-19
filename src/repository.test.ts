@@ -35,6 +35,18 @@ beforeAll(async () => {
     );
     repo = Repository.open(cloneDir);
   }
+
+  // Ensure the sandbox repo has at least 2 commits so HEAD~1 exists for tests
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    const headName = repo.headName() ?? "HEAD";
+    repo.commit(
+      headName,
+      "second commit for testing",
+      head.treeId,
+      [head.id],
+    );
+  }
 });
 
 afterAll(() => {
@@ -214,6 +226,59 @@ describe("Repository references", () => {
     repo.findReference("refs/heads/__probe_branch__").delete();
     repo.findReference("refs/tags/__probe_lw__").delete();
     repo.findReference("refs/tags/__probe_ann__").delete();
+  });
+
+  test("annotated tag creation, tag object inspection, downcasting, and peeling", () => {
+    const headCommit = repo.headCommit();
+    const tagName = "__test_v1.0.0__";
+    const tagMsg = "Release v1.0.0 - Annotated Tag";
+
+    // Create annotated tag pointing to the HEAD commit
+    const tagRef = repo.createTag(tagName, headCommit.id, tagMsg, true);
+    expect(tagRef.name).toBe(`refs/tags/${tagName}`);
+    expect(tagRef.target).toBeDefined();
+
+    // 1. Inspect Tag object via findTag
+    const tagObj = repo.findTag(tagRef.target!);
+    expect(tagObj.name).toBe(tagName);
+    expect(tagObj.message).toContain(tagMsg);
+    expect(tagObj.targetId).toBe(headCommit.id);
+    expect(tagObj.targetKind).toBe("Commit");
+
+    // 2. Downcast via findObject -> asTag()
+    const genericObj = repo.findObject(tagRef.target!);
+    expect(genericObj.kind).toBe("tag");
+    const downcastedTag = genericObj.asTag();
+    expect(downcastedTag).not.toBeNull();
+    expect(downcastedTag?.name).toBe(tagName);
+    expect(downcastedTag?.targetId).toBe(headCommit.id);
+
+    // 3. Peel tag reference back to the commit ID
+    const peeledId = tagRef.peel();
+    expect(peeledId).toBe(headCommit.id);
+
+    // Cleanup
+    tagRef.delete();
+  });
+});
+
+// --- manifest setup ---------------------------------------------------------
+
+describe("Repository.setupRemotesFromManifest", () => {
+  test("configures remotes and options from manifest file", () => {
+    const manifestPath = join(realRoot, "repository.manifest.yml");
+    repo.setupRemotesFromManifest(manifestPath);
+
+    // Open a fresh view to inspect updated git configuration from disk
+    const updated = Repository.open(cloneDir);
+    const rs = updated.remotes();
+    expect(rs.length).toBeGreaterThan(0);
+    const origin = updated.findRemote("origin");
+    expect(origin.name).toBe("origin");
+    expect(origin.url).toBe("https://repo.chen.software/yumin-chen/repository");
+
+    // Verify git config option was set
+    expect(updated.configString("commit.gpgsign")).toBe("true");
   });
 });
 
