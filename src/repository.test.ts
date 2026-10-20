@@ -111,6 +111,13 @@ describe("Repository objects", () => {
     const again = repo.findCommit(c.id);
     expect(again.message).toBe(c.message);
     expect(again.treeId).toBe(c.treeId);
+
+    // Commit accessors
+    expect(typeof c.shortId()).toBe("string");
+    expect(c.shortId().length).toBeGreaterThan(0);
+    expect(c.time).toBeGreaterThan(0);
+    expect(typeof c.author.name).toBe("string");
+    expect(typeof c.committer.name).toBe("string");
   });
 
   test("findCommit throws on a missing id", () => {
@@ -127,6 +134,8 @@ describe("Repository objects", () => {
     const entry = firstBlobEntry(repo, repo.findTree(repo.headCommit().treeId));
     if (entry) {
       const blob = repo.findBlob(entry.id);
+      expect(blob.id).toBe(entry.id);
+      expect(blob.size).toBeGreaterThan(0);
       expect(Buffer.isBuffer(blob.content())).toBe(true);
     }
   });
@@ -187,8 +196,13 @@ describe("Repository references", () => {
 
     const ann = repo.createTag("__probe_ann__", head, "annotated message", true);
     expect(ann.name).toBe("refs/tags/__probe_ann__");
-    expect(repo.findTag(ann.target!).name).toBe("__probe_ann__");
-    expect(repo.findTag(ann.target!).message).toContain("annotated message");
+    const tagObj = repo.findTag(ann.target!);
+    expect(tagObj.id).toBe(ann.target!);
+    expect(tagObj.name).toBe("__probe_ann__");
+    expect(tagObj.message).toContain("annotated message");
+    expect(tagObj.targetId).toBe(head);
+    expect(tagObj.targetKind).toBe("commit");
+    expect(tagObj.tagger).not.toBeNull();
 
     expect(repo.references().some((r) => r.name === "refs/tags/__probe_lw__")).toBe(true);
 

@@ -40,6 +40,19 @@ pub struct Blob {
 
 #[napi]
 impl Blob {
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    /// Size in bytes of the blob.
+    #[napi(getter)]
+    pub fn size(&self) -> Result<i64> {
+        let r = thread_local(&self.repo);
+        let blob = r.find_blob(self.id).map_err(|e| err("find_blob", e))?;
+        Ok(blob.data.len() as i64)
+    }
+
     /// Raw bytes of the blob.
     #[napi]
     pub fn content(&self) -> Result<Buffer> {
@@ -96,6 +109,54 @@ impl Commit {
         let r = thread_local(&self.repo);
         let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
         Ok(commit.signature().map_err(|e| err("signature", e))?.is_some())
+    }
+
+    /// Shortened OID string according to repository `core.abbrev`.
+    #[napi]
+    pub fn short_id(&self) -> Result<String> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let short = commit.short_id().map_err(|e| err("short_id", e))?;
+        Ok(short.to_string())
+    }
+
+    /// Author signature.
+    #[napi(getter)]
+    pub fn author(&self) -> Result<Signature> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let sig = commit.author().map_err(|e| err("author", e))?;
+        let time = sig.time().map_err(|e| err("author time", e))?;
+        Ok(Signature {
+            name: lossy(sig.name),
+            email: lossy(sig.email),
+            time: time.seconds,
+            timezone_offset: time.offset,
+        })
+    }
+
+    /// Committer signature.
+    #[napi(getter)]
+    pub fn committer(&self) -> Result<Signature> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let sig = commit.committer().map_err(|e| err("committer", e))?;
+        let time = sig.time().map_err(|e| err("committer time", e))?;
+        Ok(Signature {
+            name: lossy(sig.name),
+            email: lossy(sig.email),
+            time: time.seconds,
+            timezone_offset: time.offset,
+        })
+    }
+
+    /// Committer time as unix timestamp (seconds).
+    #[napi(getter)]
+    pub fn time(&self) -> Result<i64> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let time = commit.time().map_err(|e| err("time", e))?;
+        Ok(time.seconds)
     }
 }
 
@@ -166,8 +227,29 @@ pub struct GitObject {
 #[napi]
 impl GitObject {
     #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    #[napi(getter)]
     pub fn kind(&self) -> String {
         self.kind.clone()
+    }
+
+    /// Peel this object to a given object kind (`commit`, `tree`, `blob`, `tag`).
+    #[napi]
+    pub fn peel(&self, target_kind: String) -> Result<GitObject> {
+        let r = thread_local(&self.repo);
+        let kind = match target_kind.to_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            _ => return Err(err("peel", format!("invalid target_kind {target_kind}"))),
+        };
+        let obj = r.find_object(self.id).map_err(|e| err("find_object", e))?;
+        let peeled = obj.peel_to_kind(kind).map_err(|e| err("peel", e))?;
+        build_object(&self.repo, peeled)
     }
 
     #[napi]
@@ -219,6 +301,11 @@ pub struct Tag {
 #[napi]
 impl Tag {
     #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    #[napi(getter)]
     pub fn name(&self) -> Result<String> {
         let r = thread_local(&self.repo);
         let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
@@ -232,6 +319,50 @@ impl Tag {
         let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
         let tag = tag.decode().map_err(|e| err("decode", e))?;
         Ok(lossy(tag.message))
+    }
+
+    /// Target object ID that this tag points to.
+    #[napi(getter)]
+    pub fn target_id(&self) -> Result<String> {
+        let r = thread_local(&self.repo);
+        let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
+        let target_id = tag.target_id().map_err(|e| err("target_id", e))?;
+        Ok(target_id.to_string())
+    }
+
+    /// Target object kind (`commit`, `tree`, `blob`, or `tag`).
+    #[napi(getter)]
+    pub fn target_kind(&self) -> Result<String> {
+        let r = thread_local(&self.repo);
+        let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
+        let decoded = tag.decode().map_err(|e| err("decode", e))?;
+        let kind = match decoded.target_kind {
+            gix::object::Kind::Commit => "commit",
+            gix::object::Kind::Tree => "tree",
+            gix::object::Kind::Blob => "blob",
+            gix::object::Kind::Tag => "tag",
+        };
+        Ok(kind.to_string())
+    }
+
+    /// Tagger signature if present.
+    #[napi(getter)]
+    pub fn tagger(&self) -> Result<Option<Signature>> {
+        let r = thread_local(&self.repo);
+        let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
+        let tagger = tag.tagger().map_err(|e| err("tagger", e))?;
+        match tagger {
+            Some(sig) => {
+                let time = sig.time().map_err(|e| err("tagger time", e))?;
+                Ok(Some(Signature {
+                    name: lossy(sig.name),
+                    email: lossy(sig.email),
+                    time: time.seconds,
+                    timezone_offset: time.offset,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 }
 
