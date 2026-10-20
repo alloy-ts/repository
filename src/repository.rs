@@ -420,6 +420,31 @@ impl Repository {
         })
     }
 
+    /// Open a repository with explicit options.
+    #[napi]
+    pub fn open_opts(path: String) -> Result<Repository> {
+        let opts = gix::open::Options::default();
+        let r = gix::open_opts(path, opts).map_err(|e| err("open_opts", e))?;
+        Ok(Repository {
+            inner: Arc::new(r.into()),
+        })
+    }
+
+    /// Initialize a repository with custom options.
+    #[napi]
+    pub fn init_opts(path: String, bare: Option<bool>) -> Result<Repository> {
+        let kind = if bare.unwrap_or(false) {
+            gix::create::Kind::Bare
+        } else {
+            gix::create::Kind::WithWorktree
+        };
+        let opts = gix::create::Options::default();
+        let ts = gix::ThreadSafeRepository::init(path, kind, opts).map_err(|e| err("init_opts", e))?;
+        Ok(Repository {
+            inner: Arc::new(ts),
+        })
+    }
+
     /// Discover a repository by walking up from `path` (or the current directory if omitted).
     #[napi]
     pub fn discover(path: Option<String>) -> Result<Repository> {
@@ -1496,6 +1521,22 @@ impl Repository {
             }
         }
         Ok(out)
+    }
+
+    /// Test whether a repository-relative path matches a pathspec pattern (e.g. `*.ts` or `src/`).
+    #[napi]
+    pub fn pathspec_matches(&self, pathspec: String, relative_path: String) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let index = r.index_or_load_from_head_or_empty().map_err(|e| err("index", e))?;
+        let mut search = r.pathspec(
+            true,
+            [pathspec.as_str()],
+            true,
+            &*index,
+            gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+        ).map_err(|e| err("pathspec", e))?;
+        let is_dir = relative_path.ends_with('/');
+        Ok(search.pattern_matching_relative_path(relative_path.as_bytes(), Some(is_dir)).is_some())
     }
 }
 
