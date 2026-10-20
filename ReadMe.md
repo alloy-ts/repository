@@ -1,6 +1,12 @@
-# Starter Template
+# Repository
 
-Starter Template for Rust + TypeScript via NAPI-RS, Node-API (N-API) bindings.
+Git-based Source Code Management (SCM) system `Repository` Node-API (N-API)
+bindings for the Rust [`gitoxide`](https://github.com/GitoxideLabs/gitoxide)
+(`gix`) crate.
+
+`@alloy-ts/repository` exposes `gix::Repository` capabilities to
+JavaScript/TypeScript, providing safe, high-speed Git operations with modern
+async support and full type definitions.
 
 ## Getting Started
 
@@ -10,9 +16,9 @@ Starter Template for Rust + TypeScript via NAPI-RS, Node-API (N-API) bindings.
 
 ```bash
 git clone https://repo.chen.software/yumin-chen/repository.git
-cd starter-template
+cd repository
 npm install
-npm run start
+npm run build
 ```
 
 ## Running the application
