@@ -1,17 +1,37 @@
-use napi_derive::napi;
-
-#[napi]
-pub fn add(left: u32, right: u32) -> u32 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+mod attributes;
+mod blame;
+mod blob;
+mod branch;
+mod commit;
+mod commit_graph;
+mod config;
+mod crypto;
+mod diff;
+mod dirwalk;
+mod error;
+mod filter;
+mod format;
+mod identity;
+mod index;
+mod mailmap;
+mod merge;
+mod namespace;
+mod notes;
+mod object;
+mod object_store;
+mod pack;
+mod path;
+mod pathspec;
+mod protocol;
+mod reference;
+mod refspec;
+mod progress;
+mod remote;
+mod repository;
+mod replace;
+mod revision;
+mod submodule;
+mod tag;
+mod tree;
+mod worktree;
+mod worktree_stream;
