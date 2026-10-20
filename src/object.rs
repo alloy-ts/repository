@@ -107,6 +107,17 @@ impl Commit {
         self.committer.clone()
     }
 
+    /// Return the shortened object ID (hex prefix) for this commit.
+    #[napi]
+    pub fn short_id(&self) -> Result<String> {
+        let repo = thread_local(&self.repo);
+        let commit = repo
+            .find_commit(parse_oid(&self.id)?)
+            .map_err(|e| err("find_commit", e))?;
+        let short = commit.short_id().map_err(|e| err("short_id", e))?;
+        Ok(short.to_string())
+    }
+
     /// The parent commits of this commit, re-derived from the repository.
     #[napi]
     pub fn parents(&self) -> Result<Vec<Commit>> {
@@ -474,6 +485,24 @@ impl GitObject {
             .find_tag(parse_oid(&self.id)?)
             .map_err(|e| err("find_tag", e))?;
         Ok(Some(build_tag(&self.repo, tag)?))
+    }
+
+    /// Peel this object into a target object kind (`commit`, `tree`, `blob`, `tag`).
+    #[napi]
+    pub fn peel(&self, kind: String) -> Result<String> {
+        let repo = thread_local(&self.repo);
+        let target_kind = match kind.to_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(err("peel", format!("invalid target kind {kind}"))),
+        };
+        let obj = repo
+            .find_object(parse_oid(&self.id)?)
+            .map_err(|e| err("find_object", e))?;
+        let peeled = obj.peel_to_kind(target_kind).map_err(|e| err("peel", e))?;
+        Ok(peeled.id().to_string())
     }
 }
 

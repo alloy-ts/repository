@@ -34,6 +34,14 @@ const canSign = signerAvailable();
 
 // --- verifying signatures -------------------------------------------------
 
+test("shortId() returns shortened commit OID", () => {
+  const commit = headCommit();
+  const short = commit.shortId();
+  expect(typeof short).toBe("string");
+  expect(short.length).toBeGreaterThan(0);
+  expect(commit.id.startsWith(short)).toBe(true);
+});
+
 test("decode() returns decoded commit payload", () => {
   const commit = headCommit();
   const decoded = commit.decode();
