@@ -1,3 +1,19 @@
+mod branch;
+mod commit;
+mod config;
+mod error;
+mod index;
+mod merge;
+mod notes;
+mod object;
+mod pathspec;
+mod reference;
+mod remote;
+mod repository;
+mod revision;
+mod submodule;
+mod worktree;
+
 use napi_derive::napi;
 
 #[napi]
