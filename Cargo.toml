@@ -7,12 +7,78 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-gix = { version = "0.89.0", features = ["revision", "merge", "blob-diff", "blame", "attributes", "status", "worktree-mutation", "blocking-network-client"] }
-napi = { version = "3.14.2", features = ["serde-json"] }
+gix = { version = "0.89.0", features = [
+  "revision",
+  "merge",
+  "blob-diff",
+  "blame",
+  "attributes",
+  "command",
+  "mailmap",
+  "dirwalk",
+  "status",
+  "worktree-mutation",
+  "worktree-stream",
+  "sha256",
+  "blocking-network-client",
+] }
+gix-chunk = "0.10.0"
+gix-pack = "0.76.0"
+gix-filter = "0.36.0"
+gix-imara-diff = "0.3.1"
+gix-protocol = { version = "0.67.0", features = ["blocking-client"] }
+filetime = "0.2.29"
+napi = { version = "3.14.2", features = ["serde-json", "tokio_rt"] }
 napi-derive = "3.6.12"
 futures = "0.3.34"
 serde = { version = "1.0.154", features = ["derive"] }
 serde_json = "1.0.154"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4.3"
+thiserror = "2.0.21"
+multi-key = { version = "2.0.0", optional = true }
+multi-sig = { version = "2.0.0", optional = true }
+blsful = { version = "4.1.0", optional = true }
+multi-codec = { version = "1.6", optional = true }
+sequoia-openpgp = { version = "1", optional = true, default-features = false, features = ["crypto-rust", "compression", "allow-experimental-crypto", "allow-variable-time-crypto"] }
+anyhow = { version = "1", optional = true }
+zeroize = "1.9.1"
+chacha20poly1305 = "0.11"
+rand = "0.10"
+argon2 = "0.5"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "process", "io-util", "sync"] }
+fjall = "3.1.12"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
 
 [build-dependencies]
 napi-build = "2.6.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Memory",
+] }
+
+[features]
+default = ["crypto"]
+# SSH recipient-key sharing via ed25519 keys.
+ssh = ["dep:multi-codec"]
+# GPG recipient-key sharing (keyring lookup currently a stub).
+gpg = ["crypto", "dep:sequoia-openpgp", "dep:anyhow"]
+# Post-quantum signatures.
+xmss = []
+crypto = []
