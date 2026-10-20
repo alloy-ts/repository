@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository, type Tree, type TreeEntry } from "./main.ts";
+import { Repository, type Tree, type TreeEntry } from "../dist/index.js";
 
 const realRoot = process.cwd();
 let base: string;
@@ -327,7 +327,25 @@ describe("Repository config & paths", () => {
     expect(repo.objectHash()).toBe("Sha1");
     expect(typeof repo.gitDir()).toBe("string");
     expect(typeof repo.commonDir()).toBe("string");
+    expect(typeof repo.indexPath()).toBe("string");
+    expect(typeof repo.objectsDir()).toBe("string");
+    expect(typeof repo.emptyTreeId()).toBe("string");
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.remoteNames())).toBe(true);
     expect(repo.workDir()).toBe(cloneDir);
+  });
+
+  test("deleteBranch and deleteTag helper methods", () => {
+    const head = repo.headId();
+    repo.createReference("refs/heads/__probe_del_branch__", head, true);
+    expect(repo.references().some((r) => r.name === "refs/heads/__probe_del_branch__")).toBe(true);
+    repo.deleteBranch("__probe_del_branch__");
+    expect(repo.references().some((r) => r.name === "refs/heads/__probe_del_branch__")).toBe(false);
+
+    repo.createLightweightTag("__probe_del_tag__", head, true);
+    expect(repo.references().some((r) => r.name === "refs/tags/__probe_del_tag__")).toBe(true);
+    repo.deleteTag("__probe_del_tag__");
+    expect(repo.references().some((r) => r.name === "refs/tags/__probe_del_tag__")).toBe(false);
   });
 
   test("configString returns strings or null (never undefined)", () => {

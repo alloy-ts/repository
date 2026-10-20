@@ -1037,6 +1037,66 @@ impl Repository {
         format!("{:?}", r.object_hash())
     }
 
+    /// Whether the repository is shallow (cloned with limited depth).
+    #[napi]
+    pub fn is_shallow(&self) -> bool {
+        let r = thread_local(&self.inner);
+        r.is_shallow().unwrap_or(false)
+    }
+
+    /// Path to the repository's index file.
+    #[napi]
+    pub fn index_path(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.index_path().to_string_lossy().into_owned()
+    }
+
+    /// Path to the repository's object store directory.
+    #[napi]
+    pub fn objects_dir(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.git_dir().join("objects").to_string_lossy().into_owned()
+    }
+
+    /// Return the object ID of the empty tree for this repository's hash algorithm.
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.empty_tree().id.to_string()
+    }
+
+    /// Return all remote names.
+    #[napi]
+    pub fn remote_names(&self) -> Vec<String> {
+        let r = thread_local(&self.inner);
+        r.remote_names().iter().map(|n| n.to_string()).collect()
+    }
+
+    /// Delete a reference by full name (e.g. `refs/heads/feature`, `refs/tags/v1.0`).
+    #[napi]
+    pub fn delete_reference(&self, name: String) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let reference = r
+            .find_reference(name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        reference.delete().map_err(|e| err("delete_reference", e))?;
+        Ok(())
+    }
+
+    /// Delete a branch reference by short branch name (e.g. `feature`).
+    #[napi]
+    pub fn delete_branch(&self, name: String) -> Result<()> {
+        let ref_name = format!("refs/heads/{name}");
+        self.delete_reference(ref_name)
+    }
+
+    /// Delete a tag reference by short tag name (e.g. `v1.0.0`).
+    #[napi]
+    pub fn delete_tag(&self, name: String) -> Result<()> {
+        let ref_name = format!("refs/tags/{name}");
+        self.delete_reference(ref_name)
+    }
+
     // ---- submodules & identity -------------------------------------------
 
     /// List configured submodules.
