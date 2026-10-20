@@ -1,17 +1,69 @@
-use napi_derive::napi;
-
-#[napi]
-pub fn add(left: u32, right: u32) -> u32 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+mod apply;
+mod attributes;
+mod auth;
+mod blame;
+mod blob;
+mod branch;
+mod checkout;
+mod cherry_pick;
+mod clone;
+mod commit;
+mod commit_graph;
+mod config;
+mod conflict;
+#[cfg(feature = "crypto")]
+mod crypto;
+#[cfg(feature = "gpg")]
+mod pgp;
+#[cfg(feature = "gpg")]
+mod gcrypt;
+mod vault;
+mod diff;
+mod dirwalk;
+mod entry;
+mod error;
+mod fetch;
+mod filter;
+mod format;
+pub mod gpg;
+mod identity;
+mod index;
+mod init;
+mod log;
+mod mailmap;
+mod merge;
+mod metrics;
+mod namespace;
+mod note;
+mod object;
+mod object_store;
+mod output;
+mod pack;
+mod patch;
+mod path;
+mod pathspec;
+#[cfg(feature = "gpg")]
+mod pgp;
+mod process;
+mod progress;
+pub(crate) mod protocol;
+mod pull;
+mod push;
+mod rebase;
+mod ref_store;
+mod reference;
+mod reflog;
+mod refspec;
+pub(crate) mod remote;
+mod replace;
+mod repository;
+mod reset;
+mod revert;
+mod revision;
+mod stash;
+mod status;
+mod submodule;
+mod tag;
+mod tree;
+mod vault;
+mod worktree;

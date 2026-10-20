@@ -5,7 +5,7 @@ owner: alloy-ts
 description: Versioned module repository for alloy-ts projects.
 config:
   - init.defaultBranch: main
-  - user.signingKey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJCszY3BbvFvz7XT2jS4Q6qjmm1uau5/ofiOJ1aWAPiq
+  - user.signingKey: key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJCszY3BbvFvz7XT2jS4Q6qjmm1uau5/ofiOJ1aWAPiq
   - gpg.format: ssh
   - gpg.ssh.program: ssh-keygen
   - gpg.ssh.allowedSignersFile: .gitsigners
