@@ -38,7 +38,7 @@ fn move_head_to_commit(r: &gix::Repository, new_commit: gix::ObjectId) -> Result
         name,
         new_commit,
         gix::refs::transaction::PreviousValue::MustExistAndMatch(gix::refs::Target::Object(old)),
-        "checkout/reset/merge".into(),
+        BString::from("checkout/reset/merge"),
     ))
     .map_err(|e| err("edit_reference", e))?;
     Ok(())
@@ -416,7 +416,7 @@ impl Task for CheckoutTask {
             .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
             .map_err(|e| err("checkout_options", e))?;
         opts.overwrite_existing = self.force;
-        gix_worktree_state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
+        gix::worktree::state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
             .map_err(|e| err("checkout", e))?;
         index
             .write(gix::index::write::Options::default())
@@ -465,7 +465,7 @@ impl Task for ResetTask {
                     .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
                     .map_err(|e| err("checkout_options", e))?;
                 opts.overwrite_existing = true;
-                gix_worktree_state::checkout(
+                gix::worktree::state::checkout(
                     &mut index,
                     workdir,
                     objects,
@@ -505,22 +505,22 @@ impl Task for MergeTask {
         let ours_id = r.head_id().map_err(|e| err("head_id", e))?.detach();
         let theirs_id = parse_oid(&self.theirs)?;
 
-        let labels = gix_merge::blob::builtin_driver::text::Labels {
+        let labels = gix::merge::blob::builtin_driver::text::Labels {
             ancestor: None,
             current: None,
             other: None,
         };
-        let mut commit_opts = gix_merge::commit::Options::default();
-        commit_opts.tree_merge = r
+        let tree_merge = r
             .tree_merge_options()
             .map_err(|e| err("tree_merge_options", e))?;
+        let commit_opts: gix::merge::commit::Options = tree_merge.into();
 
         let mut outcome = r
             .merge_commits(ours_id, theirs_id, labels, commit_opts)
             .map_err(|e| err("merge_commits", e))?;
         if outcome
             .tree_merge
-            .has_unresolved_conflicts(gix_merge::tree::TreatAsUnresolved::Whatever)
+            .has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::default())
         {
             return Err(err(
                 "merge",
@@ -536,12 +536,14 @@ impl Task for MergeTask {
             .detach();
         let author = r
             .author()
-            .ok_or_else(|| err("author", "no author configured"))??
-            .to_owned();
+            .and_then(|res| res.ok())
+            .and_then(|s| s.to_owned().ok())
+            .ok_or_else(|| err("author", "no author configured"))?;
         let committer = r
             .committer()
-            .ok_or_else(|| err("committer", "no committer configured"))??
-            .to_owned();
+            .and_then(|res| res.ok())
+            .and_then(|s| s.to_owned().ok())
+            .ok_or_else(|| err("committer", "no committer configured"))?;
         let commit = gix::objs::Commit {
             tree: merged_tree_id,
             parents: vec![ours_id, theirs_id].into(),
@@ -665,7 +667,7 @@ impl Task for CreateWorktreeTask {
                 let reference = r
                     .find_reference(full.as_str())
                     .map_err(|e| err("find_reference", e))?;
-                gix::worktree::add::Head::Attached(reference.name().clone())
+                gix::worktree::add::Head::Attached(reference.name().to_owned())
             }
             // No rev: start the new worktree at the current `HEAD` commit.
             (None, _) => gix::worktree::add::Head::Detached(
@@ -959,7 +961,7 @@ impl Repository {
         let r = thread_local(&self.inner);
         let dir = remote_direction(direction.as_deref());
         let reference = local_branch(&r, &branch)?;
-        match r.branch_remote_ref_name(reference.name().as_ref(), dir) {
+        match r.branch_remote_ref_name(reference.name(), dir) {
             Some(Ok(name)) => Ok(Some(name.as_bstr().to_string())),
             Some(Err(e)) => Err(err("branch_remote_ref_name", e)),
             None => Ok(None),
@@ -979,7 +981,7 @@ impl Repository {
         let r = thread_local(&self.inner);
         let dir = remote_direction(direction.as_deref());
         let reference = local_branch(&r, &branch)?;
-        match r.branch_remote_tracking_ref_name(reference.name().as_ref(), dir) {
+        match r.branch_remote_tracking_ref_name(reference.name(), dir) {
             Some(Ok(name)) => Ok(Some(name.as_bstr().to_string())),
             Some(Err(e)) => Err(err("branch_remote_tracking_ref_name", e)),
             None => Ok(None),
