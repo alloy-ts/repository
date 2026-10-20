@@ -23,7 +23,7 @@
     "build": "node --import @oxc-node/core/register build.ts && vp pack",
     "dev": "vp pack --watch",
     "start": "vp run dist/index.js",
-    "test": "node --import @oxc-node/core/register --test",
+    "test": "vp test",
     "check": "vp check",
     "fmt": "vp fmt",
     "lint": "vp lint",
