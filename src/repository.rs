@@ -1608,11 +1608,14 @@ pub struct LogEntry {
     pub committer_time: i64,
     pub parent_ids: Vec<String>,
     pub tree_id: String,
+    /// Whether this commit has a signature.
+    pub is_signed: bool,
 }
 
 /// Decode a commit into owned data for [`LogEntry`], returning the entry plus its parent ids.
 fn log_summary(r: &gix::Repository, id: gix::ObjectId) -> Result<(LogEntry, Vec<String>)> {
     let commit = r.find_commit(id).map_err(|e| err("find_commit", e))?;
+    let is_signed = commit.signature().map_err(|e| err("signature", e))?.is_some();
     let c = commit.decode().map_err(|e| err("decode commit", e))?;
     let author = c.author().map_err(|e| err("author", e))?;
     let committer = c.committer().map_err(|e| err("committer", e))?;
@@ -1633,6 +1636,7 @@ fn log_summary(r: &gix::Repository, id: gix::ObjectId) -> Result<(LogEntry, Vec<
         committer_time: ct.seconds,
         parent_ids: parent_ids.clone(),
         tree_id: c.tree().to_string(),
+        is_signed,
     };
     Ok((entry, parent_ids))
 }

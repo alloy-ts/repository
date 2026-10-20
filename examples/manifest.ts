@@ -11,13 +11,20 @@ function readMetaManifest(repo: Repository): string | null {
     "refs/heads/meta/repository",
     "refs/heads/meta/repo",
     "refs/heads/meta",
+    "refs/remotes/origin/meta/repository",
+    "refs/remotes/origin/meta/repo",
+    "refs/remotes/origin/meta",
   ];
   let commitId: string | null = null;
   for (const name of candidates) {
-    const ref = repo.findReference(name);
-    if (ref && ref.target) {
-      commitId = ref.target;
-      break;
+    try {
+      const ref = repo.findReference(name);
+      if (ref && ref.target) {
+        commitId = ref.target;
+        break;
+      }
+    } catch {
+      // ref not found
     }
   }
   if (!commitId) return null;
@@ -94,6 +101,31 @@ function main() {
     }
     repo.configSet(key, value);
     console.log(`  set ${key} = ${value}`);
+  }
+
+  // Check commit signatures via repo.log()
+  console.log("\nChecking recent commits signature status via repo.log():");
+  const recentCommits = repo.log(undefined, 5);
+  for (const entry of recentCommits) {
+    console.log(
+      `  commit ${entry.id.slice(0, 7)}: "${entry.subject}" [signed: ${entry.isSigned}]`,
+    );
+  }
+
+  // Verify branch & signature on default branch
+  const defaultBranch = repo.configString("init.defaultBranch") ?? "main";
+  const branchRefName = `refs/heads/${defaultBranch}`;
+  try {
+    const branch = repo.findReference(branchRefName);
+    if (branch && branch.target) {
+      console.log(`\nFound default branch ref: ${branchRefName} -> ${branch.target}`);
+      const commit = repo.findCommit(branch.target);
+      console.log(
+        `  commit ${commit.id.slice(0, 7)} signature status: isSigned = ${commit.isSigned}`,
+      );
+    }
+  } catch {
+    console.log(`\nDefault branch ref not found: ${branchRefName}`);
   }
 }
 

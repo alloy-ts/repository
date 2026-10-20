@@ -89,6 +89,14 @@ impl Commit {
         let commit = commit.decode().map_err(|e| err("decode", e))?;
         Ok(commit.parents().map(|p| p.to_string()).collect())
     }
+
+    /// Check whether the commit has a signature (e.g. gpgsig or gpgsig-sha256).
+    #[napi(getter)]
+    pub fn is_signed(&self) -> Result<bool> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        Ok(commit.signature().map_err(|e| err("signature", e))?.is_some())
+    }
 }
 
 /// A single entry of a git tree.
