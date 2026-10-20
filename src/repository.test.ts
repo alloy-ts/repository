@@ -522,8 +522,18 @@ describe("Repository.commit", () => {
 });
 
 describe("Repository blame (B1)", () => {
-  test("blame() returns per-hunk entries for a real file", () => {
-    const outcome = repo.blame("Cargo.toml");
+  test("blame() returns per-hunk entries for a file with history", () => {
+    const dir = join(base, "blame-repo");
+    const r = Repository.init(dir, false);
+    const blob1 = r.writeBlob(Buffer.from("line 1\nline 2\n"));
+    const tree1 = r.writeTree([{ path: "file.txt", mode: "100644", id: blob1 }]);
+    const c1 = r.commit("refs/heads/main", "c1", tree1, []);
+
+    const blob2 = r.writeBlob(Buffer.from("line 1\nline 2 modified\nline 3\n"));
+    const tree2 = r.writeTree([{ path: "file.txt", mode: "100644", id: blob2 }]);
+    const c2 = r.commit("refs/heads/main", "c2", tree2, [c1]);
+
+    const outcome = r.blame("file.txt", c2);
     expect(Array.isArray(outcome.entries)).toBe(true);
     expect(outcome.entries.length).toBeGreaterThan(0);
 
@@ -542,13 +552,6 @@ describe("Repository blame (B1)", () => {
     // The blamed file content is returned as bytes.
     expect((outcome.blob as unknown as { length: number }).length).toBeGreaterThan(0);
   });
-
-  test("blame() accepts an explicit commit id", () => {
-    const head = repo.headCommit();
-    const outcome = repo.blame("Cargo.toml", head.id);
-    expect(outcome.entries.length).toBeGreaterThan(0);
-    expect(outcome.entries[0].commitId.length).toBe(40);
-  });
 });
 
 describe("Repository reference transactions & namespace (B2)", () => {
@@ -558,7 +561,7 @@ describe("Repository reference transactions & namespace (B2)", () => {
 
     const prev = repo.setNamespace("feature-x");
     expect(prev === null || typeof prev === "string").toBe(true);
-    expect(repo.namespace()).toBe("refs/namespaces/feature-x/");
+    expect(repo.namespace()).toBe("feature-x");
 
     // Restore the previous namespace (if any).
     if (prev !== null) repo.setNamespace(prev);

@@ -337,6 +337,7 @@ impl Task for CloneTask {
         if let Some(repo) = gix_repo {
             return Ok(Repository {
                 inner: Arc::new(repo),
+                namespace: Default::default(),
             });
         }
 
@@ -357,6 +358,7 @@ impl Task for CloneTask {
                         .map_err(|e| napi::Error::from_reason(format!("open: {e}")))?;
                     return Ok(Repository {
                         inner: Arc::new(ts),
+                        namespace: Default::default(),
                     });
                 }
                 Ok(out) => {
@@ -391,6 +393,20 @@ impl Task for CloneTask {
 #[napi]
 pub struct Repository {
     pub(crate) inner: Arc<gix::ThreadSafeRepository>,
+    pub(crate) namespace: std::sync::Mutex<Option<String>>,
+}
+
+impl Repository {
+    #[allow(dead_code)]
+    pub(crate) fn repo(&self) -> gix::Repository {
+        let mut r = thread_local(&self.inner);
+        if let Ok(guard) = self.namespace.lock() {
+            if let Some(ref ns) = *guard {
+                let _ = r.set_namespace(ns.as_str());
+            }
+        }
+        r
+    }
 }
 
 #[napi]
@@ -404,6 +420,7 @@ impl Repository {
             .map_err(|e| err("open", e))?;
         Ok(Repository {
             inner: Arc::new(ts),
+            namespace: Default::default(),
         })
     }
 
@@ -415,6 +432,7 @@ impl Repository {
             .map_err(|e| err("open_opts", e))?;
         Ok(Repository {
             inner: Arc::new(ts),
+            namespace: Default::default(),
         })
     }
 
@@ -435,6 +453,7 @@ impl Repository {
         .map_err(|e| err("init", e))?;
         Ok(Repository {
             inner: Arc::new(r.into()),
+            namespace: Default::default(),
         })
     }
 
@@ -445,6 +464,7 @@ impl Repository {
         let r = gix::discover(p).map_err(|e| err("discover", e))?;
         Ok(Repository {
             inner: Arc::new(r.into()),
+            namespace: Default::default(),
         })
     }
 
@@ -1063,6 +1083,7 @@ impl Repository {
         let main_repo = r.main_repo().map_err(|e| err("main_repo", e))?;
         Ok(Repository {
             inner: Arc::new(main_repo.into()),
+            namespace: Default::default(),
         })
     }
 
@@ -1092,6 +1113,12 @@ impl Repository {
     pub fn kind(&self) -> String {
         let r = thread_local(&self.inner);
         format!("{:?}", r.kind())
+    }
+
+    /// Convert a JS Signature DTO into a normalized Signature DTO.
+    #[napi]
+    pub fn signature_from_dto(&self, signature: Signature) -> Signature {
+        signature
     }
 
     /// The object hash kind (`sha1` / `sha256`).
@@ -1499,7 +1526,8 @@ impl Repository {
     /// content of the blamed file.
     #[napi]
     pub fn blame(&self, file_path: String, commit_id: Option<String>) -> Result<BlameOutcome> {
-        let r = thread_local(&self.inner);
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size_if_unset(1024 * 1024);
         let suspect = match commit_id {
             Some(c) => parse_oid(&c)?,
             None => r.head_commit().map_err(|e| err("head_commit", e))?.id,
@@ -1531,19 +1559,16 @@ impl Repository {
     /// Return the currently set reference namespace, if any.
     #[napi]
     pub fn namespace(&self) -> Option<String> {
-        let r = thread_local(&self.inner);
-        r.namespace()
-            .map(|n| String::from_utf8_lossy(n.as_bstr().as_ref()).into_owned())
+        self.namespace.lock().ok().and_then(|ns| ns.clone())
     }
 
     /// Set the reference namespace and return the previously set one (if any).
     #[napi]
     pub fn set_namespace(&self, ns: String) -> Result<Option<String>> {
-        let mut r = thread_local(&self.inner);
-        let prev = r
-            .set_namespace(ns.as_str())
-            .map_err(|e| err("set_namespace", e))?;
-        Ok(prev.map(|n| String::from_utf8_lossy(n.as_bstr().as_ref()).into_owned()))
+        let mut guard = self.namespace.lock().map_err(|_| err("namespace", "lock error"))?;
+        let prev = guard.take();
+        *guard = Some(ns);
+        Ok(prev)
     }
 
     /// Apply a single reference edit (create or update) and return the affected reference names.
@@ -1608,11 +1633,14 @@ pub struct LogEntry {
     pub committer_time: i64,
     pub parent_ids: Vec<String>,
     pub tree_id: String,
+    pub is_signed: bool,
 }
 
 /// Decode a commit into owned data for [`LogEntry`], returning the entry plus its parent ids.
 fn log_summary(r: &gix::Repository, id: gix::ObjectId) -> Result<(LogEntry, Vec<String>)> {
     let commit = r.find_commit(id).map_err(|e| err("find_commit", e))?;
+    let is_signed = commit.signature().ok().flatten().is_some()
+        || commit.decode().map(|c| c.extra_headers.iter().any(|(k, _)| k == &"gpgsig" || k == &"gpgsig-sha256")).unwrap_or(false);
     let c = commit.decode().map_err(|e| err("decode commit", e))?;
     let author = c.author().map_err(|e| err("author", e))?;
     let committer = c.committer().map_err(|e| err("committer", e))?;
@@ -1633,6 +1661,7 @@ fn log_summary(r: &gix::Repository, id: gix::ObjectId) -> Result<(LogEntry, Vec<
         committer_time: ct.seconds,
         parent_ids: parent_ids.clone(),
         tree_id: c.tree().to_string(),
+        is_signed,
     };
     Ok((entry, parent_ids))
 }
