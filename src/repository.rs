@@ -26,6 +26,26 @@ fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
+/// Signature input for commit/tag creation.
+#[derive(Clone)]
+#[napi(object)]
+pub struct SignatureInput {
+    pub name: String,
+    pub email: String,
+    pub time: Option<i64>,
+    pub timezone_offset: Option<i32>,
+}
+
+/// A mailmap entry for resolving authors/committers.
+#[derive(Clone)]
+#[napi(object)]
+pub struct MailmapEntry {
+    pub proper_name: Option<String>,
+    pub proper_email: String,
+    pub commit_name: Option<String>,
+    pub commit_email: String,
+}
+
 /// A single flattened git config entry: `key` (e.g. `remote.origin.url`) and its `value`.
 #[napi(object)]
 pub struct ConfigEntry {
@@ -181,7 +201,6 @@ impl Progress for TsfnProgress {
             MessageLevel::Info => "info",
             MessageLevel::Success => "success",
             MessageLevel::Failure => "failure",
-            _ => "info",
         };
         self.emit(Some(message), Some(tag));
     }
@@ -250,7 +269,7 @@ fn summary_kind(s: Summary) -> String {
 }
 
 /// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
-struct CloneTask {
+pub struct CloneTask {
     url: String,
     path: String,
     bare: bool,
@@ -258,7 +277,7 @@ struct CloneTask {
 }
 
 /// Blocking status walk, executed on the libuv thread pool by [`AsyncTask`].
-struct StatusTask {
+pub struct StatusTask {
     inner: Arc<gix::ThreadSafeRepository>,
     on_progress: Option<Arc<ThreadsafeFunction<ProgressEvent, ()>>>,
 }
@@ -595,6 +614,187 @@ impl Repository {
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    /// Write a commit object from structured fields and return its id.
+    #[napi]
+    pub fn write_commit(
+        &self,
+        tree_id: String,
+        parents: Vec<String>,
+        message: String,
+        author: Option<SignatureInput>,
+        committer: Option<SignatureInput>,
+    ) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let tree_oid = parse_oid(&tree_id)?;
+        let parent_oids: Vec<gix::ObjectId> = parents
+            .iter()
+            .map(|p| parse_oid(p))
+            .collect::<Result<Vec<_>>>()?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let default_sig = r.committer().and_then(|res| res.ok());
+
+        let create_actor = |input: Option<SignatureInput>| -> Result<gix::actor::Signature> {
+            if let Some(inp) = input {
+                Ok(gix::actor::Signature {
+                    name: inp.name.into(),
+                    email: inp.email.into(),
+                    time: gix::date::Time::new(inp.time.unwrap_or(now), inp.timezone_offset.unwrap_or(0)),
+                })
+            } else if let Some(ref ds) = default_sig {
+                let time = ds.time().ok().unwrap_or_else(|| gix::date::Time::new(now, 0));
+                Ok(gix::actor::Signature {
+                    name: ds.name.to_owned(),
+                    email: ds.email.to_owned(),
+                    time,
+                })
+            } else {
+                Ok(gix::actor::Signature {
+                    name: "Unknown".into(),
+                    email: "unknown@example.com".into(),
+                    time: gix::date::Time::new(now, 0),
+                })
+            }
+        };
+
+        let author_sig = create_actor(author)?;
+        let committer_sig = create_actor(committer)?;
+
+        let commit_obj = gix::objs::Commit {
+            tree: tree_oid,
+            parents: parent_oids.into(),
+            author: author_sig,
+            committer: committer_sig,
+            encoding: None,
+            message: message.into(),
+            extra_headers: Vec::new(),
+        };
+
+        let oid = r.write_object(&commit_obj).map_err(|e| err("write_commit", e))?;
+        Ok(oid.to_string())
+    }
+
+    /// Write an annotated tag object and return its id.
+    #[napi]
+    pub fn write_tag(
+        &self,
+        target_id: String,
+        target_kind: String,
+        name: String,
+        message: String,
+        tagger: Option<SignatureInput>,
+    ) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let target_oid = parse_oid(&target_id)?;
+        let kind = match target_kind.to_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(napi::Error::from_reason(format!("Invalid object kind: {target_kind}"))),
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let tagger_sig = if let Some(inp) = tagger {
+            Some(gix::actor::Signature {
+                name: inp.name.into(),
+                email: inp.email.into(),
+                time: gix::date::Time::new(inp.time.unwrap_or(now), inp.timezone_offset.unwrap_or(0)),
+            })
+        } else {
+            r.committer().and_then(|res| res.ok()).map(|s| {
+                let time = s.time().ok().unwrap_or_else(|| gix::date::Time::new(now, 0));
+                gix::actor::Signature {
+                    name: s.name.to_owned(),
+                    email: s.email.to_owned(),
+                    time,
+                }
+            })
+        };
+
+        let tag_obj = gix::objs::Tag {
+            target: target_oid,
+            target_kind: kind,
+            name: name.into(),
+            tagger: tagger_sig,
+            message: message.into(),
+            signature: None,
+        };
+
+        let oid = r.write_object(&tag_obj).map_err(|e| err("write_tag", e))?;
+        Ok(oid.to_string())
+    }
+
+    /// Reset index and/or working tree to a given commit id.
+    /// Mode options: `"Soft"`, `"Mixed"`, `"Hard"`.
+    #[napi]
+    pub fn reset(&self, target_commit: String, mode: Option<String>) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let target_oid = parse_oid(&target_commit)?;
+        let mode_str = mode.as_deref().unwrap_or("Mixed");
+
+        match mode_str.to_lowercase().as_str() {
+            "soft" => {
+                // Point HEAD to the commit without changing index or worktree
+                let edit = gix::refs::transaction::RefEdit::update(
+                    gix::refs::FullName::try_from("HEAD").map_err(|e| err("reset soft", e))?,
+                    gix::refs::Target::Object(target_oid),
+                    gix::refs::transaction::PreviousValue::Any,
+                    "reset: moving to target",
+                );
+                r.edit_reference(edit).map_err(|e| err("reset soft", e))?;
+            }
+            "mixed" | "hard" => {
+                // Point HEAD to commit and reset index to match commit's tree
+                let commit = r.find_commit(target_oid).map_err(|e| err("reset find_commit", e))?;
+                let tree_oid = commit.tree_id().map_err(|e| err("reset tree_id", e))?;
+                let state = gix::index::State::from_tree(&tree_oid, &r.objects, Default::default())
+                    .map_err(|e| err("reset index from tree", e))?;
+
+                let index_path = r.index_path();
+                let mut file = std::fs::File::create(&index_path).map_err(|e| err("create index file", e))?;
+                state.write_to(&mut file, Default::default())
+                    .map_err(|e| err("write index", e))?;
+
+                let edit = gix::refs::transaction::RefEdit::update(
+                    gix::refs::FullName::try_from("HEAD").map_err(|e| err("reset", e))?,
+                    gix::refs::Target::Object(target_oid),
+                    gix::refs::transaction::PreviousValue::Any,
+                    "reset: moving to target",
+                );
+                r.edit_reference(edit).map_err(|e| err("reset ref", e))?;
+            }
+            _ => return Err(napi::Error::from_reason(format!("Invalid reset mode: {mode_str}"))),
+        }
+
+        Ok(())
+    }
+
+    /// Load repository mailmap for mapping authors/committers.
+    #[napi]
+    pub fn mailmap(&self) -> Result<Vec<MailmapEntry>> {
+        let r = thread_local(&self.inner);
+        let mailmap = r.open_mailmap();
+        let mut out = Vec::new();
+        for entry in mailmap.entries() {
+            out.push(MailmapEntry {
+                proper_name: entry.new_name().map(|s| lossy(s)),
+                proper_email: entry.new_email().map(|s| lossy(s)).unwrap_or_default(),
+                commit_name: entry.old_name().map(|s| lossy(s)),
+                commit_email: lossy(entry.old_email()),
+            });
+        }
+        Ok(out)
     }
 
     // ---- references -------------------------------------------------------

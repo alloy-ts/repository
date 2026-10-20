@@ -22,28 +22,28 @@ let repo: Repository; // the sandbox clone
 beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-api-"));
   cloneDir = join(base, "clone");
-  // Prefer the binding's own `Repository.clone`; fall back to a git CLI sandbox if the
-  // local transport hits gix's ref-update limitation in this environment.
-  try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
-  } catch (e) {
-    console.log(`Repository.clone unavailable (${e}); using git CLI clone for sandbox`);
-    rmSync(cloneDir, { recursive: true, force: true });
-    // `git init` + `fetch` instead of `git clone`: a clone always creates
-    // `refs/remotes/origin/HEAD`, which collides with `refs/remotes/origin/head/...`
-    // on case-insensitive filesystems when the source has a `head/*` branch. The
-    // fetch-only sandbox avoids that ref entirely.
-    const branch = Repository.open(realRoot).headName() ?? "refs/heads/main";
-    const git = (args: string) => execSync(`git ${args}`, { stdio: "ignore" });
-    git(`init --quiet ${JSON.stringify(cloneDir)}`);
-    git(`-C ${JSON.stringify(cloneDir)} remote add origin ${JSON.stringify(realRoot)}`);
-    git(
-      `-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+refs/heads/*:refs/remotes/origin/*"`,
-    );
-    git(`-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+${branch}:${branch}"`);
-    git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
-    repo = Repository.open(cloneDir);
-  }
+
+  // Set up a clean local git sandbox with multiple commits and no shallow file
+  const git = (args: string) => execSync(`git ${args}`, { cwd: cloneDir, stdio: "ignore" });
+  mkdirSync(cloneDir, { recursive: true });
+  git("init --quiet");
+  git("config user.name 'Test Runner'");
+  git("config user.email 'test@example.com'");
+
+  execSync("echo '[package]\nname = \"repository\"' > Cargo.toml", { cwd: cloneDir });
+  execSync("echo '# repository' > ReadMe.md", { cwd: cloneDir });
+  mkdirSync(join(cloneDir, "src"), { recursive: true });
+  execSync("echo 'console.log(1);' > src/index.js", { cwd: cloneDir });
+  git("add Cargo.toml ReadMe.md src");
+  git("commit -m 'Initial commit'");
+
+  execSync("echo '# repository v2' > ReadMe.md", { cwd: cloneDir });
+  git("add ReadMe.md");
+  git("commit -m 'Second commit'");
+
+  git("remote add origin https://example.com/repo.git");
+
+  repo = Repository.open(cloneDir);
 });
 
 afterAll(() => {
@@ -506,5 +506,62 @@ describe("Repository wave-1 additions", () => {
     const bare = entries.find((e) => e.key === "core.bare");
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
+  });
+});
+
+describe("Repository newly exported APIs (writeCommit, writeTag, reset, mailmap)", () => {
+  test("writeCommit writes a commit object to ODB", () => {
+    const head = repo.headCommit();
+    const commitId = repo.writeCommit(
+      head.treeId,
+      [head.id],
+      "Standalone commit via writeCommit",
+      { name: "Custom Author", email: "author@example.com" },
+      { name: "Custom Committer", email: "committer@example.com" }
+    );
+    expect(typeof commitId).toBe("string");
+    expect(commitId.length).toBe(40);
+    expect(repo.objectExists(commitId)).toBe(true);
+
+    const fetched = repo.findCommit(commitId);
+    expect(fetched.message).toBe("Standalone commit via writeCommit");
+    expect(fetched.author.name).toBe("Custom Author");
+    expect(fetched.committer.name).toBe("Custom Committer");
+  });
+
+  test("writeTag writes an annotated tag object to ODB", () => {
+    const head = repo.headCommit();
+    const tagObjId = repo.writeTag(
+      head.id,
+      "commit",
+      "v1.0.0-test",
+      "Tag message via writeTag",
+      { name: "Tagger Name", email: "tagger@example.com" }
+    );
+    expect(typeof tagObjId).toBe("string");
+    expect(tagObjId.length).toBe(40);
+    expect(repo.objectExists(tagObjId)).toBe(true);
+
+    const fetched = repo.findTag(tagObjId);
+    expect(fetched.name).toBe("v1.0.0-test");
+    expect(fetched.message).toBe("Tag message via writeTag");
+    expect(fetched.tagger?.name).toBe("Tagger Name");
+  });
+
+  test("reset supports soft reset mode", () => {
+    const head = repo.headId();
+    const parent = repo.revParseSingle("HEAD~1");
+
+    repo.reset(parent, "Soft");
+    expect(repo.headId()).toBe(parent);
+
+    // Restore HEAD
+    repo.setHead(head);
+    expect(repo.headId()).toBe(head);
+  });
+
+  test("mailmap returns an array of MailmapEntry", () => {
+    const entries = repo.mailmap();
+    expect(Array.isArray(entries)).toBe(true);
   });
 });
