@@ -11,6 +11,13 @@ async function run() {
   const target = targetIdx !== -1 && args[targetIdx + 1] ? args[targetIdx + 1] : undefined;
 
   const cli = new NapiCli();
+  // NOTE: @napi-rs/cli does `if (options.features) args.push("--features", ...)`, and `[]` is
+  // truthy in JS — so an empty array emits a bare `--features` and cargo errors. Omit the key
+  // entirely to build with default features.
+  //
+  // The `ssh`/`xmss` features are still on the pre-migration code (ring/sha2/ssh-key/pq-xmss) and
+  // don't compile yet — Phase 2. Once migrated, restore:
+  //   features: ["ssh", "xmss"],
   await cli.build({
     platform: true,
     esm: true,
