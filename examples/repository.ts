@@ -39,10 +39,20 @@ async function main(): Promise<void> {
     const git = (args: string) => execSync(`git ${args}`, { stdio: "ignore" });
     git(`init --quiet ${JSON.stringify(cloneDir)}`);
     git(`-C ${JSON.stringify(cloneDir)} remote add origin ${JSON.stringify(realRoot)}`);
-    git(`-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+refs/heads/*:refs/remotes/origin/*"`);
+    git(
+      `-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+refs/heads/*:refs/remotes/origin/*"`,
+    );
     git(`-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+${branch}:${branch}"`);
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
+  }
+
+  // Ensure example sandbox has at least 2 commits so HEAD~1 is valid.
+  if (repo.log().length < 2) {
+    const head = repo.headCommit();
+    repo.commit(repo.headName() ?? "HEAD", "second commit in example sandbox", head.treeId, [
+      head.id,
+    ]);
   }
 
   console.log(`sandbox: ${repo.gitDir()}`);
@@ -79,7 +89,7 @@ async function main(): Promise<void> {
     console.log(`  findTree entries=${tree.entries.length}`);
     console.log(`  findObject kind=${repo.findObject(repo.headId()).kind}`);
     console.log(`  objectExists=${repo.objectExists(repo.headId())}`);
-    console.log(`  tryFindObject(missing)=${repo.tryFindObject("0".repeat(40))}`);
+    console.log(`  tryFindObject(missing)=${JSON.stringify(repo.tryFindObject("0".repeat(40)))}`);
   });
 
   // --- 3. object writing -----------------------------------------------------
@@ -123,7 +133,12 @@ async function main(): Promise<void> {
   // --- 5. remotes ------------------------------------------------------------
   console.log("\n5. remotes");
   run("remotes", () => {
-    console.log(`  remotes=${repo.remotes().map((r) => r.name).join(", ")}`);
+    console.log(
+      `  remotes=${repo
+        .remotes()
+        .map((r) => r.name)
+        .join(", ")}`,
+    );
     const origin = repo.findRemote("origin");
     console.log(`  origin url=${origin.url}`);
     console.log(`  remoteAt=${repo.remoteAt("https://example.com/owner/repo.git").url}`);
@@ -160,10 +175,18 @@ async function main(): Promise<void> {
     const blob = repo.writeBlob(Buffer.from("staged via editIndex\n"));
     const path = "staged-example.txt";
     repo.editIndex([{ path, id: blob, mode: "100644" }]);
-    const staged = Repository.open(cloneDir).index().find((e) => e.path === path);
+    const staged = Repository.open(cloneDir)
+      .index()
+      .find((e) => e.path === path);
     console.log(`  staged=${staged?.id === blob} stage=${staged?.stage}`);
     repo.editIndex(undefined, [path]);
-    console.log(`  removed=${Repository.open(cloneDir).index().find((e) => e.path === path) === undefined}`);
+    console.log(
+      `  removed=${
+        Repository.open(cloneDir)
+          .index()
+          .find((e) => e.path === path) === undefined
+      }`,
+    );
   });
   run("isDirty", () => console.log(`  isDirty=${repo.isDirty()}`));
 
@@ -186,9 +209,9 @@ async function main(): Promise<void> {
   // --- 9. diff ---------------------------------------------------------------
   console.log("\n9. diff");
   run("diffTreeToTree", () => {
-    const head = repo.headId();
-    const parent = repo.revParseSingle("HEAD~1");
-    const changes = repo.diffTreeToTree(parent, head);
+    const headTree = repo.headTreeId();
+    const parentTree = repo.findCommit(repo.revParseSingle("HEAD~1")).treeId;
+    const changes = repo.diffTreeToTree(parentTree, headTree);
     console.log(`  changes=${changes.length}`);
     if (changes[0]) console.log(`  e.g. ${changes[0].path} (${changes[0].kind})`);
   });
@@ -212,8 +235,8 @@ async function main(): Promise<void> {
     const tree = repo.headTree();
     const first = tree.entries.find((e) => e.mode === "Blob");
     if (first) {
-      const hunks = repo.blameFile(first.path);
-      console.log(`  blame ${first.path} hunks=${hunks.length}`);
+      const hunks = repo.blameFile(first.name);
+      console.log(`  blame ${first.name} hunks=${hunks.length}`);
     }
   });
 
@@ -223,9 +246,9 @@ async function main(): Promise<void> {
     const tree = repo.headTree();
     const first = tree.entries.find((e) => e.mode === "Blob");
     if (first) {
-      const attrs = repo.attributes(first.path);
-      console.log(`  attributes for ${first.path}=${attrs.length}`);
-      console.log(`  isPathExcluded=${repo.isPathExcluded(first.path)}`);
+      const attrs = repo.attributes(first.name);
+      console.log(`  attributes for ${first.name}=${attrs.length}`);
+      console.log(`  isPathExcluded=${repo.isPathExcluded(first.name)}`);
     }
   });
   run("submodules", () => {

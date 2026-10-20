@@ -38,7 +38,7 @@ fn move_head_to_commit(r: &gix::Repository, new_commit: gix::ObjectId) -> Result
         name,
         new_commit,
         gix::refs::transaction::PreviousValue::MustExistAndMatch(gix::refs::Target::Object(old)),
-        "checkout/reset/merge".into(),
+        BString::from("checkout/reset/merge"),
     ))
     .map_err(|e| err("edit_reference", e))?;
     Ok(())
@@ -375,6 +375,9 @@ impl Task for CheckoutTask {
     type JsValue = ();
 
     fn compute(&mut self) -> Result<()> {
+        if !matches!(self.mode.as_str(), "soft" | "mixed" | "hard") {
+            return Err(err("reset", "mode must be one of soft | mixed | hard"));
+        }
         let r = thread_local(&self.inner);
         let tree_id = match &self.id {
             Some(id) => {
@@ -416,7 +419,7 @@ impl Task for CheckoutTask {
             .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
             .map_err(|e| err("checkout_options", e))?;
         opts.overwrite_existing = self.force;
-        gix_worktree_state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
+        gix::worktree::state::checkout(&mut index, workdir, objects, &files, &bytes, &interrupt, opts)
             .map_err(|e| err("checkout", e))?;
         index
             .write(gix::index::write::Options::default())
@@ -465,7 +468,7 @@ impl Task for ResetTask {
                     .checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
                     .map_err(|e| err("checkout_options", e))?;
                 opts.overwrite_existing = true;
-                gix_worktree_state::checkout(
+                gix::worktree::state::checkout(
                     &mut index,
                     workdir,
                     objects,
@@ -505,22 +508,17 @@ impl Task for MergeTask {
         let ours_id = r.head_id().map_err(|e| err("head_id", e))?.detach();
         let theirs_id = parse_oid(&self.theirs)?;
 
-        let labels = gix_merge::blob::builtin_driver::text::Labels {
+        let labels = gix::merge::blob::builtin_driver::text::Labels {
             ancestor: None,
             current: None,
             other: None,
         };
-        let mut commit_opts = gix_merge::commit::Options::default();
-        commit_opts.tree_merge = r
-            .tree_merge_options()
-            .map_err(|e| err("tree_merge_options", e))?;
-
         let mut outcome = r
-            .merge_commits(ours_id, theirs_id, labels, commit_opts)
+            .merge_commits(ours_id, theirs_id, labels, Default::default())
             .map_err(|e| err("merge_commits", e))?;
         if outcome
             .tree_merge
-            .has_unresolved_conflicts(gix_merge::tree::TreatAsUnresolved::Whatever)
+            .has_unresolved_conflicts(Default::default())
         {
             return Err(err(
                 "merge",
@@ -536,12 +534,16 @@ impl Task for MergeTask {
             .detach();
         let author = r
             .author()
-            .ok_or_else(|| err("author", "no author configured"))??
-            .to_owned();
+            .ok_or_else(|| err("author", "no author configured"))?
+            .map_err(|e| err("author", e))?
+            .to_owned()
+            .map_err(|e| err("author decode", e))?;
         let committer = r
             .committer()
-            .ok_or_else(|| err("committer", "no committer configured"))??
-            .to_owned();
+            .ok_or_else(|| err("committer", "no committer configured"))?
+            .map_err(|e| err("committer", e))?
+            .to_owned()
+            .map_err(|e| err("committer decode", e))?;
         let commit = gix::objs::Commit {
             tree: merged_tree_id,
             parents: vec![ours_id, theirs_id].into(),
@@ -788,9 +790,6 @@ impl Repository {
     #[napi]
     pub fn reset(&self, id: String, mode: String) -> Result<AsyncTask<ResetTask>> {
         let mode = mode.to_lowercase();
-        if !matches!(mode.as_str(), "soft" | "mixed" | "hard") {
-            return Err(err("reset", "mode must be one of soft | mixed | hard"));
-        }
         Ok(AsyncTask::new(ResetTask {
             inner: Arc::clone(&self.inner),
             id,
