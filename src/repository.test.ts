@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository, type Tree, type TreeEntry } from "./main.ts";
+import { Repository, type Tree, type TreeEntry } from "../dist/index.js";
 
 const realRoot = process.cwd();
 let base: string;
@@ -518,5 +518,64 @@ describe("Repository.commit", () => {
     expect(c.treeId).toBe(head.treeId);
 
     repo.findReference("refs/heads/__probe_commit__").delete();
+  });
+});
+
+// --- extended API surface (defaultRemote, mainWorktree, editReference, mailmap, revParseSpec, matchPathspec, verifyIntegrity) ---
+
+describe("Repository extended API surface", () => {
+  test("defaultRemote() returns remote or null", () => {
+    const remote = repo.defaultRemote("fetch");
+    expect(remote === null || typeof remote === "object").toBe(true);
+  });
+
+  test("mainWorktree() and findWorktree() descriptor access", () => {
+    const mainWt = repo.mainWorktree();
+    expect(mainWt === null || typeof mainWt === "object").toBe(true);
+
+    const wt = repo.findWorktree("nonexistent");
+    expect(wt).toBeNull();
+  });
+
+  test("editReference() creates/updates a reference transactionally", () => {
+    const head = repo.headId();
+    const ref = repo.editReference("refs/heads/__probe_edit_ref__", head);
+    expect(ref.name).toBe("refs/heads/__probe_edit_ref__");
+    expect(ref.target).toBe(head);
+
+    repo.findReference("refs/heads/__probe_edit_ref__").delete();
+  });
+
+  test("loadMailmap() returns mailmap entry", () => {
+    const mailmap = repo.loadMailmap();
+    expect(typeof mailmap.name).toBe("string");
+    expect(typeof mailmap.email).toBe("string");
+  });
+
+  test("revParseSpec() parses single revisions and ranges", () => {
+    const res = repo.revParseSpec("HEAD");
+    expect(res.mode).toBe("Single");
+    expect(res.singleId).toBe(repo.headId());
+
+    const rangeRes = repo.revParseSpec("HEAD..HEAD");
+    expect(rangeRes.mode).toBe("Range");
+    expect(rangeRes.fromId).toBe(repo.headId());
+    expect(rangeRes.toId).toBe(repo.headId());
+  });
+
+  test("matchPathspec() evaluates relative path against glob patterns", () => {
+    const res = repo.matchPathspec(["*.md", "src/**"], "ReadMe.md");
+    expect(res.isMatch).toBe(true);
+    expect(res.path).toBe("ReadMe.md");
+
+    const resNoMatch = repo.matchPathspec(["*.nonexistent"], "ReadMe.md");
+    expect(resNoMatch.isMatch).toBe(false);
+  });
+
+  test("verifyIntegrity() checks object database integrity", () => {
+    const integrity = repo.verifyIntegrity();
+    expect(typeof integrity.objectCount).toBe("number");
+    expect(integrity.objectCount).toBeGreaterThan(0);
+    expect(integrity.isValid).toBe(true);
   });
 });

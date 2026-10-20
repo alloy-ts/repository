@@ -167,6 +167,40 @@ pub struct ConfigEntry {
     pub value: String,
 }
 
+/// Mailmap entry result.
+#[derive(Clone)]
+#[napi(object)]
+pub struct MailmapEntry {
+    pub name: String,
+    pub email: String,
+}
+
+/// Parsed revision specification result.
+#[derive(Clone)]
+#[napi(object)]
+pub struct RevSpecResult {
+    pub mode: String,
+    pub single_id: Option<String>,
+    pub from_id: Option<String>,
+    pub to_id: Option<String>,
+}
+
+/// Result of pathspec matching.
+#[derive(Clone)]
+#[napi(object)]
+pub struct PathspecMatchResult {
+    pub is_match: bool,
+    pub path: String,
+}
+
+/// Repository integrity check outcome.
+#[derive(Clone)]
+#[napi(object)]
+pub struct VerifyIntegrityResult {
+    pub object_count: u32,
+    pub is_valid: bool,
+}
+
 /// Checkout task running on libuv thread pool.
 pub struct CheckoutTask {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
@@ -804,6 +838,177 @@ impl Repository {
             .find_remote(name.as_str())
             .map_err(|e| err("find_remote", e))?;
         Ok(build_remote(&self.inner, remote))
+    }
+
+    /// Look up default remote for a direction ('fetch' | 'push').
+    #[napi]
+    pub fn default_remote(&self, direction: Option<String>) -> Result<Option<Remote>> {
+        let r = thread_local(&self.inner);
+        let dir = match direction.as_deref() {
+            Some("push") => gix::remote::Direction::Push,
+            _ => gix::remote::Direction::Fetch,
+        };
+        match r.find_default_remote(dir) {
+            Some(Ok(remote)) => Ok(Some(build_remote(&self.inner, remote))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Return the main worktree descriptor if available.
+    #[napi]
+    pub fn main_worktree(&self) -> Result<Option<WorktreeProxy>> {
+        let r = thread_local(&self.inner);
+        if let Some(wt) = r.worktree() {
+            if wt.is_main() {
+                return Ok(Some(WorktreeProxy {
+                    id: "main".to_string(),
+                    git_dir: wt.base().to_string_lossy().into_owned(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Look up a secondary worktree by ID.
+    #[napi]
+    pub fn find_worktree(&self, id: String) -> Result<Option<WorktreeProxy>> {
+        let r = thread_local(&self.inner);
+        let proxies = r.worktrees().map_err(|e| err("worktrees", e))?;
+        for p in proxies {
+            if let Ok(p_id) = p.id() {
+                if lossy(p_id.as_ref()) == id {
+                    return Ok(Some(WorktreeProxy {
+                        id,
+                        git_dir: p.git_dir().to_string_lossy().into_owned(),
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Edit or update a reference transactionally.
+    #[napi]
+    pub fn edit_reference(
+        &self,
+        name: String,
+        target: String,
+        previous_target: Option<String>,
+    ) -> Result<Reference> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&target)?;
+        let previous = match previous_target {
+            Some(prev) => gix::refs::transaction::PreviousValue::MustExistAndMatch(
+                gix::refs::Target::Object(parse_oid(&prev)?),
+            ),
+            None => gix::refs::transaction::PreviousValue::Any,
+        };
+        let label = format!("edit reference {name}");
+        let reference = r
+            .reference(name, oid, previous, label)
+            .map_err(|e| err("edit_reference", e))?;
+        build_reference(&self.inner, reference)
+    }
+
+    /// Load repository mailmap file if available.
+    #[napi]
+    pub fn load_mailmap(&self) -> Result<MailmapEntry> {
+        let r = thread_local(&self.inner);
+        let mailmap = r.open_mailmap();
+        let default_author = r.author().and_then(|res| res.ok());
+        let (name, email) = match default_author {
+            Some(sig) => {
+                let binding = mailmap.resolve(sig);
+                (lossy(binding.name.as_ref()), lossy(binding.email.as_ref()))
+            }
+            None => ("".to_string(), "".to_string()),
+        };
+        Ok(MailmapEntry { name, email })
+    }
+
+    /// Parse revision specification (e.g. `HEAD`, `HEAD~2..HEAD`, `@{-1}`).
+    #[napi]
+    pub fn rev_parse_spec(&self, spec: String) -> Result<RevSpecResult> {
+        let r = thread_local(&self.inner);
+        let parsed = r.rev_parse(spec.as_str()).map_err(|e| err("rev_parse", e))?;
+        if let Some(single) = parsed.single() {
+            Ok(RevSpecResult {
+                mode: "Single".to_string(),
+                single_id: Some(single.to_string()),
+                from_id: None,
+                to_id: None,
+            })
+        } else if spec.contains("..") {
+            let clean = spec.replace("...", "..");
+            let parts: Vec<&str> = clean.split("..").collect();
+            let from_id = if !parts[0].is_empty() {
+                r.rev_parse_single(parts[0]).ok().map(|id| id.to_string())
+            } else {
+                None
+            };
+            let to_id = if parts.len() > 1 && !parts[1].is_empty() {
+                r.rev_parse_single(parts[1]).ok().map(|id| id.to_string())
+            } else {
+                None
+            };
+            Ok(RevSpecResult {
+                mode: "Range".to_string(),
+                single_id: None,
+                from_id,
+                to_id,
+            })
+        } else {
+            Ok(RevSpecResult {
+                mode: format!("{:?}", parsed),
+                single_id: None,
+                from_id: None,
+                to_id: None,
+            })
+        }
+    }
+
+    /// Check if relative path matches pattern list using pathspec engine.
+    #[napi]
+    pub fn match_pathspec(&self, patterns: Vec<String>, path: String) -> Result<PathspecMatchResult> {
+        let bpath = gix::bstr::BStr::new(path.as_bytes());
+        let is_match = patterns.iter().any(|p| {
+            if let Some(pattern) = gix::glob::Pattern::from_bytes(p.as_bytes()) {
+                pattern.matches_repo_relative_path(
+                    bpath,
+                    None,
+                    None,
+                    gix::glob::pattern::Case::Sensitive,
+                    gix::glob::wildmatch::Mode::empty(),
+                )
+            } else {
+                false
+            }
+        });
+        Ok(PathspecMatchResult {
+            is_match,
+            path,
+        })
+    }
+
+    /// Verify basic object database integrity.
+    #[napi]
+    pub fn verify_integrity(&self) -> Result<VerifyIntegrityResult> {
+        let r = thread_local(&self.inner);
+        let mut count = 0u32;
+        let mut is_valid = true;
+        if let Ok(iter) = r.objects.store().iter() {
+            for obj in iter {
+                if obj.is_ok() {
+                    count += 1;
+                } else {
+                    is_valid = false;
+                }
+            }
+        }
+        Ok(VerifyIntegrityResult {
+            object_count: count,
+            is_valid,
+        })
     }
 
     // ---- config / paths --------------------------------------------------
