@@ -1,3 +1,10 @@
+mod commit;
+mod error;
+mod object;
+mod reference;
+mod remote;
+mod repository;
+
 use napi_derive::napi;
 
 #[napi]
