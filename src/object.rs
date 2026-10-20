@@ -40,6 +40,19 @@ pub struct Blob {
 
 #[napi]
 impl Blob {
+    #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    /// Size of the blob in bytes.
+    #[napi(getter)]
+    pub fn size(&self) -> Result<u32> {
+        let r = thread_local(&self.repo);
+        let blob = r.find_blob(self.id).map_err(|e| err("find_blob", e))?;
+        Ok(blob.data.len() as u32)
+    }
+
     /// Raw bytes of the blob.
     #[napi]
     pub fn content(&self) -> Result<Buffer> {
@@ -88,6 +101,49 @@ impl Commit {
         let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
         let commit = commit.decode().map_err(|e| err("decode", e))?;
         Ok(commit.parents().map(|p| p.to_string()).collect())
+    }
+
+    /// Author signature of the commit.
+    #[napi(getter)]
+    pub fn author(&self) -> Result<Option<Signature>> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let commit = commit.decode().map_err(|e| err("decode", e))?;
+        let author = commit.author().map_err(|e| err("author", e))?;
+        let at = author.time().map_err(|e| err("author time", e))?;
+        Ok(Some(Signature {
+            name: lossy(author.name),
+            email: lossy(author.email),
+            time: at.seconds,
+            timezone_offset: at.offset,
+        }))
+    }
+
+    /// Committer signature of the commit.
+    #[napi(getter)]
+    pub fn committer(&self) -> Result<Option<Signature>> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let commit = commit.decode().map_err(|e| err("decode", e))?;
+        let committer = commit.committer().map_err(|e| err("committer", e))?;
+        let ct = committer.time().map_err(|e| err("committer time", e))?;
+        Ok(Some(Signature {
+            name: lossy(committer.name),
+            email: lossy(committer.email),
+            time: ct.seconds,
+            timezone_offset: ct.offset,
+        }))
+    }
+
+    /// Committing time in unix seconds.
+    #[napi(getter)]
+    pub fn time(&self) -> Result<i64> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let commit = commit.decode().map_err(|e| err("decode", e))?;
+        let committer = commit.committer().map_err(|e| err("committer", e))?;
+        let ct = committer.time().map_err(|e| err("committer time", e))?;
+        Ok(ct.seconds)
     }
 }
 
@@ -211,6 +267,11 @@ pub struct Tag {
 #[napi]
 impl Tag {
     #[napi(getter)]
+    pub fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    #[napi(getter)]
     pub fn name(&self) -> Result<String> {
         let r = thread_local(&self.repo);
         let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
@@ -224,6 +285,35 @@ impl Tag {
         let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
         let tag = tag.decode().map_err(|e| err("decode", e))?;
         Ok(lossy(tag.message))
+    }
+
+    /// The OID of the object this tag points to.
+    #[napi(getter)]
+    pub fn target(&self) -> Result<String> {
+        let r = thread_local(&self.repo);
+        let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
+        let tag = tag.decode().map_err(|e| err("decode", e))?;
+        Ok(tag.target.to_string())
+    }
+
+    /// Tagger signature if present.
+    #[napi(getter)]
+    pub fn tagger(&self) -> Result<Option<Signature>> {
+        let r = thread_local(&self.repo);
+        let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
+        let tag = tag.decode().map_err(|e| err("decode", e))?;
+        if let Some(tagger_bytes) = tag.tagger {
+            if let Ok(sig) = gix::actor::SignatureRef::from_bytes(tagger_bytes) {
+                let t = sig.time().map_err(|e| err("tagger time", e))?;
+                return Ok(Some(Signature {
+                    name: lossy(sig.name),
+                    email: lossy(sig.email),
+                    time: t.seconds,
+                    timezone_offset: t.offset,
+                }));
+            }
+        }
+        Ok(None)
     }
 }
 
