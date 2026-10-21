@@ -564,4 +564,10 @@ describe("Repository newly exported APIs (writeCommit, writeTag, reset, mailmap)
     const entries = repo.mailmap();
     expect(Array.isArray(entries)).toBe(true);
   });
+
+  test("gitDirTrust, workdirPath, and isPristine", () => {
+    expect(typeof repo.gitDirTrust()).toBe("string");
+    expect(repo.workdirPath("ReadMe.md")).toContain("ReadMe.md");
+    expect(typeof repo.isPristine()).toBe("boolean");
+  });
 });

@@ -1427,6 +1427,35 @@ impl Repository {
         Ok(r.state().map(|s| format!("{:?}", s)))
     }
 
+    /// The trust level assigned to this repository's `.git` directory (`Full` or `Reduced`).
+    #[napi]
+    pub fn git_dir_trust(&self) -> String {
+        let r = thread_local(&self.inner);
+        format!("{:?}", r.git_dir_trust())
+    }
+
+    /// Returns the path relative to the working directory for `relative_path`, or `null` if bare / not inside worktree.
+    #[napi]
+    pub fn workdir_path(&self, relative_path: String) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.workdir_path(relative_path.as_str()).map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Whether the worktree has no modified, added, deleted, or untracked files.
+    #[napi]
+    pub fn is_pristine(&self) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        r.is_dirty().map(|d| !d).map_err(|e| err("is_pristine", e))
+    }
+
+    /// Set a new working directory path for this repository handle.
+    #[napi]
+    pub fn set_work_dir(&mut self, path: String) -> Result<()> {
+        let r = Arc::get_mut(&mut self.inner).ok_or_else(|| napi::Error::from_reason("Cannot mutate shared repository handle"))?;
+        r.work_tree = Some(std::path::PathBuf::from(path));
+        Ok(())
+    }
+
     /// The directory submodules are cloned into, if configured.
     #[napi]
     pub fn modules_path(&self) -> Result<Option<String>> {
