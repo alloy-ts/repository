@@ -90,6 +90,19 @@ describe("Repository static constructors", () => {
   });
 });
 
+// --- crypt operations --------------------------------------------------------
+
+describe("Crypt operations", () => {
+  test("configureCryptFilters & removeCryptFilters update repo config", () => {
+    repo.configureCryptFilters();
+    expect(Repository.open(cloneDir).configString("filter.git-crypt.clean")).toBe("git-crypt clean");
+    expect(Repository.open(cloneDir).configString("filter.git-crypt.required")).toBe("true");
+
+    repo.removeCryptFilters();
+    expect(Repository.open(cloneDir).configString("filter.git-crypt.clean")).toBeNull();
+  });
+});
+
 // --- HEAD / objects ---------------------------------------------------------
 
 describe("Repository objects", () => {

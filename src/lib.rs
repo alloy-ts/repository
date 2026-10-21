@@ -1,3 +1,4 @@
+mod crypt;
 mod error;
 mod object;
 mod reference;

@@ -1008,6 +1008,23 @@ impl Repository {
         r.workdir().map(|p| p.to_string_lossy().into_owned())
     }
 
+    /// Configure git-crypt filters in the local repository config.
+    #[napi]
+    pub fn configure_crypt_filters(&self) -> Result<()> {
+        self.config_set("filter.git-crypt.clean".to_string(), "git-crypt clean".to_string())?;
+        self.config_set("filter.git-crypt.smudge".to_string(), "git-crypt smudge".to_string())?;
+        self.config_set("filter.git-crypt.diff".to_string(), "git-crypt diff".to_string())?;
+        self.config_set("filter.git-crypt.required".to_string(), "true".to_string())?;
+        Ok(())
+    }
+
+    /// Remove git-crypt filters from the local repository config.
+    #[napi]
+    pub fn remove_crypt_filters(&self) -> Result<()> {
+        let r = thread_local(&self.inner);
+        crate::crypt::remove_filters(&r).map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
     /// List secondary worktrees for this repository.
     #[napi]
     pub fn worktrees(&self) -> Result<Vec<WorktreeProxy>> {
