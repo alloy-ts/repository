@@ -777,3 +777,66 @@ describe("Repository config_path, ref transactions and rev specs", () => {
     expect(range.id).toBeFalsy();
   });
 });
+
+describe("Repository newly added NAPI bindings", () => {
+  test("emptyTree and emptyBlob", () => {
+    const emptyTree = repo.emptyTree();
+    expect(emptyTree.id).toBeTruthy();
+    expect(emptyTree.entries).toEqual([]);
+
+    const emptyBlob = repo.emptyBlob();
+    expect(emptyBlob.id).toBe("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+  });
+
+  test("findHeader and tryFindHeader", () => {
+    const headId = repo.headId();
+    const header = repo.findHeader(headId);
+    expect(header.kind).toContain("Commit");
+    expect(header.size).toBeGreaterThan(0);
+
+    const tryHeader = repo.tryFindHeader(headId);
+    expect(tryHeader).not.toBeNull();
+    expect(tryHeader?.kind).toContain("Commit");
+
+    expect(repo.tryFindHeader("0".repeat(40))).toBeNull();
+  });
+
+  test("writeBlobStream and editTree", () => {
+    const blobId = repo.writeBlobStream(Buffer.from("streamed blob content\n"));
+    expect(blobId).toBeTruthy();
+
+    const newTreeId = repo.editTree(null, [{ path: "streamed.txt", id: blobId, mode: "100644" }]);
+    expect(newTreeId).toBeTruthy();
+
+    const tree = repo.findTree(newTreeId);
+    expect(tree.entries.some((e) => e.name === "streamed.txt")).toBe(true);
+  });
+
+  test("tryFindReference and tagReference", () => {
+    expect(repo.tryFindReference("HEAD")?.name).toBe("HEAD");
+    expect(repo.tryFindReference("refs/heads/nonexistent_ref")).toBeNull();
+
+    const headId = repo.headId();
+    const tagRef = repo.tagReference("napi-test-tag", headId, "mustNotExist");
+    expect(tagRef.name).toBe("refs/tags/napi-test-tag");
+
+    repo.findReference("refs/tags/napi-test-tag").delete();
+  });
+
+  test("virtualMergeBase", () => {
+    const headId = repo.headId();
+    const bases = repo.virtualMergeBase(headId, headId);
+    expect(Array.isArray(bases)).toBe(true);
+  });
+
+  test("location and path utilities", () => {
+    expect(typeof repo.pathspecDefaults().signature).toBe("string");
+    expect(typeof repo.installDir()).toBe("string");
+
+    const norm = repo.normalizePath("Cargo.toml");
+    expect(norm).toBe("Cargo.toml");
+
+    const wpath = repo.workdirPath("Cargo.toml");
+    expect(wpath).toBeTruthy();
+  });
+});

@@ -2452,6 +2452,282 @@ impl Repository {
             .id
             .to_string())
     }
+
+    /// Return an empty tree object for this repository.
+    #[napi]
+    pub fn empty_tree(&self) -> Result<Tree> {
+        let r = thread_local(&self.inner);
+        let tree = r.empty_tree();
+        build_tree(&self.inner, tree.id)
+    }
+
+    /// Return an empty blob object for this repository.
+    #[napi]
+    pub fn empty_blob(&self) -> Blob {
+        let r = thread_local(&self.inner);
+        let blob = r.empty_blob();
+        build_blob(&self.inner, blob.id)
+    }
+
+    /// Find header information for an object (kind and size in bytes).
+    #[napi]
+    pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
+        let r = thread_local(&self.inner);
+        let header = r
+            .find_header(parse_oid(&id)?)
+            .map_err(|e| err("find_header", e))?;
+        Ok(ObjectHeader {
+            kind: format!("{:?}", header.kind()),
+            size: header.size() as f64,
+        })
+    }
+
+    /// Try to find header information for an object, returning `null` if missing.
+    #[napi]
+    pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
+        let r = thread_local(&self.inner);
+        let oid = match parse_oid(&id) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        };
+        match r.try_find_header(oid) {
+            Ok(Some(header)) => Ok(Some(ObjectHeader {
+                kind: format!("{:?}", header.kind()),
+                size: header.size() as f64,
+            })),
+            Ok(None) | Err(_) => Ok(None),
+        }
+    }
+
+    /// Write raw object bytes of `kind` (`commit`, `tree`, `blob`, `tag`) to the object database.
+    #[napi]
+    pub fn write_object(&self, kind: String, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let kind = gix::objs::Kind::from_bytes(kind.as_bytes()).map_err(|e| err("write_object kind", e))?;
+        let id = match kind {
+            gix::objs::Kind::Blob => r.write_blob(data.to_vec()).map_err(|e| err("write_object blob", e))?.detach(),
+            _ => {
+                let obj = gix::objs::ObjectRef::from_bytes(&data, kind, r.object_hash()).map_err(|e| err("write_object decode", e))?;
+                r.write_object(&obj).map_err(|e| err("write_object", e))?.detach()
+            }
+        };
+        Ok(id.to_string())
+    }
+
+    /// Write a stream/buffer of bytes as a blob object to the repository.
+    #[napi]
+    pub fn write_blob_stream(&self, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let mut cursor = std::io::Cursor::new(data.as_ref());
+        let id = r.write_blob_stream(&mut cursor).map_err(|e| err("write_blob_stream", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Upsert or remove entries in a tree by applying `edits` to `id` (or `empty_tree()` if omitted).
+    #[napi]
+    pub fn edit_tree(&self, id: Option<String>, edits: Vec<TreeItemInput>, remove: Option<Vec<String>>) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let tree_id = match id {
+            Some(i) => parse_oid(&i)?,
+            None => r.empty_tree().id,
+        };
+        let mut editor = r.edit_tree(tree_id).map_err(|e| err("edit_tree", e))?;
+        for e in edits {
+            let mode = match e.mode.as_deref().unwrap_or("100644") {
+                "100755" => gix::objs::tree::EntryKind::BlobExecutable,
+                "040000" | "40000" => gix::objs::tree::EntryKind::Tree,
+                "120000" => gix::objs::tree::EntryKind::Link,
+                "160000" => gix::objs::tree::EntryKind::Commit,
+                _ => gix::objs::tree::EntryKind::Blob,
+            };
+            editor.upsert(&e.path, mode, parse_oid(&e.id)?).map_err(|e| err("edit_tree upsert", e))?;
+        }
+        if let Some(rem) = remove {
+            for path in rem {
+                editor.remove(&path).map_err(|e| err("edit_tree remove", e))?;
+            }
+        }
+        let new_id = editor.write().map_err(|e| err("edit_tree write", e))?;
+        Ok(new_id.to_string())
+    }
+
+    /// Set or unset the object cache size in bytes.
+    #[napi]
+    pub fn object_cache_size(&mut self, bytes: Option<f64>) {
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size(bytes.map(|b| b as usize));
+    }
+
+    /// Set object cache size in bytes if it wasn't already configured.
+    #[napi]
+    pub fn object_cache_size_if_unset(&mut self, bytes: f64) {
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size_if_unset(bytes as usize);
+    }
+
+    /// Compute object cache size recommended for tree diffs.
+    #[napi]
+    pub fn compute_object_cache_size_for_tree_diffs(&self) -> Result<f64> {
+        let r = thread_local(&self.inner);
+        let index = r.index_or_empty().map_err(|e| err("index_or_empty", e))?;
+        Ok(r.compute_object_cache_size_for_tree_diffs(&index) as f64)
+    }
+
+    /// Enable object memory caching on this repository handle.
+    #[napi]
+    pub fn with_object_memory(&mut self) {
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size(Some(64 * 1024 * 1024));
+    }
+
+    /// Try to find a reference by `name`, returning `null` if it does not exist.
+    #[napi]
+    pub fn try_find_reference(&self, name: String) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.try_find_reference(name.as_str()) {
+            Ok(Some(reference)) => Ok(Some(build_reference(&self.inner, reference)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("try_find_reference", e)),
+        }
+    }
+
+    /// Create or overwrite a tag reference (`refs/tags/<name>`) pointing at `target`.
+    #[napi]
+    pub fn tag_reference(&self, name: String, target: String, previous: Option<String>) -> Result<Reference> {
+        let r = thread_local(&self.inner);
+        let constraint = match previous.as_deref() {
+            None | Some("any") => gix::refs::transaction::PreviousValue::Any,
+            Some("mustNotExist") => gix::refs::transaction::PreviousValue::MustNotExist,
+            Some("mustExist") => gix::refs::transaction::PreviousValue::MustExist,
+            Some(other) => match other.strip_prefix("mustMatch:") {
+                Some(v) => gix::refs::transaction::PreviousValue::MustExistAndMatch(match parse_oid(v) {
+                    Ok(oid) => gix::refs::Target::Object(oid),
+                    Err(_) => gix::refs::Target::Symbolic(
+                        gix::refs::FullName::try_from(v).map_err(|e2| err("previous target", e2))?,
+                    ),
+                }),
+                None => return Err(err("previous", format!("unknown previous-value mode '{other}'"))),
+            },
+        };
+        let reference = r
+            .tag_reference(name, parse_oid(&target)?, constraint)
+            .map_err(|e| err("tag_reference", e))?;
+        build_reference(&self.inner, reference)
+    }
+
+    /// Clear the namespace currently configured on this repository handle.
+    #[napi]
+    pub fn clear_namespace(&mut self) {
+        let mut r = thread_local(&self.inner);
+        r.clear_namespace();
+    }
+
+    /// Apply ref updates using an explicit `committer` actor signature for the reflog.
+    #[napi]
+    pub fn edit_references_as(&self, edits: Vec<RefEditInput>, committer: Option<Signature>) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        let mut ref_edits = Vec::with_capacity(edits.len());
+        for e in &edits {
+            ref_edits.push(build_ref_edit(e)?);
+        }
+        let sig = committer.as_ref().map(to_gix_signature);
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let sig_ref = sig.as_ref().map(|s| s.to_ref(&mut time_buf));
+        let applied = r
+            .edit_references_as(ref_edits, sig_ref)
+            .map_err(|e| err("edit_references_as", e))?;
+        Ok(applied
+            .into_iter()
+            .map(|e| e.name.as_bstr().to_string())
+            .collect())
+    }
+
+    /// Compute virtual merge base(s) for two commit ids.
+    #[napi]
+    pub fn virtual_merge_base(&self, one: String, two: String) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        let id1 = parse_oid(&one)?;
+        let id2 = parse_oid(&two)?;
+        let tree_merge_opts = r
+            .tree_merge_options()
+            .map_err(|e| err("tree_merge_options", e))?;
+        let outcome = r
+            .virtual_merge_base(vec![id1, id2], tree_merge_opts)
+            .map_err(|e| err("virtual_merge_base", e))?;
+        Ok(outcome.virtual_merge_bases.into_iter().map(|id| id.to_string()).collect())
+    }
+
+    /// Retrieve pathspec defaults configured in git configuration.
+    #[napi]
+    pub fn pathspec_defaults(&self) -> Result<PathspecDefaults> {
+        let r = thread_local(&self.inner);
+        let defaults = r.pathspec_defaults().map_err(|e| err("pathspec_defaults", e))?;
+        Ok(PathspecDefaults {
+            signature: format!("{:?}", defaults.signature),
+        })
+    }
+
+    /// The path to the shallow file boundary (`.git/shallow`), if present.
+    #[napi]
+    pub fn shallow_file(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let p = r.shallow_file().map_err(|e| err("shallow_file", e))?;
+        Ok(p.to_string_lossy().into_owned())
+    }
+
+    /// Return the installation directory of Git binaries.
+    #[napi]
+    pub fn install_dir(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let p = r.install_dir().map_err(|e| err("install_dir", e))?;
+        Ok(p.to_string_lossy().into_owned())
+    }
+
+    /// The relative path between the worktree root and the current working directory, if inside the worktree.
+    #[napi]
+    pub fn prefix(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let p = r.prefix().map_err(|e| err("prefix", e))?;
+        Ok(p.map(|path| path.to_string_lossy().into_owned()))
+    }
+
+    /// Normalize `path` relative to the repository worktree/git directory.
+    #[napi]
+    pub fn normalize_path(&self, path: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let norm = r.normalize_path(path.as_str()).map_err(|e| err("normalize_path", e))?;
+        Ok(norm.to_string())
+    }
+
+    /// Qualify a repository-relative path with the worktree path.
+    #[napi]
+    pub fn workdir_path(&self, relative_path: String) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.workdir_path(relative_path.as_str())
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Forcefully set the worktree directory in-memory, returning the previous worktree directory if one existed.
+    #[napi]
+    pub fn set_workdir(&mut self, workdir: Option<String>) -> Result<Option<String>> {
+        let mut r = thread_local(&self.inner);
+        let path = workdir.map(std::path::PathBuf::from);
+        let prev = r.set_workdir(path).map_err(|e| err("set_workdir", e))?;
+        Ok(prev.map(|p| p.to_string_lossy().into_owned()))
+    }
+}
+
+/// Header information for an object in the repository database.
+#[napi(object)]
+pub struct ObjectHeader {
+    pub kind: String,
+    pub size: f64,
+}
+
+/// Defaults for pathspec parsing.
+#[napi(object)]
+pub struct PathspecDefaults {
+    pub signature: String,
 }
 
 /// Map a JS direction string to [`gix::remote::Direction`], defaulting to `Fetch`.
