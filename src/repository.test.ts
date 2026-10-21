@@ -223,6 +223,12 @@ describe("Repository remotes", () => {
       const o = repo.findRemote("origin");
       expect(o.name).toBe("origin");
       expect(typeof o.url).toBe("string");
+      expect(typeof o.pushUrl).toBe("string");
+      expect(Array.isArray(o.fetchUrls)).toBe(true);
+      expect(Array.isArray(o.pushUrls)).toBe(true);
+      expect(Array.isArray(o.fetchRefspecs)).toBe(true);
+      expect(Array.isArray(o.pushRefspecs)).toBe(true);
+      expect(typeof o.fetchTags).toBe("string");
     }
   });
 
