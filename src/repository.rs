@@ -879,6 +879,39 @@ impl Repository {
         r.config_snapshot().string(key.as_str()).map(|v| lossy(&*v))
     }
 
+    /// Read a single config value as a string (alias for `configString`).
+    #[napi]
+    pub fn config_get(&self, key: String) -> Option<String> {
+        self.config_string(key)
+    }
+
+    /// Construct a Signature DTO.
+    #[napi]
+    pub fn signature_from_dto(
+        &self,
+        name: String,
+        email: String,
+        time: Option<f64>,
+        timezone_offset: Option<f64>,
+    ) -> Signature {
+        Signature {
+            name,
+            email,
+            time: time.map(|t| t as i64).unwrap_or(0),
+            timezone_offset: timezone_offset.map(|t| t as i32).unwrap_or(0),
+        }
+    }
+
+    /// Verify signature of a commit by ID.
+    #[napi]
+    pub fn verify_commit_signature(
+        &self,
+        commit_id: String,
+    ) -> Result<Option<crate::object::SignatureVerifyOutcome>> {
+        let commit = self.find_commit(commit_id)?;
+        commit.verify_signature()
+    }
+
     /// Return all flattened configuration key/value entries.
     #[napi]
     pub fn config_entries(&self) -> Result<Vec<ConfigEntry>> {
@@ -1499,16 +1532,19 @@ impl Repository {
     /// content of the blamed file.
     #[napi]
     pub fn blame(&self, file_path: String, commit_id: Option<String>) -> Result<BlameOutcome> {
-        let r = thread_local(&self.inner);
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size_if_unset(16 * 1024 * 1024);
+        let _ = r.index_or_load_from_head_or_empty();
         let suspect = match commit_id {
             Some(c) => parse_oid(&c)?,
             None => r.head_commit().map_err(|e| err("head_commit", e))?.id,
         };
+        let opts = gix::repository::blame_file::Options::default();
         let outcome = r
             .blame_file(
                 gix::bstr::BStr::new(file_path.as_str()),
                 suspect,
-                Default::default(),
+                opts,
             )
             .map_err(|e| err("blame_file", e))?;
 
@@ -1540,8 +1576,12 @@ impl Repository {
     #[napi]
     pub fn set_namespace(&self, ns: String) -> Result<Option<String>> {
         let mut r = thread_local(&self.inner);
+        let ns_clean = ns
+            .strip_prefix("refs/namespaces/")
+            .unwrap_or(&ns)
+            .trim_end_matches('/');
         let prev = r
-            .set_namespace(ns.as_str())
+            .set_namespace(ns_clean)
             .map_err(|e| err("set_namespace", e))?;
         Ok(prev.map(|n| String::from_utf8_lossy(n.as_bstr().as_ref()).into_owned()))
     }

@@ -31,6 +31,15 @@ pub struct Signature {
     pub timezone_offset: i32,
 }
 
+/// The outcome of verifying a commit signature.
+#[derive(Clone)]
+#[napi(object)]
+pub struct SignatureVerifyOutcome {
+    pub is_valid: bool,
+    pub status: String,
+    pub summary: Option<String>,
+}
+
 /// A git blob exposed to TypeScript.
 #[napi]
 pub struct Blob {
@@ -89,11 +98,98 @@ impl Commit {
         let commit = commit.decode().map_err(|e| err("decode", e))?;
         Ok(commit.parents().map(|p| p.to_string()).collect())
     }
+
+    /// Author signature of the commit.
+    #[napi(getter)]
+    pub fn author(&self) -> Result<Option<Signature>> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        match commit.author() {
+            Ok(s) => Ok(Some(Signature {
+                name: lossy(s.name),
+                email: lossy(s.email),
+                time: s.time().map(|t| t.seconds).unwrap_or(0),
+                timezone_offset: s.time().map(|t| t.offset).unwrap_or(0),
+            })),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Committer signature of the commit.
+    #[napi(getter)]
+    pub fn committer(&self) -> Result<Option<Signature>> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        match commit.committer() {
+            Ok(s) => Ok(Some(Signature {
+                name: lossy(s.name),
+                email: lossy(s.email),
+                time: s.time().map(|t| t.seconds).unwrap_or(0),
+                timezone_offset: s.time().map(|t| t.offset).unwrap_or(0),
+            })),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Commit creation time in unix seconds.
+    #[napi(getter)]
+    pub fn time(&self) -> Result<i64> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        Ok(commit.time().map(|t| t.seconds).unwrap_or(0))
+    }
+
+    /// Returns true if this commit has a PGP/SSH signature header.
+    #[napi]
+    pub fn is_signed(&self) -> Result<bool> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        match commit.signature() {
+            Ok(sig) => Ok(sig.is_some()),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Returns the raw signature string if signed.
+    #[napi]
+    pub fn signature(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        match commit.signature() {
+            Ok(Some((sig, _))) => Ok(Some(lossy(&sig))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Verify this commit's signature using Git-compatible configuration.
+    #[napi]
+    pub fn verify_signature(&self) -> Result<Option<SignatureVerifyOutcome>> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        match commit.verify_signature() {
+            Ok(Some(outcome)) => {
+                let status_str = format!("{:?}", outcome.status);
+                let is_valid = !status_str.to_lowercase().contains("invalid") && !status_str.to_lowercase().contains("fail") && !status_str.to_lowercase().contains("error");
+                Ok(Some(SignatureVerifyOutcome {
+                    is_valid,
+                    status: status_str,
+                    summary: Some(format!("{:?}", outcome)),
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Ok(Some(SignatureVerifyOutcome {
+                is_valid: false,
+                status: format!("Error: {e}"),
+                summary: None,
+            })),
+        }
+    }
 }
 
 /// A single entry of a git tree.
 #[napi(object)]
 pub struct TreeEntry {
+    pub name: String,
     pub mode: String,
     pub id: String,
 }
@@ -122,6 +218,7 @@ impl Tree {
         let mut out = Vec::new();
         for entry in &tree.entries {
             out.push(TreeEntry {
+                name: lossy(entry.filename.as_bstr()),
                 mode: mode_string(entry.mode.into()),
                 id: entry.oid.to_string(),
             });
@@ -138,6 +235,7 @@ impl Tree {
         for entry in &tree.entries {
             if entry.filename.as_bytes() == name.as_bytes() {
                 return Ok(Some(TreeEntry {
+                    name: lossy(entry.filename.as_bstr()),
                     mode: mode_string(entry.mode.into()),
                     id: entry.oid.to_string(),
                 }));
