@@ -1246,6 +1246,77 @@ impl Repository {
         Ok(out)
     }
 
+    /// Return the path to a configuration file selected by source (Local, User, System, GitInstallation, Worktree, Git).
+    #[napi]
+    pub fn config_path(&self, source: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let src = match source.to_lowercase().as_str() {
+            "local" => gix::config::Source::Local,
+            "user" => gix::config::Source::User,
+            "system" => gix::config::Source::System,
+            "gitinstallation" | "git-installation" => gix::config::Source::GitInstallation,
+            "worktree" => gix::config::Source::Worktree,
+            "git" => gix::config::Source::Git,
+            _ => return Err(err("config_path", format!("unknown config source '{source}'"))),
+        };
+        match r.config_path(src) {
+            Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Returns the upstream branch reference name on the remote for `branch_name` and `direction` (`fetch` or `push`).
+    #[napi]
+    pub fn branch_remote_ref_name(
+        &self,
+        branch_name: String,
+        direction: RemoteDirection,
+    ) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let fn_ref = gix::refs::FullName::try_from(branch_name.as_str())
+            .map_err(|e| err("branch_remote_ref_name", e))?;
+        let dir = to_remote_direction(direction);
+        match r.branch_remote_ref_name(fn_ref.as_ref(), dir) {
+            Some(Ok(full_name)) => Ok(Some(full_name.to_string())),
+            Some(Err(e)) => Err(err("branch_remote_ref_name", e)),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns the local tracking branch reference name corresponding to the remote upstream for `branch_name`.
+    #[napi]
+    pub fn branch_remote_tracking_ref_name(
+        &self,
+        branch_name: String,
+        direction: RemoteDirection,
+    ) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let fn_ref = gix::refs::FullName::try_from(branch_name.as_str())
+            .map_err(|e| err("branch_remote_tracking_ref_name", e))?;
+        let dir = to_remote_direction(direction);
+        match r.branch_remote_tracking_ref_name(fn_ref.as_ref(), dir) {
+            Some(Ok(full_name)) => Ok(Some(full_name.to_string())),
+            Some(Err(e)) => Err(err("branch_remote_tracking_ref_name", e)),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete local branches by name (`refs/heads/foo`) and remove their `branch.<name>` configuration sections.
+    #[napi]
+    pub fn delete_local_branches(&self, names: Vec<String>) -> Result<Vec<String>> {
+        let mut r = thread_local(&self.inner);
+        let mut full_names = Vec::with_capacity(names.len());
+        for name in names {
+            let full_name = gix::refs::FullName::try_from(name.as_str())
+                .map_err(|e| err("delete_local_branches", e))?;
+            full_names.push(full_name);
+        }
+        let deleted = r
+            .delete_local_branches(full_names)
+            .map_err(|e| err("delete_local_branches", e))?;
+        Ok(deleted.into_iter().map(|n| n.to_string()).collect())
+    }
+
     /// Set a configuration key to a value in local config and snapshot.
     #[napi]
     pub fn config_set(&self, key: String, value: String) -> Result<()> {
@@ -2196,6 +2267,99 @@ impl Repository {
     pub fn is_shallow(&self) -> Result<bool> {
         let r = thread_local(&self.inner);
         r.is_shallow().map_err(|e| err("is_shallow", e))
+    }
+
+    /// Return the in-progress operation state of the repository, or `null` if none is in progress.
+    #[napi]
+    pub fn state(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.state().map(|s| format!("{s:?}"))
+    }
+
+    /// Fast check to see if the working tree or index has modifications.
+    #[napi]
+    pub fn is_dirty(&self) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        r.is_dirty().map_err(|e| err("is_dirty", e))
+    }
+
+    /// Return the path to the directory containing all git objects.
+    #[napi]
+    pub fn objects_dir(&self) -> String {
+        self.inner.objects_dir().to_string_lossy().into_owned()
+    }
+
+    /// Return the path to the index file.
+    #[napi]
+    pub fn index_path(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.index_path().to_string_lossy().into_owned()
+    }
+
+    /// Return the path to the `.gitmodules` file in the worktree, if available.
+    #[napi]
+    pub fn modules_path(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.modules_path().map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Return the recorded current working directory for this repository instance.
+    #[napi]
+    pub fn current_dir(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.current_dir().to_string_lossy().into_owned()
+    }
+
+    /// Return the directory of the git binary installation.
+    #[napi]
+    pub fn install_dir(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        r.install_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| err("install_dir", e))
+    }
+
+    /// Returns the relative path between the working tree and CWD.
+    #[napi]
+    pub fn prefix(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        r.prefix()
+            .map(|opt| opt.map(|p| p.to_string_lossy().into_owned()))
+            .map_err(|e| err("prefix", e))
+    }
+
+    /// Returns whether the reference database is pristine (new and empty).
+    #[napi]
+    pub fn is_pristine(&self) -> Option<bool> {
+        let r = thread_local(&self.inner);
+        r.is_pristine()
+    }
+
+    /// Qualify a repository-relative path with the workdir path.
+    #[napi]
+    pub fn workdir_path(&self, relative_path: String) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.workdir_path(relative_path.as_str())
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Normalize a user-supplied filesystem path into a repository-relative path.
+    #[napi]
+    pub fn normalize_path(&self, path: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        r.normalize_path(path.as_str())
+            .map(|b| lossy(b.as_ref()))
+            .map_err(|e| err("normalize_path", e))
+    }
+
+    /// Forcefully set the workdir in memory and return the previous workdir path if one existed.
+    #[napi]
+    pub fn set_workdir(&self, workdir: Option<String>) -> Result<Option<String>> {
+        let mut r = thread_local(&self.inner);
+        let path = workdir.map(std::path::PathBuf::from);
+        r.set_workdir(path)
+            .map(|prev| prev.map(|p| p.to_string_lossy().into_owned()))
+            .map_err(|e| err("set_workdir", e))
     }
 
     /// Path to the `shallow` file (may not exist if not a shallow clone).

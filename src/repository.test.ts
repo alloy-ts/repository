@@ -405,6 +405,32 @@ describe("Repository worktrees (Wave 5)", () => {
     repo.reset(head, false);
     expect(repo.headId()).toBe(head);
   });
+
+  test("state(), isDirty(), objectsDir(), index_path(), and locations work as expected", () => {
+    expect(repo.state()).toBeNull();
+    expect(typeof repo.isDirty()).toBe("boolean");
+    expect(typeof repo.objectsDir()).toBe("string");
+    expect(typeof repo.indexPath()).toBe("string");
+    expect(typeof repo.currentDir()).toBe("string");
+    expect(typeof repo.installDir()).toBe("string");
+    expect(repo.isPristine() === null || typeof repo.isPristine() === "boolean").toBe(true);
+  });
+
+  test("configPath(), branchRemoteRefName(), branchRemoteTrackingRefName(), and deleteLocalBranches() work as expected", () => {
+    const localPath = repo.configPath("local");
+    expect(localPath === null || typeof localPath === "string").toBe(true);
+
+    const mainBranch = repo.branchNames().find((b) => b === "main" || b === "master") ?? "main";
+    const refName = repo.branchRemoteRefName(`refs/heads/${mainBranch}`, RemoteDirection.Fetch);
+    expect(refName === null || typeof refName === "string").toBe(true);
+
+    const trackingName = repo.branchRemoteTrackingRefName(`refs/heads/${mainBranch}`, RemoteDirection.Fetch);
+    expect(trackingName === null || typeof trackingName === "string").toBe(true);
+
+    const deleted = repo.deleteLocalBranches(["refs/heads/__nonexistent_branch_probe__"]);
+    expect(Array.isArray(deleted)).toBe(true);
+    expect(deleted.length).toBe(0);
+  });
 });
 
 // --- config / paths ---------------------------------------------------------
