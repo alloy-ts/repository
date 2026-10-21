@@ -49,8 +49,8 @@ describe("Repository commits (src/commit.rs)", () => {
     expect(Array.isArray(c.parentIds)).toBe(true);
     expect(typeof c.author().name).toBe("string");
     expect(typeof c.committer().name).toBe("string");
-    // signature() is null for unsigned commits, a string otherwise.
-    expect(c.signature() === null || typeof c.signature() === "string").toBe(true);
+    // signature is a getter (null for unsigned commits, a string otherwise).
+    expect(c.signature === null || typeof c.signature === "string").toBe(true);
   });
 
   test("writeCommit() writes a loose commit readable via findCommit", () => {

@@ -416,6 +416,27 @@ impl Repository {
         })
     }
 
+    /// Discover a repository with environment overrides.
+    #[napi]
+    pub fn discover_with_environment_overrides(path: Option<String>) -> Result<Repository> {
+        let p = path.unwrap_or_else(|| ".".to_string());
+        let r = gix::discover_with_environment_overrides(p)
+            .map_err(|e| err("discover_with_environment_overrides", e))?;
+        Ok(Repository {
+            inner: Arc::new(r.into()),
+        })
+    }
+
+    /// Open a repository with environment overrides.
+    #[napi]
+    pub fn open_with_environment_overrides(path: String) -> Result<Repository> {
+        let r = gix::open_with_environment_overrides(path)
+            .map_err(|e| err("open_with_environment_overrides", e))?;
+        Ok(Repository {
+            inner: Arc::new(r.into()),
+        })
+    }
+
     /// Discover a repository by walking up from `path` (or the current directory if omitted).
     #[napi]
     pub fn discover(path: Option<String>) -> Result<Repository> {

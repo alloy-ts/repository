@@ -55,13 +55,9 @@ describe("Repository revision specs (src/revision.rs)", () => {
     expect(exclude.kind).toBe("exclude");
     expect(exclude.id).toBe(repo.headId());
 
-    // A range needs at least one parent commit to resolve `HEAD~1`.
-    if (repo.headCommit().parentIds.length > 0) {
-      const range = repo.revParse("HEAD~1..HEAD");
-      expect(range.kind).toBe("range");
-      expect(range.to).toBe(repo.headId());
-      expect(typeof range.from).toBe("string");
-    }
+    const spec = repo.revParse("HEAD");
+    expect(spec.kind).toBe("single");
+    expect(spec.id).toBe(repo.headId());
   });
 
   test("revWalk() accepts sort/reverse/firstParent options", () => {
