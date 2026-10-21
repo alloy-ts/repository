@@ -777,3 +777,50 @@ describe("Repository reference transactions & namespace (B2)", () => {
     repo.findReference("refs/heads/__probe_b2_b__").delete();
   });
 });
+
+describe("GitCrypt integration", () => {
+  test("GitCrypt handle lifecycle, encrypt/decrypt round-trip, export/import, lock/unlock", () => {
+    const testDir = join(base, "crypt-repo");
+    const testRepo = Repository.init(testDir, false);
+    const crypt = testRepo.crypt();
+
+    expect(crypt.isInitialized()).toBe(false);
+
+    // Initializing
+    crypt.init();
+    expect(crypt.isInitialized()).toBe(true);
+
+    // Encrypt / Decrypt / isEncrypted
+    const plain = Buffer.from("super secret data 12345");
+    expect(crypt.isEncrypted(plain)).toBe(false);
+
+    const encrypted = crypt.encrypt(plain);
+    expect(Buffer.isBuffer(encrypted)).toBe(true);
+    expect(crypt.isEncrypted(encrypted)).toBe(true);
+
+    const decrypted = crypt.decrypt(encrypted);
+    expect(decrypted.toString()).toBe("super secret data 12345");
+
+    // Key export / import
+    const keyPath = join(base, "exported-repo.key");
+    crypt.exportKey(keyPath);
+
+    // Lock / Unlock
+    crypt.lock();
+    crypt.unlock(keyPath);
+
+    // Re-verify decryption after unlock
+    const decryptedAfterUnlock = crypt.decrypt(encrypted);
+    expect(decryptedAfterUnlock.toString()).toBe("super secret data 12345");
+  });
+
+  test("Feature-gated methods return appropriate error if feature disabled or stubbed", () => {
+    const testDir = join(base, "crypt-feature-repo");
+    const testRepo = Repository.init(testDir, false);
+    const crypt = testRepo.crypt();
+    crypt.init();
+
+    // GPG user lookup is stubbed / not implemented
+    expect(() => crypt.addGpgUser("some-gpg-id")).toThrow();
+  });
+});

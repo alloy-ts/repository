@@ -2241,6 +2241,14 @@ impl Repository {
             repo: self.inner.clone(),
         }))
     }
+
+    /// Access git-crypt management and encryption functions bound to this repository.
+    #[napi]
+    pub fn crypt(&self) -> crate::crypt::GitCrypt {
+        crate::crypt::GitCrypt {
+            repo: Arc::clone(&self.inner),
+        }
+    }
 }
 
 /// A single change produced by [`Repository::diff_tree_to_tree`].
