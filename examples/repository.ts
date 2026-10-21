@@ -39,7 +39,9 @@ async function main(): Promise<void> {
     const git = (args: string) => execSync(`git ${args}`, { stdio: "ignore" });
     git(`init --quiet ${JSON.stringify(cloneDir)}`);
     git(`-C ${JSON.stringify(cloneDir)} remote add origin ${JSON.stringify(realRoot)}`);
-    git(`-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+refs/heads/*:refs/remotes/origin/*"`);
+    git(
+      `-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+refs/heads/*:refs/remotes/origin/*"`,
+    );
     git(`-C ${JSON.stringify(cloneDir)} fetch --quiet origin "+${branch}:${branch}"`);
     git(`-C ${JSON.stringify(cloneDir)} symbolic-ref HEAD ${branch}`);
     repo = Repository.open(cloneDir);
@@ -123,7 +125,12 @@ async function main(): Promise<void> {
   // --- 5. remotes ------------------------------------------------------------
   console.log("\n5. remotes");
   run("remotes", () => {
-    console.log(`  remotes=${repo.remotes().map((r) => r.name).join(", ")}`);
+    console.log(
+      `  remotes=${repo
+        .remotes()
+        .map((r) => r.name)
+        .join(", ")}`,
+    );
     const origin = repo.findRemote("origin");
     console.log(`  origin url=${origin.url}`);
     console.log(`  remoteAt=${repo.remoteAt("https://example.com/owner/repo.git").url}`);
@@ -160,10 +167,18 @@ async function main(): Promise<void> {
     const blob = repo.writeBlob(Buffer.from("staged via editIndex\n"));
     const path = "staged-example.txt";
     repo.editIndex([{ path, id: blob, mode: "100644" }]);
-    const staged = Repository.open(cloneDir).index().find((e) => e.path === path);
+    const staged = Repository.open(cloneDir)
+      .index()
+      .find((e) => e.path === path);
     console.log(`  staged=${staged?.id === blob} stage=${staged?.stage}`);
     repo.editIndex(undefined, [path]);
-    console.log(`  removed=${Repository.open(cloneDir).index().find((e) => e.path === path) === undefined}`);
+    console.log(
+      `  removed=${
+        Repository.open(cloneDir)
+          .index()
+          .find((e) => e.path === path) === undefined
+      }`,
+    );
   });
   run("isDirty", () => console.log(`  isDirty=${repo.isDirty()}`));
 
