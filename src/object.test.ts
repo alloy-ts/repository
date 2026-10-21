@@ -13,15 +13,10 @@ let repo: Repository;
 beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-object-"));
   cloneDir = join(base, "clone");
-  try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
-  } catch {
-    rmSync(cloneDir, { recursive: true, force: true });
-    execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
-      stdio: "ignore",
-    });
-    repo = Repository.open(cloneDir);
-  }
+  execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
+    stdio: "ignore",
+  });
+  repo = Repository.open(cloneDir);
 });
 
 afterAll(() => {

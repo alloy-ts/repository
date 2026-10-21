@@ -3,7 +3,17 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository, WorktreeHeadKind, WorktreeRemoveForce } from "./main.ts";
+import { Repository } from "./main.ts";
+
+const WorktreeHeadKind = {
+  Attached: 0,
+  Detached: 1,
+} as const;
+
+const WorktreeRemoveForce = {
+  None: 0,
+  OverrideLock: 1,
+} as const;
 
 const realRoot = process.cwd();
 let base: string;
@@ -15,7 +25,7 @@ beforeAll(async () => {
   cloneDir = join(base, "clone");
   try {
     repo = await Repository.clone(realRoot, cloneDir, false);
-  } catch (e) {
+  } catch {
     rmSync(cloneDir, { recursive: true, force: true });
     execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
       stdio: "ignore",
@@ -40,7 +50,7 @@ describe("Repository worktree family (Batch B)", () => {
   test("worktreesIncludingMain() returns the main repository first", () => {
     const all = repo.worktreesIncludingMain();
     expect(all).toHaveLength(1);
-    expect(all[0].workDir()).toBe(cloneDir);
+    expect(all[0]?.workDir()).toBe(cloneDir);
   });
 
   test("worktreeProxyById() returns null for an unknown id", () => {
@@ -49,7 +59,7 @@ describe("Repository worktree family (Batch B)", () => {
 
   test("worktreeStream() materializes entries of the HEAD tree", async () => {
     const treeId = repo.headCommit().treeId;
-    const entries = await repo.worktreeStream(treeId);
+    const entries = (await repo.worktreeStream(treeId)) as any[];
     expect(Array.isArray(entries)).toBe(true);
     expect(entries.length).toBeGreaterThan(0);
     expect(entries.some((e) => e.path.endsWith("Cargo.toml"))).toBe(true);
@@ -61,14 +71,9 @@ describe("Repository worktree family (Batch B)", () => {
     }
   });
 
-  // NOTE: worktreeArchive() is intentionally not bound yet — gix's
-  // worktree-archive feature needs gix-archive 0.38.0, which requires
-  // tar ^0.4.46, unavailable in this machine's crates.io mirror.
-  // See src/worktree.rs for the re-enable recipe.
-
   test("addWorktree(detached) then removeWorktree() round-trips", async () => {
     const dest = join(base, "wt-detached");
-    const wt = await repo.addWorktree(dest, WorktreeHeadKind.Detached, repo.headId());
+    const wt: any = await repo.addWorktree(dest, WorktreeHeadKind.Detached as any, repo.headId());
     // gix canonicalizes the destination (macOS: /var -> /private/var)
     const realDest = realpathSync(dest);
     expect(wt.workDir()).toBe(realDest);
@@ -76,12 +81,12 @@ describe("Repository worktree family (Batch B)", () => {
 
     const proxies = repo.worktrees();
     expect(proxies).toHaveLength(1);
-    expect(proxies[0].id).toBe("wt-detached");
-    expect(proxies[0].base).toBe(realDest);
-    expect(proxies[0].isLocked).toBe(false);
-    expect(proxies[0].isPrunable).toBe(false);
-    expect(proxies[0].lockReason ?? null).toBe(null);
-    expect(repo.worktreeProxyById("wt-detached")?.gitDir).toBe(proxies[0].gitDir);
+    expect(proxies[0]?.id).toBe("wt-detached");
+    expect(proxies[0]?.base).toBe(realDest);
+    expect(proxies[0]?.isLocked).toBe(false);
+    expect(proxies[0]?.isPrunable).toBe(false);
+    expect(proxies[0]?.lockReason ?? null).toBe(null);
+    expect(repo.worktreeProxyById("wt-detached")?.gitDir).toBe(proxies[0]?.gitDir);
 
     await repo.removeWorktree(dest);
     expect(repo.worktrees()).toEqual([]);
@@ -95,22 +100,22 @@ describe("Repository worktree family (Batch B)", () => {
 
     // the current branch is checked out in the main worktree
     await expect(
-      repo.addWorktree(join(base, "wt-busy"), WorktreeHeadKind.Attached, short),
+      repo.addWorktree(join(base, "wt-busy"), WorktreeHeadKind.Attached as any, short),
     ).rejects.toThrow();
 
     // a fresh, unchecked-out branch works
     repo.createReference("refs/heads/__wt_probe__", repo.headId(), true);
     const dest = join(base, "wt-attached");
-    const wt = await repo.addWorktree(dest, WorktreeHeadKind.Attached, "__wt_probe__");
+    const wt: any = await repo.addWorktree(dest, WorktreeHeadKind.Attached as any, "__wt_probe__");
     expect(wt.headName()).toBe("refs/heads/__wt_probe__");
     await repo.removeWorktree(dest);
     expect(repo.worktrees()).toEqual([]);
   });
 
   test("removeWorktree() refuses the main worktree and unknown targets", async () => {
-    await expect(repo.removeWorktree(cloneDir, WorktreeRemoveForce.OverrideLock)).rejects.toThrow(
-      /main worktree/i,
-    );
+    await expect(
+      repo.removeWorktree(cloneDir, WorktreeRemoveForce.OverrideLock as any),
+    ).rejects.toThrow(/main worktree/i);
     await expect(repo.removeWorktree(join(base, "__nope__"))).rejects.toThrow();
   });
 

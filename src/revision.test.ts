@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
@@ -9,6 +9,10 @@ const realRoot = process.cwd();
 let base: string;
 let cloneDir: string;
 let repo: Repository;
+
+function git(args: string, cwd: string) {
+  execSync(`git ${args}`, { cwd, stdio: "ignore" });
+}
 
 beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-revision-"));
@@ -22,6 +26,15 @@ beforeAll(async () => {
     });
     repo = Repository.open(cloneDir);
   }
+  // Create a second commit so HEAD~1 is guaranteed to resolve.
+  writeFileSync(join(cloneDir, "revision_test_file.txt"), "revision test\n");
+  git("add -A", cloneDir);
+  git("config commit.gpgsign false", cloneDir);
+  git(
+    '-c user.email=test@example.com -c user.name=Test commit -m "second commit for revision testing"',
+    cloneDir,
+  );
+  repo = Repository.open(cloneDir);
 });
 
 afterAll(() => {
@@ -83,7 +96,10 @@ describe("Repository revision specs (src/revision.rs)", () => {
 
     // 2. Inspect tree and retrieve file entry
     const tree = repo.findTree(commit.treeId);
-    const entry = tree.entry("ReadMe.md") ?? tree.entry("repository.manifest.yml");
+    const entry =
+      tree.entry("ReadMe.md") ??
+      tree.entry("repository.manifest.yml") ??
+      tree.entry("revision_test_file.txt");
 
     expect(entry).not.toBeNull();
     if (entry) {

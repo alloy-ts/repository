@@ -7,8 +7,7 @@ import { Repository } from "./main.ts";
 
 let fixture: string;
 let repo: Repository;
-// A shared base commit with two divergent branches (clean merge), plus a
-// conflicting pair that both edit the same line of `base.txt`.
+
 let baseId: string;
 let mainTip: string;
 let featureTip: string;
@@ -41,21 +40,17 @@ beforeAll(() => {
   git("config user.name Test");
   git("config commit.gpgsign false");
 
-  // Shared ancestor.
   commitFile("base.txt", "line1\nline2\nline3\n", "base");
   baseId = rev("HEAD");
 
-  // main: add a new file (no overlap with feature).
   commitFile("main-only.txt", "from main\n", "main change");
   mainTip = rev("HEAD");
 
-  // feature branches off the shared base and adds its own file.
   git(`checkout -b feature ${baseId}`);
   commitFile("feature-only.txt", "from feature\n", "feature change");
   featureTip = rev("HEAD");
   git("checkout main");
 
-  // Conflicting pair: both edit line2 of base.txt differently.
   git(`checkout -b conflict-main ${baseId}`);
   commitFile("base.txt", "line1\nMAIN\nline3\n", "conflict main edit");
   conflictMain = rev("HEAD");
@@ -87,9 +82,7 @@ describe("Repository merge (src/merge.rs)", () => {
 
   test("mergeBase() finds the shared ancestor of two divergent commits", () => {
     expect(repo.mergeBase(mainTip, featureTip)).toBe(baseId);
-    // symmetric
     expect(repo.mergeBase(featureTip, mainTip)).toBe(baseId);
-    // a commit and itself is its own merge base
     expect(repo.mergeBase(mainTip, mainTip)).toBe(mainTip);
   });
 
@@ -112,7 +105,6 @@ describe("Repository merge (src/merge.rs)", () => {
     expect(outcome.conflicts).toBe(false);
     expect(outcome.treeId).toMatch(/^[0-9a-f]{40}$/);
 
-    // The merged tree carries both sides' files plus the untouched base file.
     const tree = repo.findTree(outcome.treeId);
     expect(tree.entry("base.txt")).not.toBeNull();
     expect(tree.entry("main-only.txt")).not.toBeNull();
@@ -155,11 +147,11 @@ describe("Repository merge (src/merge.rs)", () => {
 
   test("mergeBaseWithGraph / mergeBasesMany agree with mergeBase", () => {
     const head = repo.headCommit();
-    if (head.parentIds.length > 0 && repo.objectExists(head.parentIds[0])) {
-      const parent = head.parentIds[0];
-      expect(repo.mergeBaseWithGraph(head.id, parent)).toBe(parent);
-      expect(repo.mergeBasesMany(head.id, [parent])).toContain(parent);
-      expect(repo.mergeBasesManyWithGraph(head.id, [parent])).toContain(parent);
+    const p = head.parentIds[0];
+    if (p && repo.objectExists(p)) {
+      expect(repo.mergeBaseWithGraph(head.id, p)).toBe(p);
+      expect(repo.mergeBasesMany(head.id, [p])).toContain(p);
+      expect(repo.mergeBasesManyWithGraph(head.id, [p])).toContain(p);
     }
   });
 
@@ -177,17 +169,16 @@ describe("Repository merge (src/merge.rs)", () => {
 
   test("virtualMergeBase(WithGraph) on a commit and its parent", () => {
     const head = repo.headCommit();
-    if (head.parentIds.length > 0 && repo.objectExists(head.parentIds[0])) {
-      const parent = head.parentIds[0];
-      const outcome = repo.virtualMergeBase([head.id, parent]);
-      // The last virtual base is the commit returned as `commitId`.
+    const p = head.parentIds[0];
+    if (p && repo.objectExists(p)) {
+      const outcome = repo.virtualMergeBase([head.id, p]);
       expect(outcome.virtualMergeBases.length).toBeGreaterThanOrEqual(1);
       expect(outcome.virtualMergeBases[outcome.virtualMergeBases.length - 1]).toBe(
         outcome.commitId,
       );
       expect(outcome.commitId).toMatch(/^[0-9a-f]{40}$/);
       expect(outcome.treeId).toMatch(/^[0-9a-f]{40}$/);
-      const viaGraph = repo.virtualMergeBaseWithGraph([head.id, parent]);
+      const viaGraph = repo.virtualMergeBaseWithGraph([head.id, p]);
       expect(viaGraph.commitId).toBe(outcome.commitId);
       expect(viaGraph.treeId).toBe(outcome.treeId);
     }
@@ -207,11 +198,11 @@ describe("Repository merge (src/merge.rs)", () => {
   test("mergeBase / mergeBaseOctopus", () => {
     const head = repo.revParseSingle("HEAD");
     const commit = repo.headCommit();
-    if (commit.parentIds.length > 0 && repo.objectExists(commit.parentIds[0])) {
-      const parent = commit.parentIds[0];
+    const p = commit.parentIds[0];
+    if (p && repo.objectExists(p)) {
       expect(repo.mergeBase(head, head)).toBe(head);
-      expect(repo.mergeBase(head, parent)).toBe(parent);
-      expect(repo.mergeBaseOctopus([head, parent])).toBe(parent);
+      expect(repo.mergeBase(head, p)).toBe(p);
+      expect(repo.mergeBaseOctopus([head, p])).toBe(p);
     } else {
       expect(repo.mergeBase(head, head)).toBe(head);
       expect(repo.mergeBaseOctopus([head])).toBe(head);

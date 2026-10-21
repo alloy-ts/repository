@@ -1,28 +1,41 @@
-# Starter Template
+# repository
 
-Starter Template for Rust + TypeScript via NAPI-RS, Node-API (N-API) bindings.
+High-performance Node.js (Node-API / NAPI-RS) bindings for the Rust [`gitoxide`](https://github.com/GitoxideLabs/gitoxide) (`gix`) crate.
 
-## Getting Started
+`repository` exposes `gix::Repository` capabilities to JavaScript and TypeScript, providing safe, high-speed Git operations with modern async support and full type definitions.
 
-1. Clone the repository
-2. Install dependencies
-3. Run the application
+## Key Features
+
+- **Repository Lifecycle**: `open()`, `openOpts()`, `init()`, `discover()`, and `clone()`.
+- **References & Head**: Query and mutate HEAD, branches, tags, and custom references; atomic ref transactions via `editReference()`.
+- **Objects & History**: Read and write blobs, trees, commits, annotated tags; rev-parse and rev-walk revision traversal.
+- **Diff & Merge**: Tree-to-tree diffing, 3-way commit/tree merges, virtual merge bases, and file blaming.
+- **Worktree & Index**: Status inspection, checkout, worktree proxy management, and streaming worktree archives.
+- **Configuration & Trust**: Query and update global/repository git config, trust security mapping, and ref namespaces.
+- **Filters & Attributes**: Content filter pipeline (`convert_to_git` / `convert_to_worktree`), pathspec matching, and `.gitattributes` inspection.
+- **Submodules & Extensions**: Submodule configuration, mailmap identity resolution, and git notes.
+
+## Installation & Build
+
+Ensure you have Node.js and Rust installed on your machine.
 
 ```bash
-git clone https://repo.chen.software/yumin-chen/repository.git
-cd starter-template
+# Install dependencies
 npm install
-npm run start
+
+# Build native NAPI bindings and TypeScript definitions
+npm run build
+
+# Run test suite
+npm test
 ```
 
-## Running the application
+## Documentation
 
-```bash
-npm run start
-```
+For full API reference, method signatures, domain organization, and comparison against Rust `gix::Repository`, see:
 
-## Testing the application
+- [Repository API Documentation](docs/api/repository.md)
 
-```bash
-npm run test
-```
+## License
+
+[Unlicense](Licence)

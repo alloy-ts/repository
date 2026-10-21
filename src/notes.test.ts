@@ -46,14 +46,14 @@ describe("Repository notes (src/notes.rs)", () => {
 
     const notes = repo.notesFor(target);
     expect(notes).toHaveLength(1);
-    expect(notes[0].reference).toBe("refs/notes/commits");
-    expect(notes[0].content).toBe("review: looks good");
-    expect(notes[0].blobId).toMatch(/^[0-9a-f]{40}$/);
+    expect(notes[0]?.reference).toBe("refs/notes/commits");
+    expect(notes[0]?.content).toBe("review: looks good");
+    expect(notes[0]?.blobId).toMatch(/^[0-9a-f]{40}$/);
 
     // replace it; previous id is returned
     const replaced = repo.setNote("commits", target, "review: approved");
     expect(replaced).toMatch(/^[0-9a-f]{40}$/);
-    expect(repo.notesFor(target)[0].content).toBe("review: approved");
+    expect(repo.notesFor(target)[0]?.content).toBe("review: approved");
 
     // remove it
     const removed = repo.removeNote("commits", target);
@@ -72,8 +72,8 @@ describe("Repository notes (src/notes.rs)", () => {
     // ...but notes_in can target it explicitly
     const notes = repo.notesIn(["refs/notes/review"], target);
     expect(notes).toHaveLength(1);
-    expect(notes[0].reference).toBe("refs/notes/review");
-    expect(notes[0].content).toBe("flagged");
+    expect(notes[0]?.reference).toBe("refs/notes/review");
+    expect(notes[0]?.content).toBe("flagged");
     repo.removeNote("refs/notes/review", target);
     expect(repo.notesIn(["refs/notes/review"], target)).toEqual([]);
   });

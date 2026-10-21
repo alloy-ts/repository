@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { RemoteDirection, Repository } from "./main.ts";
+import { Repository } from "./main.ts";
+
+const RemoteDirection = {
+  Fetch: 0,
+  Push: 1,
+} as const;
 
 const realRoot = process.cwd();
 let base: string;
@@ -78,7 +83,7 @@ describe("Repository remotes (src/remote.rs)", () => {
   });
 
   test("findDefaultRemote() returns the configured fetch remote", () => {
-    const r = repo.findDefaultRemote(RemoteDirection.Fetch);
+    const r = repo.findDefaultRemote(RemoteDirection.Fetch as any);
     expect(r).not.toBe(null);
     expect(typeof r?.name).toBe("string");
   });
@@ -98,7 +103,7 @@ describe("Repository remotes (src/remote.rs)", () => {
 
   test("remoteDefaultName() resolves the configured branch remote", () => {
     // branch.main.remote → origin
-    expect(repo.remoteDefaultName(RemoteDirection.Fetch)).toBe("origin");
-    expect(repo.remoteDefaultName(RemoteDirection.Push)).toBe("origin");
+    expect(repo.remoteDefaultName(RemoteDirection.Fetch as any)).toBe("origin");
+    expect(repo.remoteDefaultName(RemoteDirection.Push as any)).toBe("origin");
   });
 });

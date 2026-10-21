@@ -1,6 +1,7 @@
 mod branch;
 mod commit;
 mod config;
+mod diff;
 mod dirwalk;
 mod error;
 mod filter;

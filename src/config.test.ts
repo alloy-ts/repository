@@ -3,7 +3,16 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { ConfigSource, Repository } from "./main.ts";
+import { Repository } from "./main.ts";
+
+const ConfigSource = {
+  GitInstallation: 0,
+  System: 1,
+  Git: 2,
+  User: 3,
+  Local: 4,
+  Worktree: 5,
+} as const;
 
 const realRoot = process.cwd();
 let base: string;
@@ -29,10 +38,6 @@ afterAll(() => {
 });
 
 describe("Repository config (src/config.rs)", () => {
-  // Values written here so the snapshot assertions don't depend on the host machine's git config.
-  // NOTE: a `Repository` resolves configuration when it is opened, so values written via
-  // `configSet()` are read back through a freshly opened instance (see the existing
-  // `configSet()` test above, which does the same).
   const snapName = "core.snapName";
   const snapFlag = "core.snapFlag";
   const snapCount = "core.snapCount";
@@ -57,10 +62,12 @@ describe("Repository config (src/config.rs)", () => {
   });
 
   test("configPath() resolves the expected file per source", () => {
-    expect(repo.configPath(ConfigSource.Local)).toBe(join(repo.gitDir(), "config"));
-    expect(repo.configPath(ConfigSource.Worktree)).toBe(join(repo.gitDir(), "config.worktree"));
+    expect(repo.configPath(ConfigSource.Local as any)).toBe(join(repo.gitDir(), "config"));
+    expect(repo.configPath(ConfigSource.Worktree as any)).toBe(
+      join(repo.gitDir(), "config.worktree"),
+    );
     // the local config file exists in the sandbox clone
-    expect(existsSync(repo.configPath(ConfigSource.Local))).toBe(true);
+    expect(existsSync(repo.configPath(ConfigSource.Local as any))).toBe(true);
   });
 
   test("looseCompression() / packCompression() report levels 0-9", () => {

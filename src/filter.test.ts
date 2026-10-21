@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
@@ -14,15 +14,11 @@ let pipeline: FilterPipeline;
 beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-filter-"));
   cloneDir = join(base, "clone");
-  try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
-  } catch {
-    rmSync(cloneDir, { recursive: true, force: true });
-    execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
-      stdio: "ignore",
-    });
-    repo = Repository.open(cloneDir);
-  }
+  execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
+    stdio: "ignore",
+  });
+  repo = Repository.open(cloneDir);
+  writeFileSync(join(cloneDir, "filter_sample.txt"), "sample file for filter test\n");
   pipeline = new FilterPipeline(repo);
 });
 
@@ -48,7 +44,7 @@ describe("Repository filter pipeline (src/filter.rs)", () => {
   });
 
   test("worktreeFileToObject() records a real file with an id and kind", () => {
-    const result = pipeline.worktreeFileToObject("README.md");
+    const result = pipeline.worktreeFileToObject("filter_sample.txt");
     expect(result).not.toBe(null);
     expect(result!.id).toMatch(/^[0-9a-f]{40}$/);
     expect(result!.isFile).toBe(true);

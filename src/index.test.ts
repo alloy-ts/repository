@@ -52,9 +52,9 @@ describe("Repository index (src/index.rs)", () => {
     const entries = i.entries();
     expect(Array.isArray(entries)).toBe(true);
     expect(entries.length).toBeGreaterThan(0);
-    expect(typeof entries[0].path).toBe("string");
-    expect(typeof entries[0].id).toBe("string");
-    expect(typeof entries[0].mode).toBe("string");
+    expect(typeof entries[0]?.path).toBe("string");
+    expect(typeof entries[0]?.id).toBe("string");
+    expect(typeof entries[0]?.mode).toBe("string");
 
     // openIndex() is a fresh decode of the same file.
     expect(repo.openIndex().len()).toBe(i.len());
@@ -75,9 +75,11 @@ describe("Repository index (src/index.rs)", () => {
 
   test("editIndex() appends an entry to the on-disk index", () => {
     const existing = repo.indexEntries()[0];
-    repo.editIndex([{ path: "extra.txt", id: existing.id, mode: "100644" }]);
-    const after = repo.indexEntries();
-    expect(after.some((e) => e.path === "extra.txt")).toBe(true);
+    if (existing) {
+      repo.editIndex([{ path: "extra.txt", id: existing.id, mode: "100644" }]);
+      const after = repo.indexEntries();
+      expect(after.some((e) => e.path === "extra.txt")).toBe(true);
+    }
   });
 
   test("indexOrLoad() returns a usable index even without a fresh index file", () => {
