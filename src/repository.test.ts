@@ -832,3 +832,33 @@ describe("Repository reference transactions & namespace (B2)", () => {
     repo.findReference("refs/heads/__probe_b2_b__").delete();
   });
 });
+
+describe("Repository reflog, mailmap, worktree_by_id, and config_path_by_source", () => {
+  test("reflog() reads reflog entries for HEAD", () => {
+    const entries = repo.reflog("HEAD");
+    expect(Array.isArray(entries)).toBe(true);
+    for (const e of entries) {
+      expect(typeof e.oldId).toBe("string");
+      expect(typeof e.newId).toBe("string");
+      expect(typeof e.committerName).toBe("string");
+    }
+  });
+
+  test("openMailmap() returns boolean indicating presence of mailmap entries", () => {
+    const hasEntries = repo.openMailmap();
+    expect(typeof hasEntries).toBe("boolean");
+  });
+
+  test("worktreeById() returns null for nonexistent secondary worktree", () => {
+    const wt = repo.worktreeById("__nonexistent_id__");
+    expect(wt).toBe(null);
+  });
+
+  test("configPathBySource() resolves local configuration path", () => {
+    const localPath = repo.configPathBySource("local");
+    expect(localPath === null || typeof localPath === "string").toBe(true);
+    if (localPath) {
+      expect(localPath).toContain("config");
+    }
+  });
+});

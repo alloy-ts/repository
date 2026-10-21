@@ -355,6 +355,25 @@ pub struct SubmoduleInfo {
     pub url: Option<String>,
 }
 
+/// A reflog entry recording a change to a reference.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ReflogEntry {
+    pub old_id: String,
+    pub new_id: String,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub time: i64,
+    pub message: String,
+}
+
+/// Result of verifying the repository object database.
+#[derive(Clone)]
+#[napi(object)]
+pub struct OdbVerifyOutcome {
+    pub valid_objects: f64,
+}
+
 /// A git note attached to an object.
 #[derive(Clone)]
 #[napi(object)]
@@ -2451,6 +2470,62 @@ impl Repository {
         Ok(AsyncTask::new(StatusTask {
             repo: self.inner.clone(),
         }))
+    }
+
+    /// Read reflog entries for a reference (e.g. `HEAD` or `refs/heads/main`).
+    #[napi]
+    pub fn reflog(&self, name: String) -> Result<Vec<ReflogEntry>> {
+        let r = thread_local(&self.inner);
+        let reference = r
+            .find_reference(name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let mut stream = reference.log_iter();
+        let mut out = Vec::new();
+        if let Some(lines) = stream.all().map_err(|e| err("reflog_read", e))? {
+            for line in lines {
+                if let Ok(line) = line {
+                    out.push(ReflogEntry {
+                        old_id: line.previous_oid.to_string(),
+                        new_id: line.new_oid.to_string(),
+                        committer_name: lossy(line.signature.name.as_bstr().as_ref()),
+                        committer_email: lossy(line.signature.email.as_bstr().as_ref()),
+                        time: line.signature.time.parse::<i64>().unwrap_or(0),
+                        message: lossy(line.message.as_bstr().as_ref()),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Open and load `.mailmap` file if configured or present in repository.
+    #[napi]
+    pub fn open_mailmap(&self) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let mailmap = r.open_mailmap();
+        Ok(!mailmap.entries().is_empty())
+    }
+
+    /// Retrieve a secondary worktree by ID.
+    #[napi]
+    pub fn worktree_by_id(&self, id: String) -> Result<Option<WorktreeProxy>> {
+        let worktrees = self.worktrees()?;
+        Ok(worktrees.into_iter().find(|w| w.id == id))
+    }
+
+    /// Resolve absolute configuration file path for a given configuration source (`system`, `git`, `user`, `local`).
+    #[napi]
+    pub fn config_path_by_source(&self, source: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let src = match source.to_lowercase().as_str() {
+            "system" => gix::config::Source::System,
+            "git" => gix::config::Source::Git,
+            "user" => gix::config::Source::User,
+            "local" => gix::config::Source::Local,
+            "worktree" => gix::config::Source::Worktree,
+            _ => return Err(err("config_path", format!("invalid source {source}"))),
+        };
+        Ok(r.config_path(src).ok().map(|p| p.to_string_lossy().into_owned()))
     }
 }
 
