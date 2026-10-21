@@ -281,6 +281,8 @@ describe("Repository remotes", () => {
       const o = repo.findRemote("origin");
       expect(o.name).toBe("origin");
       expect(typeof o.url).toBe("string");
+      expect(Array.isArray(o.urls())).toBe(true);
+      expect(Array.isArray(o.refspecs())).toBe(true);
     } else {
       console.log("clone has no 'origin' remote; skipping findRemote(...)");
     }
@@ -288,6 +290,15 @@ describe("Repository remotes", () => {
 
   test("findRemote throws on a missing remote", () => {
     expect(() => repo.findRemote("__nope__")).toThrow();
+  });
+
+  test("remoteAt / saveAs creates and saves a named remote", () => {
+    const r = repo.remoteAt("https://example.com/acme/repo.git");
+    expect(r.getUrl()).toBe("https://example.com/acme/repo.git");
+    r.saveAs("custom-remote");
+    expect(Repository.open(cloneDir).findRemote("custom-remote").getUrl()).toBe(
+      "https://example.com/acme/repo.git",
+    );
   });
 });
 
@@ -632,7 +643,7 @@ describe("Repository checkout / reset / merge / defaultRemote", () => {
     }
   });
 
-  test("reset rejects an unknown mode", async () => {
-    await expect(repo.reset(repo.headId(), "bogus")).rejects.toThrow();
+  test("reset rejects an unknown mode", () => {
+    expect(() => repo.reset(repo.headId(), "bogus")).toThrow();
   });
 });

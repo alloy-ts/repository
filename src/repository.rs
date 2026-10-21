@@ -375,9 +375,6 @@ impl Task for CheckoutTask {
     type JsValue = ();
 
     fn compute(&mut self) -> Result<()> {
-        if !matches!(self.mode.as_str(), "soft" | "mixed" | "hard") {
-            return Err(err("reset", "mode must be one of soft | mixed | hard"));
-        }
         let r = thread_local(&self.inner);
         let tree_id = match &self.id {
             Some(id) => {
@@ -790,6 +787,9 @@ impl Repository {
     #[napi]
     pub fn reset(&self, id: String, mode: String) -> Result<AsyncTask<ResetTask>> {
         let mode = mode.to_lowercase();
+        if !matches!(mode.as_str(), "soft" | "mixed" | "hard") {
+            return Err(err("reset", "mode must be one of soft | mixed | hard"));
+        }
         Ok(AsyncTask::new(ResetTask {
             inner: Arc::clone(&self.inner),
             id,
@@ -1117,7 +1117,8 @@ impl Repository {
     /// Look up a single named remote.
     #[napi]
     pub fn find_remote(&self, name: String) -> Result<Remote> {
-        let r = thread_local(&self.inner);
+        let mut r = thread_local(&self.inner);
+        let _ = r.reload();
         let remote = r
             .find_remote(name.as_str())
             .map_err(|e| err("find_remote", e))?;
