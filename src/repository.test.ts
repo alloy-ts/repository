@@ -3,7 +3,19 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository, type Tree, type TreeEntry } from "./main.ts";
+import {
+  Repository,
+  cryptConfigureFilters,
+  cryptExportKey,
+  cryptImportKey,
+  cryptInit,
+  cryptIsInitialized,
+  cryptLock,
+  cryptRemoveFilters,
+  cryptUnlock,
+  type Tree,
+  type TreeEntry,
+} from "./main.ts";
 
 const realRoot = process.cwd();
 let base: string;
@@ -564,7 +576,11 @@ describe("Repository reference transactions & namespace (B2)", () => {
     expect(repo.namespace()).toBe("feature-x");
 
     // Restore the previous namespace (if any).
-    if (prev !== null) repo.setNamespace(prev);
+    if (prev !== null) {
+      repo.setNamespace(prev);
+    } else {
+      repo.clearNamespace();
+    }
   });
 
   test("editReference() creates a reference pointing at HEAD", () => {
@@ -651,5 +667,29 @@ describe("Objects, ODB, Caches & Ref Extensions", () => {
     );
     expect(editRes).toContain("refs/heads/__probe_edit_as__");
     repo.findReference("refs/heads/__probe_edit_as__").delete();
+  });
+});
+
+describe("git-crypt NAPI functions", () => {
+  test("cryptInit, cryptIsInitialized, export/import key, lock and unlock", () => {
+    const testDir = join(base, "crypt-test-repo");
+    const r = Repository.init(testDir, false);
+
+    expect(cryptIsInitialized(testDir)).toBe(false);
+    cryptInit(testDir);
+    expect(cryptIsInitialized(testDir)).toBe(true);
+
+    const exportedKeyPath = join(base, "exported.key");
+    cryptExportKey(exportedKeyPath, testDir);
+
+    const importedRepoDir = join(base, "crypt-import-repo");
+    const r2 = Repository.init(importedRepoDir, false);
+    cryptInit(importedRepoDir);
+    cryptImportKey(exportedKeyPath, importedRepoDir);
+
+    cryptLock(testDir);
+    cryptUnlock(undefined, testDir);
+    cryptRemoveFilters(testDir);
+    cryptConfigureFilters(testDir);
   });
 });

@@ -494,21 +494,21 @@ impl Repository {
     /// The repository `HEAD`.
     #[napi]
     pub fn head(&self) -> Result<Head> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         build_head(&self.inner, r.head().map_err(|e| err("head", e))?)
     }
 
     /// The commit `HEAD` points to.
     #[napi]
     pub fn head_commit(&self) -> Result<Commit> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         build_commit(&self.inner, r.head_commit().map_err(|e| err("head_commit", e))?)
     }
 
     /// The object id `HEAD` points to.
     #[napi]
     pub fn head_id(&self) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let id = r.head_id().map_err(|e| err("head_id", e))?;
         Ok(id.to_string())
     }
@@ -516,14 +516,14 @@ impl Repository {
     /// The symbolic referent name of `HEAD`, if it is not detached.
     #[napi]
     pub fn head_name(&self) -> Result<Option<String>> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         Ok(r.head_name().map_err(|e| err("head_name", e))?.map(|n| n.to_string()))
     }
 
     /// The object id of the root tree pointed to by HEAD.
     #[napi]
     pub fn head_tree_id(&self) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
         Ok(id.to_string())
     }
@@ -531,7 +531,7 @@ impl Repository {
     /// The reference HEAD points to, or null if HEAD is detached or unborn.
     #[napi]
     pub fn head_ref(&self) -> Result<Option<Reference>> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         match r.head_ref().map_err(|e| err("head_ref", e))? {
             Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
             None => Ok(None),
@@ -541,7 +541,7 @@ impl Repository {
     /// The root tree object HEAD points to.
     #[napi]
     pub fn head_tree(&self) -> Result<Tree> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let tree = r.head_tree().map_err(|e| err("head_tree", e))?;
         build_tree(&self.inner, tree.id)
     }
@@ -549,7 +549,7 @@ impl Repository {
     /// Set HEAD to point to a commit ID.
     #[napi]
     pub fn set_head(&self, target: String) -> Result<()> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let oid = parse_oid(&target)?;
         let label = format!("set_head {target}");
         r.reference("HEAD", oid, gix::refs::transaction::PreviousValue::Any, label)
@@ -560,7 +560,7 @@ impl Repository {
     /// Find and decode a commit by id.
     #[napi]
     pub fn find_commit(&self, id: String) -> Result<Commit> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let commit = r
             .find_commit(parse_oid(&id)?)
             .map_err(|e| err("find_commit", e))?;
@@ -570,7 +570,7 @@ impl Repository {
     /// Find and decode a tree by id.
     #[napi]
     pub fn find_tree(&self, id: String) -> Result<Tree> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let tree = r
             .find_tree(parse_oid(&id)?)
             .map_err(|e| err("find_tree", e))?;
@@ -587,7 +587,7 @@ impl Repository {
     /// Find and decode a tag by id.
     #[napi]
     pub fn find_tag(&self, id: String) -> Result<Tag> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let tag = r.find_tag(parse_oid(&id)?).map_err(|e| err("find_tag", e))?;
         build_tag(&self.inner, tag)
     }
@@ -595,7 +595,7 @@ impl Repository {
     /// Find an object of any kind, returning a wrapper with `as_commit()` / `as_tree()` / etc.
     #[napi]
     pub fn find_object(&self, id: String) -> Result<GitObject> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let object = r
             .find_object(parse_oid(&id)?)
             .map_err(|e| err("find_object", e))?;
@@ -605,7 +605,7 @@ impl Repository {
     /// Whether an object with the given id exists.
     #[napi]
     pub fn object_exists(&self, id: String) -> bool {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         match parse_oid(&id) {
             Ok(oid) => r.has_object(oid),
             Err(_) => false,
@@ -615,7 +615,7 @@ impl Repository {
     /// Write raw bytes as a blob and return its id.
     #[napi]
     pub fn write_blob(&self, data: napi::bindgen_prelude::Buffer) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let id = r
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
@@ -625,7 +625,7 @@ impl Repository {
     /// Write a blob from raw bytes or stream buffer.
     #[napi]
     pub fn write_blob_stream(&self, data: napi::bindgen_prelude::Buffer) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let id = r
             .write_blob_stream(std::io::Cursor::new(data.to_vec()))
             .map_err(|e| err("write_blob_stream", e))?;
@@ -635,7 +635,7 @@ impl Repository {
     /// Write an object of specified kind ("commit", "tree", "blob", "tag") and raw buffer data into the object database.
     #[napi]
     pub fn write_object(&self, kind: String, data: napi::bindgen_prelude::Buffer) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let gix_kind = match kind.to_lowercase().as_str() {
             "commit" => gix::objs::Kind::Commit,
             "tree" => gix::objs::Kind::Tree,
@@ -672,21 +672,21 @@ impl Repository {
     /// The object ID of the empty tree for this repository's object hash.
     #[napi]
     pub fn empty_tree(&self) -> String {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         r.empty_tree().id().to_string()
     }
 
     /// The object ID of the empty blob for this repository's object hash.
     #[napi]
     pub fn empty_blob(&self) -> String {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         r.empty_blob().id.to_string()
     }
 
     /// Find an object's header (kind and size) without fully decoding it.
     #[napi]
     pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let oid = parse_oid(&id)?;
         let header = r.find_header(oid).map_err(|e| err("find_header", e))?;
         let kind = format!("{:?}", header.kind()).to_lowercase();
@@ -699,7 +699,7 @@ impl Repository {
     /// Try to find an object's header (kind and size), returning null if missing instead of throwing.
     #[napi]
     pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let oid = match parse_oid(&id) {
             Ok(o) => o,
             Err(_) => return Ok(None),
@@ -719,21 +719,21 @@ impl Repository {
     /// Configure the object cache size in bytes (or null to disable).
     #[napi]
     pub fn object_cache_size(&self, bytes: Option<f64>) {
-        let mut r = thread_local(&self.inner);
+        let mut r = self.repo();
         r.object_cache_size(bytes.map(|b| b as usize));
     }
 
     /// Set object cache size in bytes if none is currently set.
     #[napi]
     pub fn object_cache_size_if_unset(&self, bytes: f64) {
-        let mut r = thread_local(&self.inner);
+        let mut r = self.repo();
         r.object_cache_size_if_unset(bytes as usize);
     }
 
     /// Compute recommended object cache size for tree diffing based on index entries.
     #[napi]
     pub fn compute_object_cache_size_for_tree_diffs(&self) -> Result<f64> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let index = r
             .index_or_load_from_head_or_empty()
             .map_err(|e| err("index", e))?;
@@ -743,7 +743,7 @@ impl Repository {
     /// Write a loose commit object directly to the object database without moving references.
     #[napi]
     pub fn write_commit(&self, input: CommitInput) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let tree = parse_oid(&input.tree)?;
         let parents = input
             .parents
@@ -784,7 +784,7 @@ impl Repository {
     /// Write an annotated tag object directly to the object database.
     #[napi]
     pub fn write_tag(&self, input: TagInput) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let target = parse_oid(&input.target)?;
         let target_kind = match input.target_kind.to_lowercase().as_str() {
             "commit" => gix::objs::Kind::Commit,
@@ -816,7 +816,7 @@ impl Repository {
     /// Peel an object to a target object kind (`commit`, `tree`, `blob`, `tag`).
     #[napi]
     pub fn peel(&self, id: String, kind: String) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let oid = parse_oid(&id)?;
         let target_kind = match kind.to_lowercase().as_str() {
             "commit" => gix::objs::Kind::Commit,
@@ -833,7 +833,7 @@ impl Repository {
     /// Write a tree object constructed from tree item inputs and return its OID.
     #[napi]
     pub fn write_tree(&self, entries: Vec<TreeItemInput>) -> Result<String> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let mut tree_entries = Vec::new();
         for e in entries {
             let mode = match e.mode.as_deref().unwrap_or("100644") {
@@ -857,7 +857,7 @@ impl Repository {
     /// Try to find an object by id, returning null if missing instead of throwing.
     #[napi]
     pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         match parse_oid(&id) {
             Ok(oid) => match r.find_object(oid) {
                 Ok(obj) => Ok(Some(build_object(&self.inner, obj)?)),
@@ -878,7 +878,7 @@ impl Repository {
     /// All references in the repository.
     #[napi]
     pub fn references(&self) -> Result<Vec<Reference>> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let platform = r.references().map_err(|e| err("references", e))?;
         let mut out = Vec::new();
         for reference in platform.all().map_err(|e| err("references iter", e))? {
@@ -898,7 +898,7 @@ impl Repository {
     /// Find a git note for an object.
     #[napi]
     pub fn find_note(&self, target_id: String) -> Result<Option<NoteInfo>> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let oid = parse_oid(&target_id)?;
         let mut platform = r.notes().map_err(|e| err("notes", e))?;
         if let Ok(notes) = platform.get(oid) {
@@ -915,7 +915,7 @@ impl Repository {
     /// Find a single reference by name (e.g. `main`, `refs/heads/main`, `HEAD`).
     #[napi]
     pub fn find_reference(&self, name: String) -> Result<Reference> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         let reference = r
             .find_reference(name.as_str())
             .map_err(|e| err("find_reference", e))?;
@@ -925,7 +925,7 @@ impl Repository {
     /// Try to find a single reference by name, returning null if it doesn't exist instead of throwing.
     #[napi]
     pub fn try_find_reference(&self, name: String) -> Result<Option<Reference>> {
-        let r = thread_local(&self.inner);
+        let r = self.repo();
         match r.try_find_reference(name.as_str()) {
             Ok(Some(reference)) => Ok(Some(build_reference(&self.inner, reference)?)),
             Ok(None) => Ok(None),
