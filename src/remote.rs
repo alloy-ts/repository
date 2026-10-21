@@ -9,6 +9,10 @@ use napi_derive::napi;
 use crate::error::{err, thread_local};
 use crate::repository::Repository;
 
+fn lossy(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
 /// The result of a `fetch`: local refs updated by the fetch.
 #[derive(Clone)]
 #[napi(object)]
@@ -92,9 +96,9 @@ fn do_fetch(repo: Arc<gix::ThreadSafeRepository>, name: String) -> Result<Remote
     Ok(RemoteFetchOutcome { updated_refs })
 }
 
-/// Fetch from this remote. Resolves a `Promise<RemoteFetchOutcome>`.
 #[napi]
 impl Remote {
+    /// Fetch from this remote. Resolves a `Promise<RemoteFetchOutcome>`.
     #[napi(ts_return_type = "Promise<RemoteFetchOutcome>")]
     pub fn fetch(&self) -> Result<AsyncTask<FetchTask>> {
         let repo = Arc::clone(&self.repo);
@@ -102,6 +106,104 @@ impl Remote {
             napi::Error::from_reason("remote has no name; cannot fetch by name".to_string())
         })?;
         Ok(AsyncTask::new(FetchTask { repo, name }))
+    }
+
+    /// Return all fetch or push URLs configured for this remote.
+    ///
+    /// `direction` is `"fetch"` (default) or `"push"`.
+    #[napi]
+    pub fn urls(&self, direction: Option<String>) -> Result<Vec<String>> {
+        let r = thread_local(&self.repo);
+        let dir = parse_direction(direction.as_deref());
+        let name = self.name.as_deref().unwrap_or("");
+        let remote = r.find_remote(name).map_err(|e| err("find_remote", e))?;
+        Ok(remote.urls(dir).map(|u| u.to_string()).collect())
+    }
+
+    /// Return the push URL configured for this remote, if any.
+    #[napi]
+    pub fn push_url(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.repo);
+        let name = self.name.as_deref().unwrap_or("");
+        let remote = r.find_remote(name).map_err(|e| err("find_remote", e))?;
+        Ok(remote.url(gix::remote::Direction::Push).map(|u| u.to_string()))
+    }
+
+    /// Return all refspecs configured for `direction` (`"fetch"` or `"push"`).
+    #[napi]
+    pub fn refspecs(&self, direction: Option<String>) -> Result<Vec<String>> {
+        let r = thread_local(&self.repo);
+        let dir = parse_direction(direction.as_deref());
+        let name = self.name.as_deref().unwrap_or("");
+        let remote = r.find_remote(name).map_err(|e| err("find_remote", e))?;
+        Ok(remote
+            .refspecs(dir)
+            .iter()
+            .map(|spec| lossy(&spec.to_ref().to_bstring()))
+            .collect())
+    }
+
+    /// Return tag fetching strategy as a string: `"all"`, `"none"`, or `"included"`.
+    #[napi]
+    pub fn fetch_tags(&self) -> Result<String> {
+        let r = thread_local(&self.repo);
+        let name = self.name.as_deref().unwrap_or("");
+        let remote = r.find_remote(name).map_err(|e| err("find_remote", e))?;
+        let tags = match remote.fetch_tags() {
+            gix::remote::fetch::Tags::All => "all",
+            gix::remote::fetch::Tags::None => "none",
+            gix::remote::fetch::Tags::Included => "included",
+        };
+        Ok(tags.to_string())
+    }
+
+    /// Set a new fetch URL for this remote and persist it to config.
+    #[napi]
+    pub fn set_url(&self, url: String) -> Result<()> {
+        let mut r = thread_local(&self.repo);
+        let name = self.name.as_deref().ok_or_else(|| err("set_url", "anonymous remote cannot be saved"))?;
+        let key = format!("remote.{}.url", name);
+        let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
+        let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
+        config_file.set_raw_value(key.as_str(), url.as_str()).map_err(|e| err("set_raw_value", e))?;
+        config_file.commit().map_err(|e| err("commit", e))?;
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
+    /// Set an explicit push URL for this remote and persist it to config.
+    #[napi]
+    pub fn set_push_url(&self, url: String) -> Result<()> {
+        let mut r = thread_local(&self.repo);
+        let name = self.name.as_deref().ok_or_else(|| err("set_push_url", "anonymous remote cannot be saved"))?;
+        let key = format!("remote.{}.pushurl", name);
+        let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
+        let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
+        config_file.set_raw_value(key.as_str(), url.as_str()).map_err(|e| err("set_raw_value", e))?;
+        config_file.commit().map_err(|e| err("commit", e))?;
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+
+    /// Save or overwrite this remote in the local config file.
+    #[napi]
+    pub fn save_to_config(&self) -> Result<()> {
+        let mut r = thread_local(&self.repo);
+        let name = self.name.as_deref().ok_or_else(|| err("save_to_config", "anonymous remote cannot be saved"))?;
+        let remote = r.find_remote(name).map_err(|e| err("find_remote", e))?;
+        let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
+        let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
+        remote.save_to(&mut config_file).map_err(|e| err("save_to", e))?;
+        config_file.commit().map_err(|e| err("commit", e))?;
+        r.reload().map_err(|e| err("reload", e))?;
+        Ok(())
+    }
+}
+
+fn parse_direction(dir: Option<&str>) -> gix::remote::Direction {
+    match dir {
+        Some("push") => gix::remote::Direction::Push,
+        _ => gix::remote::Direction::Fetch,
     }
 }
 

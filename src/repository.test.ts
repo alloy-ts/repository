@@ -267,7 +267,7 @@ describe("Repository.reflog", () => {
 
 // --- remotes ----------------------------------------------------------------
 
-describe("Repository remotes", () => {
+describe("Repository remotes & Remote API", () => {
   test("remotes() returns an array; findRemote('origin') resolves", () => {
     const rs = repo.remotes();
     expect(Array.isArray(rs)).toBe(true);
@@ -276,9 +276,26 @@ describe("Repository remotes", () => {
       const o = repo.findRemote("origin");
       expect(o.name).toBe("origin");
       expect(typeof o.url).toBe("string");
+      expect(Array.isArray(o.urls())).toBe(true);
+      expect(Array.isArray(o.refspecs())).toBe(true);
+      expect(typeof o.fetchTags()).toBe("string");
     } else {
       console.log("clone has no 'origin' remote; skipping findRemote(...)");
     }
+  });
+
+  test("Remote setUrl and setPushUrl mutate configuration", () => {
+    const origin = repo.findRemote("origin");
+    const origUrl = origin.url!;
+
+    origin.setUrl("https://example.com/test-fetch.git");
+    expect(repo.findRemote("origin").url).toBe("https://example.com/test-fetch.git");
+
+    origin.setPushUrl("https://example.com/test-push.git");
+    expect(origin.pushUrl()).toBe("https://example.com/test-push.git");
+
+    // Restore original URL.
+    origin.setUrl(origUrl);
   });
 
   test("findRemote throws on a missing remote", () => {
