@@ -546,15 +546,13 @@ impl Task for MergeTask {
         let author = r
             .author()
             .and_then(|res| res.ok())
-            .map(|s| s.to_owned())
-            .ok_or_else(|| err("author", "no author configured"))?
-            .map_err(|e| err("author.to_owned", e))?;
+            .map(|s| s.to_owned().map_err(|e| err("author", e)))
+            .ok_or_else(|| err("author", "no author configured"))??;
         let committer = r
             .committer()
             .and_then(|res| res.ok())
-            .map(|s| s.to_owned())
-            .ok_or_else(|| err("committer", "no committer configured"))?
-            .map_err(|e| err("committer.to_owned", e))?;
+            .map(|s| s.to_owned().map_err(|e| err("committer", e)))
+            .ok_or_else(|| err("committer", "no committer configured"))??;
         let commit = gix::objs::Commit {
             tree: merged_tree_id,
             parents: vec![ours_id, theirs_id].into(),
@@ -1448,14 +1446,13 @@ impl Repository {
     /// The write is committed atomically.
     #[napi]
     pub fn edit_config(&self, key: String, value: String) -> Result<()> {
-        let git_dir = self.git_dir();
-        let options = gix::open::Options::default();
-        let mut tx = gix::config_mut(gix::config::Source::Local, &options)
-            .map_err(|e| err("config_mut", e))?;
+        let r = thread_local(&self.inner);
+        let git_dir = r.git_dir();
+        let path = git_dir.join("config");
+        let mut tx = r.config_file_mut(path).map_err(|e| err("config_file_mut", e))?;
         tx.set_raw_value(key.as_str(), value.as_str())
             .map_err(|e| err("set_raw_value", e))?;
         tx.commit().map_err(|e| err("config.commit", e))?;
-        let _ = git_dir;
         Ok(())
     }
 
@@ -1705,6 +1702,21 @@ impl Repository {
             .merge_base(parse_oid(&one)?, parse_oid(&two)?)
             .map_err(|e| err("merge_base", e))?;
         Ok(base.map(|id| id.to_string()))
+    }
+
+    /// Compute the virtual merge base of two commits, returning its tree id.
+    #[napi]
+    pub fn virtual_merge_base(&self, one: String, two: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let id1 = parse_oid(&one)?;
+        let id2 = parse_oid(&two)?;
+        let opts = r
+            .tree_merge_options()
+            .map_err(|e| err("tree_merge_options", e))?;
+        let outcome = r
+            .virtual_merge_base(vec![id1, id2], opts)
+            .map_err(|e| err("virtual_merge_base", e))?;
+        Ok(outcome.virtual_merge_bases.first().map(|id| id.to_string()))
     }
 
     /// The (octopus) merge base of multiple commits, if any.
@@ -1972,6 +1984,55 @@ impl Repository {
         Ok(r.modules_path().map(|p| p.to_string_lossy().to_string()))
     }
 
+    /// Path to executable installation directory if available.
+    #[napi]
+    pub fn install_dir(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        match r.install_dir() {
+            Ok(p) => Ok(Some(p.to_string_lossy().to_string())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Resolve a repository-relative path into an absolute worktree path.
+    #[napi]
+    pub fn workdir_path(&self, relative_path: String) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.workdir_path(gix::bstr::BStr::new(relative_path.as_str()))
+            .map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// Normalize path string according to git rules.
+    #[napi]
+    pub fn normalize_path(&self, path: String) -> String {
+        gix::path::realpath(std::path::Path::new(path.as_str()))
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or(path)
+    }
+
+    /// Evaluate whether `relative_path` matches the given `pathspec` pattern.
+    #[napi]
+    pub fn matches_pathspec(&self, relative_path: String, pathspec: String) -> Result<bool> {
+        let spec = gix::pathspec::Pattern::from_bytes(
+            pathspec.as_bytes(),
+            gix::pathspec::Defaults::default(),
+        )
+        .map_err(|e| err("pathspec_pattern", e))?;
+        let mut search = gix::pathspec::Search::from_specs(
+            vec![spec],
+            None,
+            std::path::Path::new("."),
+        )
+        .map_err(|e| err("pathspec_search", e))?;
+        Ok(search
+            .pattern_matching_relative_path(
+                gix::bstr::BStr::new(relative_path.as_str()),
+                Some(false),
+                &mut |_, _, _, _| false,
+            )
+            .is_some())
+    }
+
     /// Whether the worktree has uncommitted changes.
     #[napi]
     pub fn is_dirty(&self) -> Result<bool> {
@@ -1983,9 +2044,8 @@ impl Repository {
     #[napi]
     pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
         let r = thread_local(&self.inner);
-        let options = gix::open::Options::default();
-        let mut tx = gix::config_mut(gix::config::Source::Local, &options)
-            .map_err(|e| err("config_mut", e))?;
+        let path = r.git_dir().join("config");
+        let mut tx = r.config_file_mut(path).map_err(|e| err("config_file_mut", e))?;
         let url_key = format!("remote.{}.url", name);
         let fetch_key = format!("remote.{}.fetch", name);
         let fetch_val = format!("+refs/heads/*:refs/remotes/{}/*", name);
@@ -2005,9 +2065,9 @@ impl Repository {
     /// Set a value (e.g. `user.name`) in the local config file.
     #[napi]
     pub fn set_config_value(&self, key: String, value: String) -> Result<()> {
-        let options = gix::open::Options::default();
-        let mut tx = gix::config_mut(gix::config::Source::Local, &options)
-            .map_err(|e| err("config_mut", e))?;
+        let r = thread_local(&self.inner);
+        let path = r.git_dir().join("config");
+        let mut tx = r.config_file_mut(path).map_err(|e| err("config_file_mut", e))?;
         tx.set_raw_value(key.as_str(), value.as_str())
             .map_err(|e| err("set_raw_value", e))?;
         tx.commit().map_err(|e| err("commit_config", e))?;
@@ -2351,7 +2411,7 @@ impl Repository {
                         "write_commit: no author identity configured, pass `author` explicitly",
                     )
                 })?;
-                a.to_owned().map_err(|e| err("author.to_owned", e))?
+                a.to_owned().map_err(|e| err("author", e))?
             }
         };
         let committer = match committer {
@@ -2362,7 +2422,7 @@ impl Repository {
                         "write_commit: no committer identity configured, pass `committer` explicitly",
                     )
                 })?;
-                c.to_owned().map_err(|e| err("committer.to_owned", e))?
+                c.to_owned().map_err(|e| err("committer", e))?
             }
         };
         let commit = gix::objs::Commit {

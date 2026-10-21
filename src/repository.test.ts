@@ -750,3 +750,21 @@ describe("Repository paths and remote/branch config", () => {
     expect(() => repo.branchRemoteRefName("refs/heads/no-such-branch")).toThrow();
   });
 });
+
+describe("Repository merge & pathspec extras", () => {
+  test("virtualMergeBase returns merge base or null", () => {
+    const head = repo.headId();
+    const base = repo.virtualMergeBase(head, head);
+    expect(base).toBe(head);
+  });
+
+  test("installDir returns a path or null", () => {
+    const dir = repo.installDir();
+    expect(typeof dir === "string" || dir === null).toBe(true);
+  });
+
+  test("matchesPathspec evaluates relative path against pattern", () => {
+    expect(repo.matchesPathspec("src/main.rs", "*.rs")).toBe(true);
+    expect(repo.matchesPathspec("src/main.rs", "*.txt")).toBe(false);
+  });
+});
