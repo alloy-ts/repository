@@ -1731,6 +1731,108 @@ impl Repository {
         Ok(r.modules_path().map(|p| p.to_string_lossy().to_string()))
     }
 
+    /// Path to Git installation directory, if found.
+    #[napi]
+    pub fn install_dir(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.install_dir().ok().map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// Prefix path inside working tree if running from a subdirectory.
+    #[napi]
+    pub fn prefix(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        Ok(r.prefix().map_err(|e| err("prefix", e))?.map(|p| p.to_string_lossy().to_string()))
+    }
+
+    /// The current working directory.
+    #[napi]
+    pub fn current_dir(&self) -> Result<String> {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .map_err(|e| err("current_dir", e))
+    }
+
+    /// Normalize a path relative to repository root.
+    #[napi]
+    pub fn normalize_path(&self, relative_path: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let path = r.normalize_path(relative_path.as_str()).map_err(|e| err("normalize_path", e))?;
+        Ok(lossy(&path))
+    }
+
+    /// Whether the worktree has no untracked or modified files (is pristine).
+    #[napi]
+    pub fn is_pristine(&self) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        r.is_dirty().map_err(|e| err("is_pristine", e)).map(|d| !d)
+    }
+
+    /// The trust level of the repository's git directory.
+    #[napi]
+    pub fn git_dir_trust(&self) -> String {
+        let r = thread_local(&self.inner);
+        format!("{:?}", r.git_dir_trust())
+    }
+
+    /// Relative or absolute path inside working tree for `relative_path`.
+    #[napi]
+    pub fn workdir_path(&self, relative_path: String) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.workdir_path(relative_path.as_str()).map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// Path to the shallow commits file (`.git/shallow`), if present.
+    #[napi]
+    pub fn shallow_file(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.shallow_file().ok().map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// Compute virtual merge base of multiple commits.
+    #[napi]
+    pub fn virtual_merge_base(&self, one: String, two: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let id1 = parse_oid(&one)?;
+        let id2 = parse_oid(&two)?;
+        let base = r.merge_base(id1, id2).map_err(|e| err("virtual_merge_base", e))?;
+        Ok(base.map(|id| id.to_string()))
+    }
+
+    /// State of in-progress operations (e.g. `Rebase`, `Merge`, `CherryPick`), or `null` if none.
+    #[napi]
+    pub fn state(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.state().map(|s| format!("{:?}", s))
+    }
+
+    /// Check whether path matches pathspecs.
+    #[napi]
+    pub fn is_path_spec_matched(&self, relative_path: String, pathspecs: Vec<String>) -> Result<bool> {
+        let r = thread_local(&self.inner);
+        let index = r.index_or_load_from_head_or_empty().map_err(|e| err("index", e))?;
+        let patterns = pathspecs.iter().map(|s| gix::bstr::BStr::new(s.as_str()));
+        let mut search = r.pathspec(
+            false,
+            patterns,
+            false,
+            &*index,
+            gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+        ).map_err(|e| err("pathspec", e))?;
+        let is_dir = r.workdir_path(relative_path.as_str()).map(|p| p.is_dir()).unwrap_or(false);
+        Ok(search.is_included(relative_path.as_str(), Some(is_dir)))
+    }
+
+    /// Set or change the working tree directory for this repository.
+    #[napi]
+    pub fn set_workdir(&mut self, workdir: Option<String>) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        let path = workdir.map(std::path::PathBuf::from);
+        let _ = r.set_workdir(path);
+        self.inner = Arc::new(r.into_sync());
+        Ok(())
+    }
+
     /// Whether the worktree has uncommitted changes.
     #[napi]
     pub fn is_dirty(&self) -> Result<bool> {

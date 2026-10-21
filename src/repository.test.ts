@@ -535,6 +535,31 @@ describe("Repository wave-1 additions", () => {
     expect(bare).toBeDefined();
     expect(bare!.value).toBe("false");
   });
+
+  test("location, state, pathspec, and environment methods", () => {
+    expect(repo.installDir() === null || typeof repo.installDir() === "string").toBe(true);
+    expect(repo.prefix() === null || typeof repo.prefix() === "string").toBe(true);
+    expect(typeof repo.currentDir()).toBe("string");
+    expect(repo.normalizePath("src/main.rs")).toBe("src/main.rs");
+    expect(typeof repo.isPristine()).toBe("boolean");
+    expect(typeof repo.gitDirTrust()).toBe("string");
+    expect(typeof repo.workdirPath("ReadMe.md")).toBe("string");
+    expect(repo.shallowFile() === null || typeof repo.shallowFile() === "string").toBe(true);
+    expect(repo.state()).toBeNull();
+
+    const matched = repo.isPathSpecMatched("ReadMe.md", ["*.md"]);
+    expect(matched).toBe(true);
+
+    const nonMatched = repo.isPathSpecMatched("ReadMe.md", ["*.ts"]);
+    expect(nonMatched).toBe(false);
+
+    const head = repo.headId();
+    expect(repo.virtualMergeBase(head, head)).toBe(head);
+
+    const origWorkdir = repo.workDir();
+    repo.setWorkdir(origWorkdir);
+    expect(repo.workDir()).toBe(origWorkdir);
+  });
 });
 
 describe("Repository object writing (writeCommit / writeTag / peel)", () => {
