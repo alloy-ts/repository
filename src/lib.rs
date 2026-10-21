@@ -1,8 +1,11 @@
+mod commit;
 mod error;
 mod object;
 mod reference;
 mod remote;
 mod repository;
+
+pub use commit::*;
 
 use napi_derive::napi;
 

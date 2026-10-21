@@ -560,8 +560,12 @@ describe("Repository reference transactions & namespace (B2)", () => {
     expect(prev === null || typeof prev === "string").toBe(true);
     expect(repo.namespace()).toBe("refs/namespaces/feature-x/");
 
-    // Restore the previous namespace (if any).
-    if (prev !== null) repo.setNamespace(prev);
+    // Restore the previous namespace or clear it.
+    if (prev !== null) {
+      repo.setNamespace(prev);
+    } else {
+      repo.clearNamespace();
+    }
   });
 
   test("editReference() creates a reference pointing at HEAD", () => {
@@ -593,5 +597,62 @@ describe("Repository reference transactions & namespace (B2)", () => {
 
     repo.findReference("refs/heads/__probe_b2_a__").delete();
     repo.findReference("refs/heads/__probe_b2_b__").delete();
+  });
+});
+
+describe("ODB & Reference operations", () => {
+  test("emptyTree() and emptyBlob() return valid hex IDs", () => {
+    const emptyTree = repo.emptyTree();
+    expect(emptyTree).toMatch(/^[0-9a-f]{40}$/);
+
+    const emptyBlob = repo.emptyBlob();
+    expect(emptyBlob).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  test("findHeader() and tryFindHeader() inspect object headers", () => {
+    const headCommit = repo.headCommit();
+    const header = repo.findHeader(headCommit.id);
+    expect(header.kind).toBe("Commit");
+    expect(header.size).toBeGreaterThan(0);
+
+    const maybeHeader = repo.tryFindHeader("0".repeat(40));
+    expect(maybeHeader).toBeNull();
+  });
+
+  test("objectCacheSize(), objectCacheSizeIfUnset(), computeObjectCacheSizeForTreeDiffs()", () => {
+    repo.objectCacheSize(1024 * 1024);
+    repo.objectCacheSizeIfUnset(2 * 1024 * 1024);
+    const computed = repo.computeObjectCacheSizeForTreeDiffs();
+    expect(typeof computed).toBe("number");
+    expect(computed).toBeGreaterThan(0);
+  });
+
+  test("editTree() constructs or modifies a tree", () => {
+    const blobId = repo.writeBlob(Buffer.from("file A content\n"));
+    const newTreeId = repo.editTree(null, [{ path: "a.txt", mode: "100644", id: blobId }]);
+    expect(newTreeId).toMatch(/^[0-9a-f]{40}$/);
+
+    const modifiedTreeId = repo.editTree(newTreeId, [
+      { path: "b.txt", mode: "100644", id: blobId },
+    ]);
+    const modifiedTree = repo.findTree(modifiedTreeId);
+    expect(modifiedTree.entries.some((e) => e.name === "b.txt")).toBe(true);
+  });
+
+  test("tryFindReference(), tagReference(), editReferencesAs()", () => {
+    const headId = repo.headId();
+    expect(repo.tryFindReference("HEAD")?.name).toBe("HEAD");
+    expect(repo.tryFindReference("refs/heads/nonexistent_xyz")).toBeNull();
+
+    const tagRef = repo.tagReference("__probe_tag_ref__", headId, true);
+    expect(tagRef.name).toBe("refs/tags/__probe_tag_ref__");
+    tagRef.delete();
+
+    const editNames = repo.editReferencesAs(
+      [{ name: "refs/heads/__probe_ref_as__", newTarget: headId, force: true }],
+      { name: "Ref Editor", email: "ref@example.com", time: 1700000000, timezoneOffset: 0 },
+    );
+    expect(editNames).toContain("refs/heads/__probe_ref_as__");
+    repo.findReference("refs/heads/__probe_ref_as__").delete();
   });
 });
