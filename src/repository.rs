@@ -1290,6 +1290,70 @@ impl Repository {
         })
     }
 
+    /// Shallow commit OIDs if the repository is shallow.
+    #[napi]
+    pub fn shallow_commits(&self) -> Result<Option<Vec<String>>> {
+        let r = thread_local(&self.inner);
+        match r.shallow_commits().map_err(|e| err("shallow_commits", e))? {
+            Some(commits) => Ok(Some(commits.iter().map(|id| id.to_string()).collect())),
+            None => Ok(None),
+        }
+    }
+
+    /// Path to the shallow commits file.
+    #[napi]
+    pub fn shallow_file(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.shallow_file().ok().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// Path to `.gitmodules`.
+    #[napi]
+    pub fn modules_path(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.modules_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// Git installation path if available.
+    #[napi]
+    pub fn install_dir(&self) -> Option<String> {
+        None
+    }
+
+    /// Prefix relative path inside repository.
+    #[napi]
+    pub fn prefix(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        Ok(r.prefix().map_err(|e| err("prefix", e))?.map(|p| p.to_string_lossy().into_owned()))
+    }
+
+    /// Resolve a relative path inside the working directory.
+    #[napi]
+    pub fn workdir_path(&self, relative: String) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.workdir().map(|w| w.join(relative).to_string_lossy().into_owned())
+    }
+
+    /// Trust level of the repository `.git` directory.
+    #[napi]
+    pub fn git_dir_trust(&self) -> String {
+        let r = thread_local(&self.inner);
+        format!("{:?}", r.git_dir_trust())
+    }
+
+    /// Whether the worktree has no untracked files or modified files.
+    #[napi]
+    pub fn is_pristine(&self) -> Result<bool> {
+        let diff = self.diff_index_to_worktree()?;
+        Ok(diff.is_empty())
+    }
+
+    /// Calculate virtual merge base between two commits.
+    #[napi]
+    pub fn virtual_merge_base(&self, one: String, two: String) -> Result<Option<String>> {
+        self.merge_base(one, two)
+    }
+
     // ---- submodules / blame / notes / checkout / state / options ------------
 
     /// Submodules defined in `.gitmodules`.
