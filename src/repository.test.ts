@@ -647,6 +647,20 @@ describe("Repository checkout / reset / merge / defaultRemote", () => {
   });
 });
 
+describe("Repository filter pipeline", () => {
+  test("convert_to_git / convert_to_worktree on plain data", () => {
+    const pipeline = repo.filterPipeline();
+    const input = Buffer.from("hello world\n");
+    const toGit = pipeline.convertToGit(input, "test.txt");
+    expect(Buffer.isBuffer(toGit.data)).toBe(true);
+    expect(typeof toGit.changed).toBe("boolean");
+
+    const toWorktree = pipeline.convertToWorktree(toGit.data, "test.txt");
+    expect(Buffer.isBuffer(toWorktree.data)).toBe(true);
+    expect(toWorktree.data.toString()).toBe("hello world\n");
+  });
+});
+
 describe("Repository worktrees", () => {
   test("create + list + open by id + remove", async () => {
     const idsBefore = new Set(repo.worktrees().map((w) => w.id));

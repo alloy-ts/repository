@@ -2243,6 +2243,13 @@ impl Repository {
             .id
             .to_string())
     }
+
+    /// Obtain a handle to the filter pipeline ('clean' and 'smudge' filters, line ending conversions)
+    /// configured for this repository.
+    #[napi]
+    pub fn filter_pipeline(&self) -> crate::filter::FilterPipeline {
+        crate::filter::FilterPipeline::new(self.inner.clone())
+    }
 }
 
 /// Convert a JS [`Signature`] into gix's owned actor signature.

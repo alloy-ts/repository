@@ -1,4 +1,5 @@
 mod error;
+mod filter;
 mod object;
 mod reference;
 mod remote;
@@ -7,6 +8,7 @@ mod util;
 
 use napi_derive::napi;
 
+pub use filter::*;
 pub use object::*;
 pub use reference::*;
 pub use remote::*;
