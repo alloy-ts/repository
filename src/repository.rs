@@ -198,6 +198,16 @@ pub struct IndexEntryInput {
     pub mode: Option<String>,
 }
 
+/// A mailmap entry mapping commit names/emails to proper names/emails.
+#[derive(Clone)]
+#[napi(object)]
+pub struct MailmapEntry {
+    pub new_name: Option<String>,
+    pub new_email: Option<String>,
+    pub old_name: Option<String>,
+    pub old_email: String,
+}
+
 /// Checkout task running on libuv thread pool.
 pub struct CheckoutTask {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
@@ -1320,6 +1330,23 @@ impl Repository {
         let r = thread_local(&self.inner);
         let path = r.shallow_file().map_err(|e| err("shallow_file", e))?;
         Ok(path.to_string_lossy().into_owned())
+    }
+
+    /// Load mailmap entries configured for this repository.
+    #[napi]
+    pub fn mailmap(&self) -> Vec<MailmapEntry> {
+        let r = thread_local(&self.inner);
+        let snapshot = r.open_mailmap();
+        let mut out = Vec::new();
+        for entry in snapshot.entries() {
+            out.push(MailmapEntry {
+                new_name: entry.new_name().map(|s| lossy(s.as_ref())),
+                new_email: entry.new_email().map(|s| lossy(s.as_ref())),
+                old_name: entry.old_name().map(|s| lossy(s.as_ref())),
+                old_email: lossy(entry.old_email().as_ref()),
+            });
+        }
+        out
     }
 
     /// List the shallow boundary commits, or `null` if the repo is not shallow.

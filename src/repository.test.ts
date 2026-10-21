@@ -371,6 +371,11 @@ describe("Repository merge options, virtual merge base, state, pathspec & locati
     const previous = repo.setWorkdir(current);
     expect(previous).not.toBe(null);
   });
+
+  test("mailmap() returns array of MailmapEntry", () => {
+    const entries = repo.mailmap();
+    expect(Array.isArray(entries)).toBe(true);
+  });
 });
 
 describe("Repository blame (B1)", () => {
