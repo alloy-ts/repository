@@ -7,7 +7,16 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-gix = { version = "0.89.0", features = ["revision", "merge", "blob-diff", "blame", "attributes", "status", "worktree-mutation", "blocking-network-client"] }
+gix = { version = "0.89.0", features = [
+  "revision",
+  "merge",
+  "blob-diff",
+  "blame",
+  "attributes",
+  "status",
+  "worktree-mutation",
+  "blocking-network-client",
+] }
 napi = { version = "3.14.2", features = ["serde-json"] }
 napi-derive = "3.6.12"
 futures = "0.3.34"

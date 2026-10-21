@@ -17,10 +17,9 @@ beforeAll(async () => {
     repo = await Repository.clone(realRoot, cloneDir, false);
   } catch (e) {
     rmSync(cloneDir, { recursive: true, force: true });
-    execSync(
-      `git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`,
-      { stdio: "ignore" },
-    );
+    execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
+      stdio: "ignore",
+    });
     repo = Repository.open(cloneDir);
   }
 });
@@ -241,7 +240,6 @@ describe("Repository remotes", () => {
     expect(() => repo.findRemote("__nope__")).toThrow();
   });
 });
-
 
 describe("Repository wave 1 (remotes / revision / shallow)", () => {
   test("remoteAt() returns an anonymous remote for a URL", () => {
@@ -619,18 +617,14 @@ describe("Repository revisions & graphs (with_graph / commit-graph)", () => {
 
   test("mergeBaseOctopusWithGraph matches mergeBaseOctopus", () => {
     const head = repo.revParseSingle("HEAD");
-    expect(repo.mergeBaseOctopusWithGraph([head])).toBe(
-      repo.mergeBaseOctopus([head]),
-    );
+    expect(repo.mergeBaseOctopusWithGraph([head])).toBe(repo.mergeBaseOctopus([head]));
   });
 
   test("commitGraph() / commitGraphIfEnabled() return null or info", () => {
     const cg = repo.commitGraph();
     expect(cg === null || typeof cg.commitCount === "number").toBe(true);
     const enabled = repo.commitGraphIfEnabled();
-    expect(enabled === null || typeof enabled.commitCount === "number").toBe(
-      true,
-    );
+    expect(enabled === null || typeof enabled.commitCount === "number").toBe(true);
   });
 });
 
@@ -639,12 +633,9 @@ describe("Repository revisions & graphs (with_graph / commit-graph)", () => {
 describe("Repository.commit", () => {
   test("commit creates a new commit on a throwaway ref", () => {
     const head = repo.headCommit();
-    const newId = repo.commit(
-      "refs/heads/__probe_commit__",
-      "probe commit message",
-      head.treeId,
-      [head.id],
-    );
+    const newId = repo.commit("refs/heads/__probe_commit__", "probe commit message", head.treeId, [
+      head.id,
+    ]);
     expect(typeof newId).toBe("string");
     expect(newId).not.toBe(head.id);
 
@@ -707,12 +698,8 @@ describe("Objects / ODB (write_object, edit_tree, headers, empty)", () => {
   });
 
   test("emptyTree() and emptyBlob() return the well-known ids", () => {
-    expect(repo.emptyTree().id).toBe(
-      "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-    );
-    expect(repo.emptyBlob().id).toBe(
-      "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
-    );
+    expect(repo.emptyTree().id).toBe("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+    expect(repo.emptyBlob().id).toBe("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
   });
 
   test("editTree() upserts an entry on top of the empty tree", () => {

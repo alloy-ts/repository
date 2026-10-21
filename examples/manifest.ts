@@ -9,11 +9,7 @@ const repoPath = process.argv[2] ?? process.cwd();
 function readMetaManifest(repo: Repository): string | null {
   // Resolve the metadata commit. `findReference` returns null instead of throwing when
   // the ref is absent.
-  const candidates = [
-    "refs/heads/meta/repository",
-    "refs/heads/meta/repo",
-    "refs/heads/meta",
-  ];
+  const candidates = ["refs/heads/meta/repository", "refs/heads/meta/repo", "refs/heads/meta"];
   let commitId: string | null = null;
   for (const name of candidates) {
     const ref = repo.findReference(name);
@@ -82,9 +78,7 @@ function nameFromUrl(url: string): string {
   return sld ?? "origin";
 }
 
-function parseManifestRemotes(
-  text: string,
-): Array<{ name: string; url: string; fetch?: string }> {
+function parseManifestRemotes(text: string): Array<{ name: string; url: string; fetch?: string }> {
   const doc = load(text) as { remote?: unknown; remotes?: unknown };
   const out: Array<{ name: string; url: string; fetch?: string }> = [];
 
@@ -111,9 +105,7 @@ function parseManifestRemotes(
   return out;
 }
 
-function parseManifestSigners(
-  text: string,
-): Array<{ principal: string; key: string }> {
+function parseManifestSigners(text: string): Array<{ principal: string; key: string }> {
   const doc = load(text) as { signers?: unknown };
   const out: Array<{ principal: string; key: string }> = [];
   const add = (value: unknown) => {
@@ -151,22 +143,16 @@ function provisionAllowedSigners(repo: Repository, manifest: string) {
   const filePath = join(base, ".gitsigners");
   const content =
     signers
-      .map((s) =>
-        s.principal ? `${s.principal} namespaces="git" ${s.key}` : s.key,
-      )
+      .map((s) => (s.principal ? `${s.principal} namespaces="git" ${s.key}` : s.key))
       .join("\n") + "\n";
 
   try {
     if (existsSync(filePath) && readFileSync(filePath, "utf8") === content) {
-      console.log(
-        `\n(unchanged) ${signers.length} signer(s) in .gitsigners at ${filePath}`,
-      );
+      console.log(`\n(unchanged) ${signers.length} signer(s) in .gitsigners at ${filePath}`);
       return;
     }
     writeFileSync(filePath, content, "utf8");
-    console.log(
-      `\nwrote ${signers.length} signer(s) to .gitsigners at ${filePath}`,
-    );
+    console.log(`\nwrote ${signers.length} signer(s) to .gitsigners at ${filePath}`);
   } catch (e) {
     console.log(`\nfailed to write .gitsigners: ${(e as Error).message}`);
   }
