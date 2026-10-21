@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use napi::Result;
 use napi::Task;
-use napi::bindgen_prelude::AsyncTask;
+use napi::bindgen_prelude::{AsyncTask, Buffer};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
@@ -24,6 +24,15 @@ use crate::remote::build_remote;
 
 fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
+}
+
+/// An object header (kind and decompressed size).
+#[napi(object)]
+pub struct ObjectHeader {
+    /// Object kind: `"commit"`, `"tree"`, `"blob"`, or `"tag"`.
+    pub kind: String,
+    /// Decompressed size of the object in bytes.
+    pub size: f64,
 }
 
 /// Move the current branch (or `HEAD` when detached) to point at `new_commit`, recording a reflog
@@ -537,13 +546,15 @@ impl Task for MergeTask {
         let author = r
             .author()
             .and_then(|res| res.ok())
-            .and_then(|s| s.to_owned().ok())
-            .ok_or_else(|| err("author", "no author configured"))?;
+            .map(|s| s.to_owned())
+            .ok_or_else(|| err("author", "no author configured"))?
+            .map_err(|e| err("author.to_owned", e))?;
         let committer = r
             .committer()
             .and_then(|res| res.ok())
-            .and_then(|s| s.to_owned().ok())
-            .ok_or_else(|| err("committer", "no committer configured"))?;
+            .map(|s| s.to_owned())
+            .ok_or_else(|| err("committer", "no committer configured"))?
+            .map_err(|e| err("committer.to_owned", e))?;
         let commit = gix::objs::Commit {
             tree: merged_tree_id,
             parents: vec![ours_id, theirs_id].into(),
@@ -660,7 +671,7 @@ impl Task for CreateWorktreeTask {
             // `Head::Attached` requires.
             (Some(rev), false) => {
                 let full = if rev.starts_with("refs/heads/") {
-                    rev.clone()
+                    rev.to_string()
                 } else {
                     format!("refs/heads/{rev}")
                 };
@@ -1120,6 +1131,49 @@ impl Repository {
         build_object(&self.inner, object)
     }
 
+    /// Read an object's header (kind and decompressed size) without reading its full payload.
+    #[napi]
+    pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
+        let r = thread_local(&self.inner);
+        let header = r
+            .find_header(parse_oid(&id)?)
+            .map_err(|e| err("find_header", e))?;
+        Ok(ObjectHeader {
+            kind: format!("{:?}", header.kind()).to_lowercase(),
+            size: header.size() as f64,
+        })
+    }
+
+    /// Read an object's header, returning `null` if the object does not exist.
+    #[napi]
+    pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
+        let r = thread_local(&self.inner);
+        match parse_oid(&id) {
+            Ok(oid) => match r.find_header(oid) {
+                Ok(header) => Ok(Some(ObjectHeader {
+                    kind: format!("{:?}", header.kind()).to_lowercase(),
+                    size: header.size() as f64,
+                })),
+                Err(_) => Ok(None),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Return the object id of the empty tree.
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.empty_tree().id().to_string()
+    }
+
+    /// Return the object id of the empty blob (`e69de29bb2d1d6434b8b29ae775ad8c2e48c5391` for sha1).
+    #[napi]
+    pub fn empty_blob_id(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.write_blob([]).map(|id| id.to_string()).unwrap_or_default()
+    }
+
     /// Whether an object with the given id exists.
     #[napi]
     pub fn object_exists(&self, id: String) -> bool {
@@ -1132,12 +1186,30 @@ impl Repository {
 
     /// Write raw bytes as a blob and return its id.
     #[napi]
-    pub fn write_blob(&self, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+    pub fn write_blob(&self, data: Buffer) -> Result<String> {
         let r = thread_local(&self.inner);
         let id = r
             .write_blob(data.to_vec())
             .map_err(|e| err("write_blob", e))?;
         Ok(id.to_string())
+    }
+
+    /// Stream raw bytes to write a blob and return its id.
+    #[napi]
+    pub fn write_blob_stream(&self, data: Buffer) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let mut reader = &data[..];
+        let id = r
+            .write_blob_stream(&mut reader)
+            .map_err(|e| err("write_blob_stream", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Configure memory-capped object LRU cache size in bytes.
+    #[napi]
+    pub fn set_object_cache_size(&self, bytes: f64) {
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size(bytes as usize);
     }
 
     // ---- references -------------------------------------------------------
@@ -1163,6 +1235,16 @@ impl Repository {
             .find_reference(name.as_str())
             .map_err(|e| err("find_reference", e))?;
         build_reference(&self.inner, reference)
+    }
+
+    /// Try to find a reference by name, returning `null` if missing.
+    #[napi]
+    pub fn try_find_reference(&self, name: String) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.find_reference(name.as_str()) {
+            Ok(reference) => Ok(Some(build_reference(&self.inner, reference)?)),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Create (or, if `force`, overwrite) a reference pointing at `target`.
@@ -1229,15 +1311,20 @@ impl Repository {
             .find_object(target_id.clone())
             .map_err(|e| err("find_object", e))?
             .kind;
-        let tagger = r.committer().and_then(|res| res.ok());
+        let committer = r.committer().and_then(|res| res.ok());
         let constraint = if force.unwrap_or(false) {
             gix::refs::transaction::PreviousValue::Any
         } else {
             gix::refs::transaction::PreviousValue::MustNotExist
         };
-        let reference = r
-            .tag(name, target_id, kind, tagger, message.as_str(), constraint)
-            .map_err(|e| err("create_tag", e))?;
+        let reference = match committer {
+            Some(c) => r
+                .tag(name, target_id, kind, Some(c), message.as_str(), constraint)
+                .map_err(|e| err("create_tag", e))?,
+            None => r
+                .tag(name, target_id, kind, None, message.as_str(), constraint)
+                .map_err(|e| err("create_tag", e))?,
+        };
         build_reference(&self.inner, reference)
     }
 
@@ -1259,6 +1346,17 @@ impl Repository {
             .tag_reference(name, parse_oid(&target)?, constraint)
             .map_err(|e| err("create_lightweight_tag", e))?;
         build_reference(&self.inner, reference)
+    }
+
+    /// Alias for create_lightweight_tag.
+    #[napi]
+    pub fn tag_reference(
+        &self,
+        name: String,
+        target: String,
+        force: Option<bool>,
+    ) -> Result<Reference> {
+        self.create_lightweight_tag(name, target, force)
     }
 
     // ---- remotes ----------------------------------------------------------
@@ -1347,20 +1445,17 @@ impl Repository {
     /// creating the section if needed. `key` may include a subsection, e.g. `remote.origin.url`
     /// or `branch.main.remote`.
     ///
-    /// The write is committed atomically. The in-memory snapshot is *not* updated — call
-    /// [`Repository.reload()`](Repository::reload) or reopen the repository to observe the change.
+    /// The write is committed atomically.
     #[napi]
     pub fn edit_config(&self, key: String, value: String) -> Result<()> {
-        let r = thread_local(&self.inner);
-        let path = r
-            .config_path(gix::config::Source::Local)
-            .map_err(|e| err("config_path", e))?;
-        let mut tx = r
-            .config_file_mut(path)
-            .map_err(|e| err("config_file_mut", e))?;
+        let git_dir = self.git_dir();
+        let options = gix::open::Options::default();
+        let mut tx = gix::config_mut(gix::config::Source::Local, &options)
+            .map_err(|e| err("config_mut", e))?;
         tx.set_raw_value(key.as_str(), value.as_str())
             .map_err(|e| err("set_raw_value", e))?;
         tx.commit().map_err(|e| err("config.commit", e))?;
+        let _ = git_dir;
         Ok(())
     }
 
@@ -1887,22 +1982,19 @@ impl Repository {
     /// Create and persist a named remote pointing to `url` (also writes the standard fetch refspec).
     #[napi]
     pub fn create_remote(&self, name: String, url: String) -> Result<Remote> {
-        let mut r = thread_local(&self.inner);
-        let mut config = r.config_snapshot_mut();
+        let r = thread_local(&self.inner);
+        let options = gix::open::Options::default();
+        let mut tx = gix::config_mut(gix::config::Source::Local, &options)
+            .map_err(|e| err("config_mut", e))?;
         let url_key = format!("remote.{}.url", name);
         let fetch_key = format!("remote.{}.fetch", name);
         let fetch_val = format!("+refs/heads/*:refs/remotes/{}/*", name);
 
-        config
-            .set_raw_value(url_key.as_str(), url.as_str())
+        tx.set_raw_value(url_key.as_str(), url.as_str())
             .map_err(|e| err("create_remote set url", e))?;
-        config
-            .set_raw_value(fetch_key.as_str(), fetch_val.as_str())
+        tx.set_raw_value(fetch_key.as_str(), fetch_val.as_str())
             .map_err(|e| err("create_remote set fetch", e))?;
-        config
-            .commit()
-            .map_err(|e| err("create_remote commit", e))?;
-        r.reload().map_err(|e| err("create_remote reload", e))?;
+        tx.commit().map_err(|e| err("create_remote commit", e))?;
 
         let remote = r
             .find_remote(name.as_str())
@@ -1913,16 +2005,12 @@ impl Repository {
     /// Set a value (e.g. `user.name`) in the local config file.
     #[napi]
     pub fn set_config_value(&self, key: String, value: String) -> Result<()> {
-        let mut r = thread_local(&self.inner);
-        let config_path = r
-            .config_path(gix::config::Source::Local)
-            .map_err(|e| err("config_path", e))?;
-        let mut config_file = r
-            .config_file_mut(config_path)
-            .map_err(|e| err("config_file_mut", e))?;
-        let _ = config_file.set_raw_value(key.as_str(), value.as_str());
-        config_file.commit().map_err(|e| err("commit_config", e))?;
-        r.reload().map_err(|e| err("reload", e))?;
+        let options = gix::open::Options::default();
+        let mut tx = gix::config_mut(gix::config::Source::Local, &options)
+            .map_err(|e| err("config_mut", e))?;
+        tx.set_raw_value(key.as_str(), value.as_str())
+            .map_err(|e| err("set_raw_value", e))?;
+        tx.commit().map_err(|e| err("commit_config", e))?;
         Ok(())
     }
 
@@ -2257,27 +2345,25 @@ impl Repository {
             .collect::<Result<Vec<_>>>()?;
         let author = match author {
             Some(s) => to_gix_signature(&s),
-            None => r
-                .author()
-                .and_then(|res| res.ok())
-                .and_then(|s| s.to_owned().ok())
-                .ok_or_else(|| {
+            None => {
+                let a = r.author().and_then(|res| res.ok()).ok_or_else(|| {
                     napi::Error::from_reason(
                         "write_commit: no author identity configured, pass `author` explicitly",
                     )
-                })?,
+                })?;
+                a.to_owned().map_err(|e| err("author.to_owned", e))?
+            }
         };
         let committer = match committer {
             Some(s) => to_gix_signature(&s),
-            None => r
-                .committer()
-                .and_then(|res| res.ok())
-                .and_then(|s| s.to_owned().ok())
-                .ok_or_else(|| {
+            None => {
+                let c = r.committer().and_then(|res| res.ok()).ok_or_else(|| {
                     napi::Error::from_reason(
                         "write_commit: no committer identity configured, pass `committer` explicitly",
                     )
-                })?,
+                })?;
+                c.to_owned().map_err(|e| err("committer.to_owned", e))?
+            }
         };
         let commit = gix::objs::Commit {
             tree: parse_oid(&tree)?,

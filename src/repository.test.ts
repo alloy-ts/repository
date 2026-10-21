@@ -178,6 +178,27 @@ describe("Repository objects", () => {
     expect(repo.objectExists(id)).toBe(true);
     expect(repo.findBlob(id).content().toString()).toBe("probe blob content\n");
   });
+
+  test("findHeader / tryFindHeader return header info without full payload", () => {
+    const head = repo.headId();
+    const header = repo.findHeader(head);
+    expect(header.kind).toBe("commit");
+    expect(header.size).toBeGreaterThan(0);
+
+    const missing = repo.tryFindHeader("0".repeat(40));
+    expect(missing).toBeNull();
+  });
+
+  test("emptyTreeId and emptyBlobId return standard empty IDs", () => {
+    expect(repo.emptyTreeId()).toBe("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+    expect(repo.emptyBlobId()).toBe("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+  });
+
+  test("writeBlobStream writes data from buffer stream", () => {
+    const id = repo.writeBlobStream(Buffer.from("streamed content\n"));
+    expect(repo.objectExists(id)).toBe(true);
+    expect(repo.findBlob(id).content().toString()).toBe("streamed content\n");
+  });
 });
 
 // --- references / tags ------------------------------------------------------
@@ -191,8 +212,9 @@ describe("Repository references", () => {
     expect(repo.findReference("HEAD").name).toBe("HEAD");
   });
 
-  test("findReference finds HEAD", () => {
+  test("findReference finds HEAD and tryFindReference returns null for missing", () => {
     expect(repo.findReference("HEAD").name).toBe("HEAD");
+    expect(repo.tryFindReference("refs/heads/__missing__")).toBeNull();
   });
 
   test("findReference throws on a missing ref", () => {
