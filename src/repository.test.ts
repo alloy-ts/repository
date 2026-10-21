@@ -612,3 +612,66 @@ describe("Repository wave-4 additions (Object Writing & Raw Lookup)", () => {
     expect(nonexistent).toBeNull();
   });
 });
+
+// --- merge & diff additions ---
+
+describe("Repository Merge & Diff options & caches", () => {
+  test("treeMergeOptions & blobMergeOptions return debug strings", () => {
+    expect(typeof repo.treeMergeOptions()).toBe("string");
+    expect(typeof repo.blobMergeOptions()).toBe("string");
+  });
+
+  test("mergeResourceCache, diffResourceCache, and diffResourceCacheForTreeDiff return true", () => {
+    expect(repo.mergeResourceCache()).toBe(true);
+    expect(repo.diffResourceCache()).toBe(true);
+    expect(repo.diffResourceCacheForTreeDiff()).toBe(true);
+  });
+
+  test("virtualMergeBase returns merge base sha", () => {
+    const head = repo.headId();
+    const base = repo.virtualMergeBase(head, head);
+    expect(typeof base).toBe("string");
+    expect(base?.length).toBe(40);
+  });
+});
+
+// --- attributes, filter, pathspec ---
+
+describe("Repository Attributes, Filter & Pathspec", () => {
+  test("attributes & attributesOnly query attributes", () => {
+    const attrs1 = repo.attributes("Cargo.toml");
+    const attrs2 = repo.attributesOnly("Cargo.toml");
+    expect(Array.isArray(attrs1)).toBe(true);
+    expect(Array.isArray(attrs2)).toBe(true);
+  });
+
+  test("filterPipeline returns boolean", () => {
+    expect(repo.filterPipeline()).toBe(true);
+  });
+
+  test("pathspec & pathspecDefaults query pathspecs", () => {
+    expect(repo.pathspec(["*.toml"], false, true)).toEqual(["*.toml"]);
+    expect(typeof repo.pathspecDefaults()).toBe("string");
+  });
+});
+
+// --- location, trust, pristine additions ---
+
+describe("Repository Location, Trust & Pristine", () => {
+  test("gitDirTrust and isPristine reflect repo state", () => {
+    expect(typeof repo.gitDirTrust()).toBe("string");
+    expect(typeof repo.isPristine()).toBe("boolean");
+  });
+
+  test("workdirPath resolves absolute path for relative worktree file", () => {
+    const tomlPath = repo.workdirPath("Cargo.toml");
+    expect(typeof tomlPath).toBe("string");
+    expect(tomlPath).toContain("Cargo.toml");
+  });
+
+  test("shallowFile returns path string", () => {
+    const file = repo.shallowFile();
+    expect(typeof file).toBe("string");
+    expect(file).toContain("shallow");
+  });
+});

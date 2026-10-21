@@ -40,6 +40,12 @@ async function main() {
   console.log("Written demo commit ID:", commitId);
   console.log("Try find object (commit):", repo.tryFindObject(commitId)?.kind);
   console.log("Rev parse hex HEAD:", repo.revParseHex("HEAD"));
+
+  console.log("\n=== Merge, Attributes, State & Location Demo ===");
+  console.log("Git dir trust:", repo.gitDirTrust());
+  console.log("Is pristine:", repo.isPristine());
+  console.log("Workdir path for Cargo.toml:", repo.workdirPath("Cargo.toml"));
+  console.log("Attributes for Cargo.toml:", repo.attributes("Cargo.toml").length);
 }
 
 main().catch(console.error);

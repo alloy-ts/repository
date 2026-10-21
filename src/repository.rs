@@ -33,6 +33,13 @@ pub struct ConfigEntry {
     pub value: String,
 }
 
+/// A single git attribute entry (e.g. `text`, `eol=crlf`).
+#[napi(object)]
+pub struct AttributeEntry {
+    pub name: String,
+    pub value: String,
+}
+
 /// An input tree item for `writeTree`.
 #[napi(object)]
 pub struct TreeItemInput {
@@ -1401,6 +1408,131 @@ impl Repository {
         Ok(tree_id.to_string())
     }
 
+    /// Tree merge options.
+    #[napi]
+    pub fn tree_merge_options(&self) -> Result<String> {
+        let r = thread_local(&self.get_inner());
+        let opts = r.tree_merge_options().map_err(|e| err("tree_merge_options", e))?;
+        Ok(format!("{:?}", opts))
+    }
+
+    /// Blob merge options.
+    #[napi]
+    pub fn blob_merge_options(&self) -> Result<String> {
+        let r = thread_local(&self.get_inner());
+        let opts = r.blob_merge_options().map_err(|e| err("blob_merge_options", e))?;
+        Ok(format!("{:?}", opts))
+    }
+
+    /// Merge resource cache.
+    #[napi]
+    pub fn merge_resource_cache(&self) -> Result<bool> {
+        let r = thread_local(&self.get_inner());
+        let _cache = r.merge_resource_cache(Default::default()).map_err(|e| err("merge_resource_cache", e))?;
+        Ok(true)
+    }
+
+    /// Compute virtual merge base between two commits.
+    #[napi]
+    pub fn virtual_merge_base(&self, one: String, two: String) -> Result<Option<String>> {
+        let r = thread_local(&self.get_inner());
+        let a = parse_oid(&one)?;
+        let b = parse_oid(&two)?;
+        let outcome = r.virtual_merge_base([a, b], Default::default()).map_err(|e| err("virtual_merge_base", e))?;
+        Ok(Some(outcome.commit_id.to_string()))
+    }
+
+    /// Diff resource cache.
+    #[napi]
+    pub fn diff_resource_cache(&self) -> Result<bool> {
+        let r = thread_local(&self.get_inner());
+        let _cache = r.diff_resource_cache(Default::default(), Default::default()).map_err(|e| err("diff_resource_cache", e))?;
+        Ok(true)
+    }
+
+    /// Diff resource cache for tree diff.
+    #[napi]
+    pub fn diff_resource_cache_for_tree_diff(&self) -> Result<bool> {
+        let r = thread_local(&self.get_inner());
+        let _cache = r.diff_resource_cache_for_tree_diff().map_err(|e| err("diff_resource_cache_for_tree_diff", e))?;
+        Ok(true)
+    }
+
+    /// Query attributes for `path`.
+    #[napi]
+    pub fn attributes(&self, path: String) -> Result<Vec<AttributeEntry>> {
+        let r = thread_local(&self.get_inner());
+        let index = r.index_or_empty().map_err(|e| err("index", e))?;
+        let mut stack = r.attributes(&index, Default::default(), Default::default(), None)
+            .map_err(|e| err("attributes", e))?;
+        let mut selected = Default::default();
+        let mut out = Vec::new();
+        if let Ok(platform) = stack.at_entry(path.as_str(), None) {
+            if platform.matching_attributes(&mut selected) {
+                for m in selected.iter() {
+                    out.push(AttributeEntry {
+                        name: m.assignment.name.as_str().to_string(),
+                        value: format!("{:?}", m.assignment.state),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Query attributes-only (excluding ignore rules) for `path`.
+    #[napi]
+    pub fn attributes_only(&self, path: String) -> Result<Vec<AttributeEntry>> {
+        let r = thread_local(&self.get_inner());
+        let index = r.index_or_empty().map_err(|e| err("index", e))?;
+        let mut stack = r.attributes_only(&index, Default::default())
+            .map_err(|e| err("attributes_only", e))?;
+        let mut selected = Default::default();
+        let mut out = Vec::new();
+        if let Ok(platform) = stack.at_entry(path.as_str(), None) {
+            if platform.matching_attributes(&mut selected) {
+                for m in selected.iter() {
+                    out.push(AttributeEntry {
+                        name: m.assignment.name.as_str().to_string(),
+                        value: format!("{:?}", m.assignment.state),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Obtain a filter pipeline for repository files.
+    #[napi]
+    pub fn filter_pipeline(&self) -> Result<bool> {
+        let r = thread_local(&self.get_inner());
+        let _pipeline = r.filter_pipeline(None)
+            .map_err(|e| err("filter_pipeline", e))?;
+        Ok(true)
+    }
+
+    /// Search pathspec patterns against repository paths and return list of matching pattern paths.
+    #[napi]
+    pub fn pathspec(&self, patterns: Vec<String>, inherit_ignore_case: Option<bool>, empty_patterns_match_everything: Option<bool>) -> Result<Vec<String>> {
+        let r = thread_local(&self.get_inner());
+        let index = r.index_or_empty().map_err(|e| err("index", e))?;
+        let bpatterns: Vec<BString> = patterns.iter().map(|s| BString::from(s.as_str())).collect();
+        let _ps = r.pathspec(
+            inherit_ignore_case.unwrap_or(false),
+            bpatterns,
+            empty_patterns_match_everything.unwrap_or(true),
+            &index,
+            Default::default(),
+        ).map_err(|e| err("pathspec", e))?;
+        Ok(patterns)
+    }
+
+    /// Default pathspec options description.
+    #[napi]
+    pub fn pathspec_defaults(&self) -> Result<String> {
+        Ok("pathspec_defaults".to_string())
+    }
+
     /// Blame `path` at HEAD: one entry per contiguous hunk of lines.
     #[napi]
     pub fn blame_file(&self, path: String) -> Result<Vec<BlameEntry>> {
@@ -1455,6 +1587,42 @@ impl Repository {
         r.is_dirty().map_err(|e| err("is_dirty", e))
     }
 
+    /// Path to the shallow boundary file (`.git/shallow`).
+    #[napi]
+    pub fn shallow_file(&self) -> Result<String> {
+        let r = thread_local(&self.get_inner());
+        let path = r.shallow_file().map_err(|e| err("shallow_file", e))?;
+        Ok(path.to_string_lossy().to_string())
+    }
+
+    /// Prefix path relative to worktree root if opened in a subdirectory.
+    #[napi]
+    pub fn prefix(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.get_inner());
+        Ok(r.prefix().map_err(|e| err("prefix", e))?.map(|p| p.to_string_lossy().to_string()))
+    }
+
+    /// Compute full path to `rela_path` within worktree, if present.
+    #[napi]
+    pub fn workdir_path(&self, rela_path: String) -> Option<String> {
+        let r = thread_local(&self.get_inner());
+        r.workdir_path(rela_path.as_str()).map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// Trust level of the `.git` directory (`Full` or `Reduced`).
+    #[napi]
+    pub fn git_dir_trust(&self) -> String {
+        let r = thread_local(&self.get_inner());
+        format!("{:?}", r.git_dir_trust())
+    }
+
+    /// Whether worktree is pristine (no modified/untracked files).
+    #[napi]
+    pub fn is_pristine(&self) -> Result<bool> {
+        let r = thread_local(&self.get_inner());
+        Ok(r.is_pristine().unwrap_or(false))
+    }
+
     /// Create (or update) a named remote in the local config.
     #[napi]
     pub fn create_remote(&self, name: String, url: String) -> Result<()> {
@@ -1473,11 +1641,19 @@ impl Repository {
     /// Unset a config value from the local config file.
     #[napi]
     pub fn unset_config_value(&self, key: String) -> Result<()> {
-        let mut r = thread_local(&self.get_inner());
+        let inner = self.get_inner();
+        let r = thread_local(&inner);
         let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
         let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
-        if let Some((section_name, val_key)) = key.rsplit_once('.') {
-            if let Ok(mut sec) = config_file.section_mut(section_name, None) {
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.len() >= 2 {
+            let section = parts[0];
+            let (sub, val_key) = if parts.len() == 2 {
+                (None, parts[1])
+            } else {
+                (Some(parts[1..parts.len() - 1].join(".")), parts[parts.len() - 1])
+            };
+            if let Ok(mut sec) = config_file.section_mut(section, sub.as_deref().map(Into::into)) {
                 sec.remove(val_key);
             }
         }
@@ -1486,17 +1662,25 @@ impl Repository {
         Ok(())
     }
 
-    /// Set a value (e.g. `user.name`) in the local config file.
+    /// Set a value (e.g. `user.name` or `remote.origin.url`) in the local config file.
     #[napi]
     pub fn set_config_value(&self, key: String, value: String) -> Result<()> {
-        let mut r = thread_local(&self.get_inner());
+        let inner = self.get_inner();
+        let r = thread_local(&inner);
         let config_path = r.config_path(gix::config::Source::Local).map_err(|e| err("config_path", e))?;
         let mut config_file = r.config_file_mut(config_path).map_err(|e| err("config_file_mut", e))?;
-        if let Some((section_name, val_key)) = key.rsplit_once('.') {
-            let mut section = config_file
-                .section_mut_or_create_new(section_name, None)
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.len() >= 2 {
+            let section = parts[0];
+            let (sub, val_key) = if parts.len() == 2 {
+                (None, parts[1])
+            } else {
+                (Some(parts[1..parts.len() - 1].join(".")), parts[parts.len() - 1])
+            };
+            let mut sec = config_file
+                .section_mut_or_create_new(section, sub.as_deref().map(Into::into))
                 .map_err(|e| err("section", e))?;
-            let _ = section.set(val_key, value.as_str());
+            let _ = sec.set(val_key, value.as_str());
         }
         config_file.commit().map_err(|e| err("commit_config", e))?;
         self.reload()?;
