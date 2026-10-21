@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository, type Tree, type TreeEntry } from "./main.ts";
+import { Repository, type Tree, type TreeEntry } from "../dist/index.js";
 
 const realRoot = process.cwd();
 let base: string;
@@ -312,9 +312,33 @@ describe("Repository worktrees (Wave 5)", () => {
     expect(typeof repo.isWorktree()).toBe("boolean");
     expect(repo.isWorktree()).toBe(false);
 
+    const mainWt = repo.mainWorktree();
+    expect(mainWt).not.toBeNull();
+    expect(mainWt?.id).toBe("main");
+
+    const nonExistentWt = repo.worktreeById("non_existent_wt");
+    expect(nonExistentWt).toBeNull();
+
     const head = repo.headId();
     repo.reset(head, false);
     expect(repo.headId()).toBe(head);
+  });
+});
+
+describe("P1/P2 repository inspection & state", () => {
+  test("isShallow(), shallowCommits(), state(), findDefaultRemote(), configPath(), openMailmap(), notes()", () => {
+    expect(typeof repo.isShallow()).toBe("boolean");
+    expect(Array.isArray(repo.shallowCommits())).toBe(true);
+    expect(typeof repo.state()).toBe("string");
+
+    const defRemote = repo.findDefaultRemote();
+    expect(defRemote === null || typeof defRemote === "object").toBe(true);
+
+    const cfgPath = repo.configPath();
+    expect(typeof cfgPath === "string" || cfgPath === null).toBe(true);
+
+    expect(typeof repo.openMailmap()).toBe("boolean");
+    expect(Array.isArray(repo.notes())).toBe(true);
   });
 });
 

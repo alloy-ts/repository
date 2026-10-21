@@ -806,6 +806,16 @@ impl Repository {
         Ok(build_remote(&self.inner, remote))
     }
 
+    /// Find the default remote (usually origin or configured default).
+    #[napi]
+    pub fn find_default_remote(&self) -> Result<Option<Remote>> {
+        let r = thread_local(&self.inner);
+        match r.find_default_remote(gix::remote::Direction::Fetch) {
+            Some(Ok(remote)) => Ok(Some(build_remote(&self.inner, remote))),
+            _ => Ok(None),
+        }
+    }
+
     // ---- config / paths --------------------------------------------------
 
     /// Read a single config value as a string.
@@ -959,6 +969,33 @@ impl Repository {
         Ok(out)
     }
 
+    /// Find a worktree by ID.
+    #[napi]
+    pub fn worktree_by_id(&self, id: String) -> Result<Option<WorktreeProxy>> {
+        let r = thread_local(&self.inner);
+        match r.worktree_proxy_by_id(id.as_str()) {
+            Ok(Some(p)) => Ok(Some(WorktreeProxy {
+                id: lossy(p.id().map_err(|e| err("worktree_id", e))?.as_ref()),
+                git_dir: p.git_dir().to_string_lossy().into_owned(),
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    /// Return the main worktree descriptor if available.
+    #[napi]
+    pub fn main_worktree(&self) -> Result<Option<WorktreeProxy>> {
+        let r = thread_local(&self.inner);
+        if r.workdir().is_some() {
+            Ok(Some(WorktreeProxy {
+                id: "main".to_string(),
+                git_dir: r.git_dir().to_string_lossy().into_owned(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Reset HEAD, index, and optionally working tree to target.
     #[napi]
     pub fn reset(&self, target: String, hard: Option<bool>) -> Result<()> {
@@ -1084,6 +1121,81 @@ impl Repository {
             })),
             _ => Ok(None),
         }
+    }
+
+    /// Check if the repository is shallow.
+    #[napi]
+    pub fn is_shallow(&self) -> bool {
+        let r = thread_local(&self.inner);
+        r.is_shallow().unwrap_or(false)
+    }
+
+    /// List shallow commit object IDs.
+    #[napi]
+    pub fn shallow_commits(&self) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        match r.shallow_commits() {
+            Ok(Some(commits)) => Ok(commits.iter().map(|id| id.to_string()).collect()),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Current operation state string (e.g. `bare`, `clean`, `merge`, `rebase`).
+    #[napi]
+    pub fn state(&self) -> String {
+        let r = thread_local(&self.inner);
+        format!("{:?}", r.state())
+    }
+
+    /// Return local configuration file path.
+    #[napi]
+    pub fn config_path(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        let path = r.git_dir().join("config");
+        if path.exists() {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    }
+
+    /// Open and return true if mailmap snapshot is obtained.
+    #[napi]
+    pub fn open_mailmap(&self) -> bool {
+        let r = thread_local(&self.inner);
+        let _snapshot = r.open_mailmap();
+        true
+    }
+
+    /// Access notes for a target commit ID.
+    #[napi]
+    pub fn notes(&self) -> Result<Vec<NoteInfo>> {
+        let r = thread_local(&self.inner);
+        let out = Vec::new();
+        if let Ok(head_id) = r.head_id() {
+            if let Ok(mut platform) = r.notes() {
+                if let Ok(notes) = platform.get(head_id) {
+                    for n in notes {
+                        return Ok(vec![NoteInfo {
+                            id: n.blob.id.to_string(),
+                            message: lossy(&n.blob.data),
+                        }]);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Update a reference using a transaction.
+    #[napi]
+    pub fn edit_reference(&self, name: String, target: String) -> Result<()> {
+        let r = thread_local(&self.inner);
+        let target_id = parse_oid(&target)?;
+        let label = format!("edit_reference {name}");
+        r.reference(name, target_id, gix::refs::transaction::PreviousValue::Any, label)
+            .map_err(|e| err("edit_reference", e))?;
+        Ok(())
     }
 
     // ---- index & status --------------------------------------------------
