@@ -335,9 +335,7 @@ impl Task for CloneTask {
         })();
 
         if let Some(repo) = gix_repo {
-            return Ok(Repository {
-                inner: Arc::new(repo),
-            });
+            return Ok(Repository::new(Arc::new(repo)));
         }
 
         // Fallback: shell out to the system `git` binary. This is robust to environments
@@ -355,9 +353,7 @@ impl Task for CloneTask {
                 Ok(out) if out.status.success() => {
                     let ts = gix::ThreadSafeRepository::open(&path)
                         .map_err(|e| napi::Error::from_reason(format!("open: {e}")))?;
-                    return Ok(Repository {
-                        inner: Arc::new(ts),
-                    });
+                    return Ok(Repository::new(Arc::new(ts)));
                 }
                 Ok(out) => {
                     return Err(napi::Error::from_reason(format!(
@@ -391,6 +387,16 @@ impl Task for CloneTask {
 #[napi]
 pub struct Repository {
     pub(crate) inner: Arc<gix::ThreadSafeRepository>,
+    pub(crate) namespace: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl Repository {
+    pub(crate) fn new(inner: Arc<gix::ThreadSafeRepository>) -> Self {
+        Self {
+            inner,
+            namespace: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
 }
 
 #[napi]
@@ -402,9 +408,7 @@ impl Repository {
     pub fn open(path: String) -> Result<Repository> {
         let ts = gix::ThreadSafeRepository::open(path)
             .map_err(|e| err("open", e))?;
-        Ok(Repository {
-            inner: Arc::new(ts),
-        })
+        Ok(Repository::new(Arc::new(ts)))
     }
 
     /// Open a repository with options.
@@ -413,9 +417,7 @@ impl Repository {
         let opts = gix::open::Options::default();
         let ts = gix::ThreadSafeRepository::open_opts(path, opts)
             .map_err(|e| err("open_opts", e))?;
-        Ok(Repository {
-            inner: Arc::new(ts),
-        })
+        Ok(Repository::new(Arc::new(ts)))
     }
 
     /// Initialize a repository with options.
@@ -433,9 +435,7 @@ impl Repository {
             gix::init(path)
         }
         .map_err(|e| err("init", e))?;
-        Ok(Repository {
-            inner: Arc::new(r.into()),
-        })
+        Ok(Repository::new(Arc::new(r.into())))
     }
 
     /// Discover a repository by walking up from `path` (or the current directory if omitted).
@@ -443,9 +443,7 @@ impl Repository {
     pub fn discover(path: Option<String>) -> Result<Repository> {
         let p = path.unwrap_or_else(|| ".".to_string());
         let r = gix::discover(p).map_err(|e| err("discover", e))?;
-        Ok(Repository {
-            inner: Arc::new(r.into()),
-        })
+        Ok(Repository::new(Arc::new(r.into())))
     }
 
     /// Clone a repository from `url` into `path`.
@@ -939,6 +937,48 @@ impl Repository {
         Ok(out)
     }
 
+    /// Initialize git-crypt for this repository.
+    #[napi]
+    pub fn crypt_init(&self) -> Result<crate::crypt::CryptStatus> {
+        let git_dir = self.git_dir();
+        crate::crypt::crypt_init(Some(git_dir))
+    }
+
+    /// Check if git-crypt is initialized in this repository.
+    #[napi]
+    pub fn crypt_is_initialized(&self) -> Result<bool> {
+        let git_dir = self.git_dir();
+        crate::crypt::crypt_is_initialized(Some(git_dir))
+    }
+
+    /// Lock this repository by removing git-crypt filters.
+    #[napi]
+    pub fn crypt_lock(&self) -> Result<()> {
+        let git_dir = self.git_dir();
+        crate::crypt::crypt_lock(Some(git_dir))
+    }
+
+    /// Unlock this repository by restoring git-crypt filters.
+    #[napi]
+    pub fn crypt_unlock(&self, key_file: Option<String>) -> Result<()> {
+        let git_dir = self.git_dir();
+        crate::crypt::crypt_unlock(Some(git_dir), key_file)
+    }
+
+    /// Export git-crypt key to file.
+    #[napi]
+    pub fn crypt_export_key(&self, output_path: String) -> Result<()> {
+        let git_dir = self.git_dir();
+        crate::crypt::crypt_export_key(Some(git_dir), output_path)
+    }
+
+    /// Import git-crypt key from file.
+    #[napi]
+    pub fn crypt_import_key(&self, input_path: String) -> Result<()> {
+        let git_dir = self.git_dir();
+        crate::crypt::crypt_import_key(Some(git_dir), input_path)
+    }
+
     /// Set a configuration key to a value in local config and snapshot.
     #[napi]
     pub fn config_set(&self, key: String, value: String) -> Result<()> {
@@ -1094,9 +1134,7 @@ impl Repository {
     pub fn main_repository(&self) -> Result<Repository> {
         let r = thread_local(&self.inner);
         let main_repo = r.main_repo().map_err(|e| err("main_repo", e))?;
-        Ok(Repository {
-            inner: Arc::new(main_repo.into()),
-        })
+        Ok(Repository::new(Arc::new(main_repo.into())))
     }
 
     /// The `.git` directory.
@@ -1567,23 +1605,29 @@ impl Repository {
     /// Return the currently set reference namespace, if any.
     #[napi]
     pub fn namespace(&self) -> Option<String> {
-        let r = thread_local(&self.inner);
-        r.namespace()
-            .map(|n| String::from_utf8_lossy(n.as_bstr().as_ref()).into_owned())
+        let guard = self.namespace.lock().ok()?;
+        guard.clone()
     }
 
     /// Set the reference namespace and return the previously set one (if any).
     #[napi]
     pub fn set_namespace(&self, ns: String) -> Result<Option<String>> {
-        let mut r = thread_local(&self.inner);
-        let ns_clean = ns
-            .strip_prefix("refs/namespaces/")
-            .unwrap_or(&ns)
-            .trim_end_matches('/');
-        let prev = r
-            .set_namespace(ns_clean)
-            .map_err(|e| err("set_namespace", e))?;
-        Ok(prev.map(|n| String::from_utf8_lossy(n.as_bstr().as_ref()).into_owned()))
+        let mut guard = self
+            .namespace
+            .lock()
+            .map_err(|e| err("set_namespace_lock", e.to_string()))?;
+        let prev = guard.clone();
+        let formatted = if ns.starts_with("refs/namespaces/") {
+            if ns.ends_with('/') {
+                ns
+            } else {
+                format!("{ns}/")
+            }
+        } else {
+            format!("refs/namespaces/{ns}/")
+        };
+        *guard = Some(formatted);
+        Ok(prev)
     }
 
     /// Apply a single reference edit (create or update) and return the affected reference names.

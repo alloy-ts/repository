@@ -562,6 +562,39 @@ describe("Commit signature & verification APIs", () => {
   });
 });
 
+describe("git-crypt NAPI bindings", () => {
+  test("cryptInit, cryptIsInitialized, cryptLock, cryptUnlock, export and import key", () => {
+    const testDir = join(base, "crypt-repo");
+    const testRepo = Repository.init(testDir, false);
+
+    expect(testRepo.cryptIsInitialized()).toBe(false);
+
+    const status = testRepo.cryptInit();
+    expect(status.initialized).toBe(true);
+    expect(status.keyExists).toBe(true);
+    expect(testRepo.cryptIsInitialized()).toBe(true);
+
+    const keyExportPath = join(testDir, "exported.key");
+    testRepo.cryptExportKey(keyExportPath);
+
+    testRepo.cryptLock();
+    testRepo.cryptUnlock(keyExportPath);
+
+    testRepo.cryptImportKey(keyExportPath);
+  });
+
+  test("cryptClean and cryptSmudge filter roundtrip", async () => {
+    const { cryptClean, cryptSmudge } = await import("./main.ts");
+    const raw = Buffer.from("secret contents 123");
+    const encrypted = cryptClean(raw);
+    expect(Buffer.isBuffer(encrypted)).toBe(true);
+    expect(encrypted.toString("utf-8")).not.toBe("secret contents 123");
+
+    const decrypted = cryptSmudge(encrypted);
+    expect(decrypted.toString("utf-8")).toBe("secret contents 123");
+  });
+});
+
 describe("Repository blame (B1)", () => {
   test("blame() returns per-hunk entries for a real file", () => {
     const tree = repo.findTree(repo.headCommit().treeId);
@@ -602,6 +635,7 @@ describe("Repository reference transactions & namespace (B2)", () => {
 
     const prev = repo.setNamespace("feature-x");
     expect(prev === null || typeof prev === "string").toBe(true);
+    expect(repo.namespace()).toBe("refs/namespaces/feature-x/");
 
     // Restore the previous namespace (if any).
     if (prev !== null) repo.setNamespace(prev);

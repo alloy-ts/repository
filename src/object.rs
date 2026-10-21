@@ -167,15 +167,11 @@ impl Commit {
         let r = thread_local(&self.repo);
         let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
         match commit.verify_signature() {
-            Ok(Some(outcome)) => {
-                let status_str = format!("{:?}", outcome.status);
-                let is_valid = !status_str.to_lowercase().contains("invalid") && !status_str.to_lowercase().contains("fail") && !status_str.to_lowercase().contains("error");
-                Ok(Some(SignatureVerifyOutcome {
-                    is_valid,
-                    status: status_str,
-                    summary: Some(format!("{:?}", outcome)),
-                }))
-            }
+            Ok(Some(outcome)) => Ok(Some(SignatureVerifyOutcome {
+                is_valid: outcome.is_valid(),
+                status: format!("{:?}", outcome.status),
+                summary: Some(format!("{:?}", outcome)),
+            })),
             Ok(None) => Ok(None),
             Err(e) => Ok(Some(SignatureVerifyOutcome {
                 is_valid: false,
