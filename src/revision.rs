@@ -4,6 +4,22 @@ use napi_derive::napi;
 use crate::error::{err, parse_oid, thread_local};
 use crate::repository::Repository;
 
+/// Options controlling [`Repository::rev_parse_with`].
+#[derive(Clone)]
+#[napi(object)]
+pub struct RevParseOptions {
+    /// Enforce resolving to a single object ID.
+    pub single: Option<bool>,
+}
+
+/// Outcome of [`Repository::rev_parse_with`].
+#[derive(Clone)]
+#[napi(object)]
+pub struct RevParseOutcome {
+    /// Resolved single object ID or primary target ID.
+    pub single: String,
+}
+
 /// A parsed revision specification (result of [`Repository::rev_parse`]).
 #[napi(object)]
 pub struct RevSpec {
@@ -84,6 +100,30 @@ impl Repository {
             .rev_parse(spec.as_str())
             .map_err(|e| err("rev_parse", e))?;
         Ok(rev_spec_to_info(&parsed))
+    }
+
+    /// Parse a revision specification with options.
+    #[napi]
+    pub fn rev_parse_with(&self, spec: String, _options: Option<RevParseOptions>) -> Result<RevParseOutcome> {
+        let r = thread_local(&self.inner);
+        let single = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("rev_parse_single", e))?;
+        Ok(RevParseOutcome {
+            single: single.to_string(),
+        })
+    }
+
+    /// Reverse a revision range spec string (e.g. `A..B` -> `B..A` or `A...B` -> `B...A`).
+    #[napi]
+    pub fn reverse_revision_range(&self, spec: String) -> String {
+        if let Some((start, end)) = spec.split_once("...") {
+            format!("{end}...{start}")
+        } else if let Some((start, end)) = spec.split_once("..") {
+            format!("{end}..{start}")
+        } else {
+            spec
+        }
     }
 
     /// Walk reachable commits from the given tip ids, with optional sort/reverse/first-parent control.

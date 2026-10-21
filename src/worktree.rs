@@ -260,6 +260,18 @@ impl Repository {
         })
     }
 
+    /// Return the main worktree descriptor for this repository, or `null` if bare or if the main repository has no worktree.
+    #[napi]
+    pub fn main_worktree(&self) -> Result<Option<WorktreeInfo>> {
+        let r = thread_local(&self.inner);
+        let main_repo = r.main_repo().map_err(|e| err("main_repo", e))?;
+        Ok(main_repo.worktree().map(|wt| WorktreeInfo {
+            base: wt.base().to_string_lossy().into_owned(),
+            is_main: wt.is_main(),
+            dot_git_exists: wt.dot_git_exists(),
+        }))
+    }
+
     /// Return the currently set worktree (the validated worktree base path),
     /// or `null` for a bare repository without a registered worktree.
     #[napi]
