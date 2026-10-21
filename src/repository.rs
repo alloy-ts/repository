@@ -71,6 +71,14 @@ pub struct CommitInput {
     pub committer: Option<Signature>,
 }
 
+/// Object header metadata.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ObjectHeader {
+    pub kind: String,
+    pub size: f64,
+}
+
 /// Input for writing an annotated tag object.
 #[derive(Clone)]
 #[napi(object)]
@@ -614,6 +622,124 @@ impl Repository {
         Ok(id.to_string())
     }
 
+    /// Write a blob from raw bytes or stream buffer.
+    #[napi]
+    pub fn write_blob_stream(&self, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r
+            .write_blob_stream(std::io::Cursor::new(data.to_vec()))
+            .map_err(|e| err("write_blob_stream", e))?;
+        Ok(id.to_string())
+    }
+
+    /// Write an object of specified kind ("commit", "tree", "blob", "tag") and raw buffer data into the object database.
+    #[napi]
+    pub fn write_object(&self, kind: String, data: napi::bindgen_prelude::Buffer) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let gix_kind = match kind.to_lowercase().as_str() {
+            "commit" => gix::objs::Kind::Commit,
+            "tree" => gix::objs::Kind::Tree,
+            "blob" => gix::objs::Kind::Blob,
+            "tag" => gix::objs::Kind::Tag,
+            _ => return Err(err("write_object", format!("invalid object kind '{kind}'"))),
+        };
+
+        struct RawObject<'a> {
+            kind: gix::objs::Kind,
+            data: &'a [u8],
+        }
+
+        impl gix::objs::WriteTo for RawObject<'_> {
+            fn write_to(&self, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+                out.write_all(self.data)
+            }
+            fn kind(&self) -> gix::objs::Kind {
+                self.kind
+            }
+            fn size(&self) -> u64 {
+                self.data.len() as u64
+            }
+        }
+
+        let raw = RawObject {
+            kind: gix_kind,
+            data: &data,
+        };
+        let id = r.write_object(raw).map_err(|e| err("write_object", e))?;
+        Ok(id.to_string())
+    }
+
+    /// The object ID of the empty tree for this repository's object hash.
+    #[napi]
+    pub fn empty_tree(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.empty_tree().id().to_string()
+    }
+
+    /// The object ID of the empty blob for this repository's object hash.
+    #[napi]
+    pub fn empty_blob(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.empty_blob().id.to_string()
+    }
+
+    /// Find an object's header (kind and size) without fully decoding it.
+    #[napi]
+    pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let header = r.find_header(oid).map_err(|e| err("find_header", e))?;
+        let kind = format!("{:?}", header.kind()).to_lowercase();
+        Ok(ObjectHeader {
+            kind,
+            size: header.size() as f64,
+        })
+    }
+
+    /// Try to find an object's header (kind and size), returning null if missing instead of throwing.
+    #[napi]
+    pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
+        let r = thread_local(&self.inner);
+        let oid = match parse_oid(&id) {
+            Ok(o) => o,
+            Err(_) => return Ok(None),
+        };
+        match r.try_find_header(oid) {
+            Ok(Some(header)) => {
+                let kind = format!("{:?}", header.kind()).to_lowercase();
+                Ok(Some(ObjectHeader {
+                    kind,
+                    size: header.size() as f64,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Configure the object cache size in bytes (or null to disable).
+    #[napi]
+    pub fn object_cache_size(&self, bytes: Option<f64>) {
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size(bytes.map(|b| b as usize));
+    }
+
+    /// Set object cache size in bytes if none is currently set.
+    #[napi]
+    pub fn object_cache_size_if_unset(&self, bytes: f64) {
+        let mut r = thread_local(&self.inner);
+        r.object_cache_size_if_unset(bytes as usize);
+    }
+
+    /// Compute recommended object cache size for tree diffing based on index entries.
+    #[napi]
+    pub fn compute_object_cache_size_for_tree_diffs(&self) -> Result<f64> {
+        let r = thread_local(&self.inner);
+        let index = r
+            .index_or_load_from_head_or_empty()
+            .map_err(|e| err("index", e))?;
+        Ok(r.compute_object_cache_size_for_tree_diffs(&index) as f64)
+    }
+
     /// Write a loose commit object directly to the object database without moving references.
     #[napi]
     pub fn write_commit(&self, input: CommitInput) -> Result<String> {
@@ -794,6 +920,28 @@ impl Repository {
             .find_reference(name.as_str())
             .map_err(|e| err("find_reference", e))?;
         build_reference(&self.inner, reference)
+    }
+
+    /// Try to find a single reference by name, returning null if it doesn't exist instead of throwing.
+    #[napi]
+    pub fn try_find_reference(&self, name: String) -> Result<Option<Reference>> {
+        let r = thread_local(&self.inner);
+        match r.try_find_reference(name.as_str()) {
+            Ok(Some(reference)) => Ok(Some(build_reference(&self.inner, reference)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("try_find_reference", e)),
+        }
+    }
+
+    /// Create a lightweight tag reference with name (without `refs/tags/` prefix) pointing to target OID.
+    #[napi]
+    pub fn tag_reference(
+        &self,
+        name: String,
+        target: String,
+        force: Option<bool>,
+    ) -> Result<Reference> {
+        self.create_lightweight_tag(name, target, force)
     }
 
     /// Create (or, if `force`, overwrite) a reference pointing at `target`.
@@ -1569,6 +1717,32 @@ impl Repository {
         let prev = guard.take();
         *guard = Some(ns);
         Ok(prev)
+    }
+
+    /// Clear the currently set reference namespace and return the previously set one (if any).
+    #[napi]
+    pub fn clear_namespace(&self) -> Result<Option<String>> {
+        let mut guard = self.namespace.lock().map_err(|_| err("namespace", "lock error"))?;
+        Ok(guard.take())
+    }
+
+    /// Apply multiple reference edits using an explicit committer signature for the reflog.
+    #[napi]
+    pub fn edit_references_as(&self, edits: Vec<RefEditInput>, committer: Signature) -> Result<Vec<String>> {
+        let r = thread_local(&self.inner);
+        let mut built = Vec::with_capacity(edits.len());
+        for input in &edits {
+            built.push(build_ref_edit(input)?);
+        }
+        let sig = signature_from_dto(&committer)?;
+        let mut time_buf = gix::date::parse::TimeBuf::default();
+        let result = r
+            .edit_references_as(built, Some(sig.to_ref(&mut time_buf)))
+            .map_err(|e| err("edit_references_as", e))?;
+        Ok(result
+            .into_iter()
+            .map(|e| String::from_utf8_lossy(e.name.as_bstr().as_ref()).into_owned())
+            .collect())
     }
 
     /// Apply a single reference edit (create or update) and return the affected reference names.

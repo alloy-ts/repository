@@ -598,3 +598,58 @@ describe("Repository reference transactions & namespace (B2)", () => {
     repo.findReference("refs/heads/__probe_b2_b__").delete();
   });
 });
+
+describe("Objects, ODB, Caches & Ref Extensions", () => {
+  test("writeObject, writeBlobStream, emptyTree, emptyBlob", () => {
+    const oid1 = repo.writeObject("blob", Buffer.from("generic raw blob\n"));
+    expect(repo.objectExists(oid1)).toBe(true);
+
+    const oid2 = repo.writeBlobStream(Buffer.from("streamed blob\n"));
+    expect(repo.objectExists(oid2)).toBe(true);
+
+    const emptyTreeId = repo.emptyTree();
+    expect(emptyTreeId).toMatch(/^[0-9a-f]{40}$/);
+
+    const emptyBlobId = repo.emptyBlob();
+    expect(emptyBlobId).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  test("findHeader, tryFindHeader & object cache size", () => {
+    const headId = repo.headId();
+    const header = repo.findHeader(headId);
+    expect(header.kind).toBe("commit");
+    expect(header.size).toBeGreaterThan(0);
+
+    const tryHeader = repo.tryFindHeader(headId);
+    expect(tryHeader?.kind).toBe("commit");
+    expect(repo.tryFindHeader("0".repeat(40))).toBeNull();
+
+    repo.objectCacheSize(1024 * 1024);
+    repo.objectCacheSizeIfUnset(2048 * 1024);
+    const computedCache = repo.computeObjectCacheSizeForTreeDiffs();
+    expect(typeof computedCache).toBe("number");
+    expect(computedCache).toBeGreaterThan(0);
+  });
+
+  test("tryFindReference, tagReference, clearNamespace & editReferencesAs", () => {
+    const headId = repo.headId();
+    expect(repo.tryFindReference("HEAD")?.name).toBe("HEAD");
+    expect(repo.tryFindReference("refs/heads/__nonexistent_ref_xyz__")).toBeNull();
+
+    const tagRef = repo.tagReference("__probe_tag_ref__", headId, true);
+    expect(tagRef.name).toBe("refs/tags/__probe_tag_ref__");
+    tagRef.delete();
+
+    repo.setNamespace("test-ns");
+    expect(repo.namespace()).toBe("test-ns");
+    expect(repo.clearNamespace()).toBe("test-ns");
+    expect(repo.namespace()).toBeNull();
+
+    const editRes = repo.editReferencesAs(
+      [{ name: "refs/heads/__probe_edit_as__", newTarget: headId, force: true }],
+      { name: "Test Committer", email: "test@example.com", time: 100000, timezoneOffset: 0 },
+    );
+    expect(editRes).toContain("refs/heads/__probe_edit_as__");
+    repo.findReference("refs/heads/__probe_edit_as__").delete();
+  });
+});
