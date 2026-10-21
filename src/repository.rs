@@ -2050,6 +2050,145 @@ impl Repository {
             repo: self.inner.clone(),
         }))
     }
+
+    // ---- state & locations -----------------------------------------------
+
+    /// Returns the status of an in-progress operation or null if none.
+    #[napi]
+    pub fn state(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.state().map(|s| format!("{s:?}"))
+    }
+
+    /// Whether the worktree has no uncommitted or untracked changes.
+    #[napi]
+    pub fn is_pristine(&self) -> Option<bool> {
+        let r = thread_local(&self.inner);
+        r.is_pristine()
+    }
+
+    /// Return the current working directory present during repo instantiation.
+    #[napi]
+    pub fn current_dir(&self) -> String {
+        let r = thread_local(&self.inner);
+        r.current_dir().to_string_lossy().into_owned()
+    }
+
+    /// Return normalized relative path as String.
+    #[napi]
+    pub fn normalize_path(&self, relative_path: String) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let path = r
+            .normalize_path(relative_path.as_str())
+            .map_err(|e| err("normalize_path", e))?;
+        Ok(lossy(path.as_ref()))
+    }
+
+    /// Path to executable installation directory if available.
+    #[napi]
+    pub fn install_dir(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        match r.install_dir() {
+            Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Prefix path relative to worktree root if executed in a subdirectory.
+    #[napi]
+    pub fn prefix(&self) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        match r.prefix() {
+            Ok(Some(p)) => Ok(Some(p.to_string_lossy().into_owned())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("prefix", e)),
+        }
+    }
+
+    /// Resolve configuration file path for source.
+    #[napi]
+    pub fn config_path(&self, source: String) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let src = match source.to_lowercase().as_str() {
+            "local" => gix::config::Source::Local,
+            "worktree" => gix::config::Source::Worktree,
+            "user" => gix::config::Source::User,
+            "system" => gix::config::Source::System,
+            "git" => gix::config::Source::Git,
+            "gitinstallation" => gix::config::Source::GitInstallation,
+            _ => return Err(err("config_path", format!("invalid config source {source}"))),
+        };
+        match r.config_path(src) {
+            Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    // ---- branches & worktrees -------------------------------------------
+
+    /// Find a secondary worktree by its ID.
+    #[napi]
+    pub fn worktree_proxy_by_id(&self, id: String) -> Result<Option<WorktreeProxy>> {
+        let r = thread_local(&self.inner);
+        match r.worktree_proxy_by_id(gix::bstr::BStr::new(id.as_str())) {
+            Ok(Some(p)) => Ok(Some(WorktreeProxy {
+                id: lossy(p.id().map_err(|e| err("worktree_id", e))?.as_ref()),
+                git_dir: p.git_dir().to_string_lossy().into_owned(),
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("worktree_proxy_by_id", e)),
+        }
+    }
+
+    /// Delete local branch by full reference name.
+    #[napi]
+    pub fn delete_local_branch(&self, full_name: String) -> Result<()> {
+        let mut r = thread_local(&self.inner);
+        let name = gix::refs::FullName::try_from(full_name.as_str()).map_err(|e| err("branch_name", e))?;
+        r.delete_local_branches([name])
+            .map_err(|e| err("delete_local_branches", e))?;
+        Ok(())
+    }
+
+    /// Upstream remote reference name for a branch in a given direction.
+    #[napi]
+    pub fn branch_remote_ref_name(&self, branch_full_name: String, direction: RemoteDirection) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let bstr = gix::bstr::BStr::new(branch_full_name.as_str());
+        let name = match <&gix::refs::FullNameRef as TryFrom<&gix::bstr::BStr>>::try_from(bstr) {
+            Ok(n) => n,
+            Err(_) => return Ok(None),
+        };
+        match r.branch_remote_ref_name(name, to_remote_direction(direction)) {
+            Some(Ok(n)) => Ok(Some(n.as_bstr().to_string())),
+            Some(Err(e)) => Err(err("branch_remote_ref_name", e)),
+            None => Ok(None),
+        }
+    }
+
+    /// Upstream remote tracking reference name for a branch in a given direction.
+    #[napi]
+    pub fn branch_remote_tracking_ref_name(&self, branch_full_name: String, direction: RemoteDirection) -> Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let bstr = gix::bstr::BStr::new(branch_full_name.as_str());
+        let name = match <&gix::refs::FullNameRef as TryFrom<&gix::bstr::BStr>>::try_from(bstr) {
+            Ok(n) => n,
+            Err(_) => return Ok(None),
+        };
+        match r.branch_remote_tracking_ref_name(name, to_remote_direction(direction)) {
+            Some(Ok(n)) => Ok(Some(n.as_bstr().to_string())),
+            Some(Err(e)) => Err(err("branch_remote_tracking_ref_name", e)),
+            None => Ok(None),
+        }
+    }
+
+    /// Return the root tree object ID pointed to by HEAD, or the empty tree ID if HEAD is unborn/detached without tree.
+    #[napi]
+    pub fn head_tree_id_or_empty(&self) -> Result<String> {
+        let r = thread_local(&self.inner);
+        let id = r.head_tree_id_or_empty().map_err(|e| err("head_tree_id_or_empty", e))?;
+        Ok(id.to_string())
+    }
 }
 
 /// A single change produced by [`Repository::diff_tree_to_tree`].
