@@ -7,12 +7,14 @@ This document tabulates the upstream `node:crypto` / WebCrypto API against our N
 | Upstream `node:crypto` / WebCrypto API | `@alloy-ts/crypto` Implementation | Status |
 | --- | --- | --- |
 | `new CryptoKey(algorithm, extractable, usages)` | `new CryptoKey(algorithm, extractable, usages)` | ✅ Implemented |
+| `{ publicKey, privateKey } = key` | `key.publicKey`, `key.privateKey` | ✅ Implemented |
 | `CryptoKey.supports(operation, algorithm)` | `CryptoKey.supports(operation, algorithm)` | ✅ Implemented |
 | `CryptoKey.exportKey(format, key)` | `CryptoKey.exportKey(format, key)` | ⚠️ Error stub |
-| `CryptoKey.importKey(format, keyData, alg, extractable, usages)` | `CryptoKey.import(format, keyData, alg, extractable, usages)` | ⚠️ Error stub |
-| `CryptoKey.generateKey(algorithm, extractable, usages)` | `new CryptoKey(algorithm, extractable, usages)` | ✅ Implemented |
+| `CryptoKey.importKey(format, keyData, alg, extractable, usages)` | `CryptoKey.importKey(...)` | ⚠️ Error stub |
+| `CryptoKey.deriveKey(alg, baseKey, derivedType, extractable, usages)` | `CryptoKey.deriveKey(...)` | ✅ Implemented (returns CryptoKey) |
+| `CryptoKey.deriveBits(alg, baseKey, length)` | `CryptoKey.deriveBits(...)` | ⚠️ Error stub |
 | `CryptoKey.wrapKey(format, key, wrappingKey, wrapAlg)` | `CryptoKey.wrapKey(...)` | ⚠️ Error stub |
-| `CryptoKey.unwrapKey(...)` | `CryptoKey.unwrapKey(...)` | ⚠️ Error stub |
+| `CryptoKey.unwrapKey(...)` | `CryptoKey.unwrapKey(...)` | ✅ Implemented (returns CryptoKey) |
 
 ## Crypto Operation APIs
 

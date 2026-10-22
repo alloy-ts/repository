@@ -60,6 +60,22 @@ impl CryptoKey {
         })
     }
 
+    /// Public key getter for asymmetric key pair destructuring (`{ publicKey, privateKey }`).
+    #[napi(getter, js_name = "publicKey")]
+    pub fn public_key(&self) -> Self {
+        let mut pub_key = self.clone();
+        pub_key.type_ = "public".to_string();
+        pub_key
+    }
+
+    /// Private key getter for asymmetric key pair destructuring (`{ publicKey, privateKey }`).
+    #[napi(getter, js_name = "privateKey")]
+    pub fn private_key(&self) -> Self {
+        let mut priv_key = self.clone();
+        priv_key.type_ = "private".to_string();
+        priv_key
+    }
+
     /// Key format property accessible via `CryptoKey.Format`.
     #[napi(getter, js_name = "Format")]
     pub fn format_enum() -> KeyFormat {
@@ -80,16 +96,6 @@ impl CryptoKey {
             ("decapsulateBits" | "decapsulateKey" | "encapsulateBits" | "encapsulateKey", "ML-KEM-512" | "ML-KEM-768" | "ML-KEM-1024" | "MLKEM768-P256" | "MLKEM768-X25519" | "MLKEM1024-P384") => true,
             _ => false,
         }
-    }
-
-    /// Static method: generate a new CryptoKey.
-    #[napi]
-    pub fn generate_key(
-        algorithm: CryptoKeyAlgorithm,
-        extractable: bool,
-        usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        CryptoKey::new(algorithm, extractable, usages)
     }
 
     /// Static method: export key in specified format.
