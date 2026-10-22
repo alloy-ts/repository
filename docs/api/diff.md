@@ -50,10 +50,10 @@ low-information lines, while the Myers variants are greedier.
 
 ## Tree diff: `Repository.diffTreeToTree`
 
-| Method               | Signature                                                                                                  | Notes                                                                                                                    |
-| -------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `diffTreeToTree`     | `(old?: string, newId?: string, trackRewrites?: "none" \| "renames" \| "renames-and-copies") => Change[]`   | Compare tree `newId` against `old` (or against an empty tree when `old` is omitted). One `Change` per path that differs.  |
-| `diffTreeToTreeStats` | `(old?: string, newId?: string) => DiffStats`                                                              | Aggregate `git diff --stat`-style counts: files changed plus inserted/removed lines.                                     |
+| Method                | Signature                                                                                                 | Notes                                                                                                                    |
+| --------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `diffTreeToTree`      | `(old?: string, newId?: string, trackRewrites?: "none" \| "renames" \| "renames-and-copies") => Change[]` | Compare tree `newId` against `old` (or against an empty tree when `old` is omitted). One `Change` per path that differs. |
+| `diffTreeToTreeStats` | `(old?: string, newId?: string) => DiffStats`                                                             | Aggregate `git diff --stat`-style counts: files changed plus inserted/removed lines.                                     |
 
 `trackRewrites` controls rename/copy detection: `"renames"` enables rename tracking
 (git's default at 50% similarity), `"renames-and-copies"` also tracks copies, and

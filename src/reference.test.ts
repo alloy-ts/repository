@@ -3,12 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import {
-  refCategoryFullName,
-  refNameIsValid,
-  refPartialNameIsValid,
-  Repository,
-} from "./main.ts";
+import { refCategoryFullName, refNameIsValid, refPartialNameIsValid, Repository } from "./main.ts";
 
 const realRoot = process.cwd();
 let base: string;

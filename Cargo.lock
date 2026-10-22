@@ -2665,9 +2665,9 @@ dependencies = [
 
 [[package]]
 name = "multi-hash"
-version = "2.0.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c5d7ad4b2161d806aebbe88803f1305d7d1af68372c7e46f330916c0d438d7d"
+checksum = "387b3617b781fd257733e2186dc9cac6c41302b6b0ea2a0d439c73111dcf8ad0"
 dependencies = [
  "blake2",
  "blake3",
@@ -2683,7 +2683,6 @@ dependencies = [
  "sha1",
  "sha2 0.11.1",
  "sha3 0.12.0",
- "shake",
  "subtle",
  "thiserror",
  "typenum",
@@ -2692,9 +2691,9 @@ dependencies = [
 
 [[package]]
 name = "multi-key"
-version = "2.3.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0981195f82c6e0fedb0595f12a9a2f1c60db2bd6731aba534fbbb2949d1b193c"
+checksum = "a026770d61751f976874b8e49dd90ce4033d822ae44fcc78413fcc1d51db8140"
 dependencies = [
  "aes-gcm",
  "bcrypt-pbkdf",
@@ -2726,7 +2725,6 @@ dependencies = [
  "p256",
  "p384",
  "p521",
- "pkcs1",
  "poly1305",
  "pq-mayo",
  "rand",
@@ -3302,6 +3300,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "repository"
 version = "0.0.0"
 dependencies = [
+ "aes-gcm",
  "blsful",
  "chacha20poly1305",
  "filetime",
@@ -3313,6 +3312,7 @@ dependencies = [
  "gix-pack",
  "gix-protocol",
  "hex",
+ "hmac",
  "multi-codec",
  "multi-key",
  "multi-sig 2.0.0",
@@ -3323,6 +3323,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror",
  "zeroize",

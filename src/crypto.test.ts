@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { Signature, SignatureBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
+import { CryptoKey, Signature, SignatureBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
 
@@ -56,10 +56,7 @@ describe("SignatureBuilder / Signature", () => {
 
   test("combined signature carries the message in-band", () => {
     const msg = Buffer.from("hello world");
-    const ms = new SignatureBuilder("eddsa-msig")
-      .withSignature(SIG_64)
-      .withMessage(msg)
-      .tryBuild();
+    const ms = new SignatureBuilder("eddsa-msig").withSignature(SIG_64).withMessage(msg).tryBuild();
     expect(ms.isCombined).toBe(true);
     expect(ms.message).toEqual(msg);
     expect(ms.signatureBytes().bytes).toEqual(SIG_64);
@@ -141,9 +138,7 @@ describe("threshold disclosure", () => {
 
 describe("BLS constructors", () => {
   test("newFromBlsSignature rejects a non-BLS codec", () => {
-    expect(() =>
-      SignatureBuilder.newFromBlsSignature("eddsa-msig", Buffer.alloc(64)),
-    ).toThrow();
+    expect(() => SignatureBuilder.newFromBlsSignature("eddsa-msig", Buffer.alloc(64))).toThrow();
   });
 
   test("newFromBlsSignatureShare rejects a non-share codec", () => {
@@ -156,5 +151,150 @@ describe("BLS constructors", () => {
     expect(() =>
       SignatureBuilder.newFromBlsSignature("bls12_381-g2-msig", Buffer.alloc(96, 1)),
     ).toThrow();
+  });
+});
+
+describe("CryptoKey - WebCrypto Bindings", () => {
+  test("AES key generation", () => {
+    const key = new CryptoKey({ name: "AES-CBC", length: 256 }, true, ["encrypt", "decrypt"]);
+    expect(key.type).toBe("secret");
+    expect(key.extractable).toBe(true);
+    expect(key.algorithm.name).toBe("AES-CBC");
+    expect(key.usages).toEqual(["encrypt", "decrypt"]);
+  });
+
+  test("ECDSA key pairs generation", () => {
+    const { publicKey, privateKey } = new CryptoKey({ name: "ECDSA", namedCurve: "P-521" }, true, [
+      "sign",
+      "verify",
+    ]);
+    expect(publicKey.type).toBe("public");
+    expect(privateKey.type).toBe("private");
+    expect(publicKey.algorithm.name).toBe("ECDSA");
+    expect(privateKey.algorithm.namedCurve).toBe("P-521");
+  });
+
+  test("Ed25519 & X25519 key pairs generation", () => {
+    const edKey = new CryptoKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    expect(edKey.publicKey.type).toBe("public");
+    expect(edKey.privateKey.type).toBe("private");
+
+    const xKey = new CryptoKey({ name: "X25519" }, true, ["deriveKey"]);
+    expect(xKey.publicKey.type).toBe("public");
+    expect(xKey.privateKey.type).toBe("private");
+  });
+
+  test("HMAC key generation", () => {
+    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-256" } }, true, [
+      "sign",
+      "verify",
+    ]);
+    expect(key.type).toBe("secret");
+    expect(key.algorithm.name).toBe("HMAC");
+  });
+
+  test("RSA key pairs generation", () => {
+    const publicExponent = new Uint8Array([1, 0, 1]);
+    const { publicKey, privateKey } = new CryptoKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: Array.from(publicExponent),
+        hash: { name: "SHA-256" },
+      },
+      true,
+      ["sign", "verify"],
+    );
+    expect(publicKey.type).toBe("public");
+    expect(privateKey.type).toBe("private");
+  });
+
+  test("Encryption and Decryption (static and instance)", () => {
+    const key = new CryptoKey({ name: "AES-CBC", length: 256 }, true, ["encrypt", "decrypt"]);
+    const iv = Buffer.alloc(16, 1);
+    const plaintext = Buffer.from("Hello, World!");
+
+    const cipher = key.encrypt({ name: "AES-CBC", iv: Array.from(iv) }, key, plaintext);
+    expect(cipher).toBeDefined();
+
+    const decrypted = key.decrypt({ name: "AES-CBC", iv: Array.from(iv) }, key, cipher);
+    expect(decrypted.toString()).toBe("Hello, World!");
+  });
+
+  test("Exporting and Importing keys", () => {
+    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-512" } }, true, [
+      "sign",
+      "verify",
+    ]);
+    const exported = CryptoKey.exportKey("raw", key);
+    expect(exported).toBeDefined();
+
+    const imported = CryptoKey.import("raw", exported, { name: "HMAC" }, true, ["sign", "verify"]);
+    expect(imported.type).toBe("secret");
+  });
+
+  test("Wrapping and Unwrapping keys", () => {
+    const key = new CryptoKey({ name: "HMAC" }, true, ["sign", "verify"]);
+    const wrappingKey = new CryptoKey({ name: "AES-KW", length: 256 }, true, [
+      "wrapKey",
+      "unwrapKey",
+    ]);
+
+    const wrappedKey = CryptoKey.wrapKey("raw", key, wrappingKey, { name: "AES-KW" });
+    expect(wrappedKey).toBeDefined();
+
+    const unwrapped = CryptoKey.unwrapKey(
+      "raw",
+      wrappedKey,
+      wrappingKey,
+      { name: "AES-KW" },
+      { name: "HMAC" },
+      true,
+      ["sign", "verify"],
+    );
+    expect(unwrapped.type).toBe("secret");
+  });
+
+  test("Deriving keys and bits", () => {
+    const baseKey = new CryptoKey({ name: "PBKDF2" }, true, ["deriveKey", "deriveBits"]);
+    const bits = CryptoKey.deriveBits({ name: "PBKDF2" }, baseKey, 256);
+    expect(bits.length).toBe(32);
+
+    const derived = CryptoKey.deriveKey(
+      { name: "PBKDF2" },
+      baseKey,
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt"],
+    );
+    expect(derived.type).toBe("secret");
+  });
+
+  test("Decapsulating key", () => {
+    const decapsulationKey = new CryptoKey({ name: "ML-KEM-768" }, true, ["decapsulateKey"]);
+    const ciphertext = Buffer.alloc(1088, 5);
+
+    const decapsulatedKey = decapsulationKey.decapsulateKey(
+      { name: "ML-KEM-768" },
+      decapsulationKey,
+      ciphertext,
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"],
+    );
+    expect(decapsulatedKey.type).toBe("secret");
+  });
+
+  test("CryptoKey.supports feature detection", () => {
+    expect(CryptoKey.supports("importKey", "Argon2id")).toBe(true);
+    expect(CryptoKey.supports("encrypt", "AES-CBC")).toBe(true);
+    expect(CryptoKey.supports("sign", "ECDSA")).toBe(true);
+    expect(CryptoKey.supports("decapsulateKey", "ML-KEM-768")).toBe(true);
+    expect(CryptoKey.supports("unknownOp", "AES-CBC")).toBe(false);
+  });
+
+  test("CryptoKey.Format enum property", () => {
+    expect(CryptoKey.Format).toBeDefined();
+    expect(CryptoKey.Format.Raw).toBe(0);
   });
 });
