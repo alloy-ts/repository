@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { Multisig, MultisigBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
+import { Multisig, MultisigBuilder, SignatureBytes, SignatureScheme, CryptoKeyFormat, Signature } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
 
@@ -136,6 +136,20 @@ describe("threshold disclosure", () => {
     expect(() =>
       new MultisigBuilder("bls12_381-g2-share-msig").withDisclosure(9, null, 3, 5),
     ).toThrow();
+  });
+});
+
+describe("CryptoKeyFormat / Signature", () => {
+  test("CryptoKeyFormat enum values exist", () => {
+    expect(CryptoKeyFormat.Raw).toBeDefined();
+    expect(CryptoKeyFormat.Jwk).toBeDefined();
+    expect(CryptoKeyFormat.Spki).toBeDefined();
+    expect(CryptoKeyFormat.Pkcs8).toBeDefined();
+  });
+
+  test("Signature constructor with CryptoKeyFormat", () => {
+    const sig = new Signature(CryptoKeyFormat.Raw);
+    expect(sig.keyFormat).toBe(CryptoKeyFormat.Raw);
   });
 });
 
