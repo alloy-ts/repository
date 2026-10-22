@@ -51,6 +51,24 @@ impl From<Replace> for Revision {
     }
 }
 
+fn default_author_meta(r: &gix::Repository) -> (String, String, String) {
+    let author = r.author().and_then(|a| a.ok());
+    let author_name = author
+        .as_ref()
+        .map(|a| a.name.to_string())
+        .unwrap_or_else(|| "gitoxide".to_string());
+    let author_email = author
+        .as_ref()
+        .map(|a| a.email.to_string())
+        .unwrap_or_else(|| "gitoxide@localhost".to_string());
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    (author_name, author_email, ts)
+}
+
 /// Root replacement manifest object for a stable static artifact/entry/object history.
 #[derive(Clone)]
 #[napi(object)]
@@ -103,9 +121,16 @@ impl Repository {
 
     /// Create or update a replacement ref for `aid` pointing to `replacement_oid`.
     #[napi]
-    pub fn set_replace(&self, aid: String, replacement_oid: String) -> Result<Replace> {
+    pub fn set_replace(
+        &self,
+        aid: String,
+        replacement_oid: String,
+        type_: Option<String>,
+        path: Option<String>,
+    ) -> Result<Replace> {
         let r = thread_local(&self.inner);
         let ref_name = format!("refs/replace/{aid}");
+        let node_ref_name = format!("refs/replace/{replacement_oid}");
         let target_id = parse_oid(&replacement_oid)?;
 
         let prev_ref = r.try_find_reference(&ref_name).ok().flatten().map(|rf| match rf.target() {
@@ -113,6 +138,7 @@ impl Repository {
             _ => String::new(),
         });
 
+        // Set head ref refs/replace/{aid}
         r.reference(
             ref_name.as_str(),
             target_id,
@@ -121,31 +147,72 @@ impl Repository {
         )
         .map_err(|e| err("set_replace", e))?;
 
-        let author = r.author().and_then(|a| a.ok());
-        let author_name = author.as_ref().map(|a| a.name.to_string()).unwrap_or_else(|| "gitoxide".to_string());
-        let author_email = author.as_ref().map(|a| a.email.to_string()).unwrap_or_else(|| "gitoxide@localhost".to_string());
+        // Also set individual replace node ref at refs/replace/{replacement_oid}
+        if replacement_oid != aid {
+            let _ = r.reference(
+                node_ref_name.as_str(),
+                target_id,
+                gix::refs::transaction::PreviousValue::Any,
+                format!("replace node {replacement_oid}"),
+            );
+        }
+
+        let is_entry = type_.as_deref() == Some("entry");
+        let (author_name, author_email, updated_at) = if is_entry {
+            if let Ok(head_commit) = r.head_commit() {
+                if let Ok(c) = head_commit.decode() {
+                    let author = c.author().ok();
+                    let name = author
+                        .as_ref()
+                        .map(|a| String::from_utf8_lossy(a.name).into_owned())
+                        .unwrap_or_else(|| "gitoxide".to_string());
+                    let email = author
+                        .as_ref()
+                        .map(|a| String::from_utf8_lossy(a.email).into_owned())
+                        .unwrap_or_else(|| "gitoxide@localhost".to_string());
+                    let ts = author
+                        .as_ref()
+                        .and_then(|a| a.time().ok())
+                        .map(|t| t.seconds.to_string())
+                        .unwrap_or_else(|| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                                .to_string()
+                        });
+                    (name, email, ts)
+                } else {
+                    default_author_meta(&r)
+                }
+            } else {
+                default_author_meta(&r)
+            }
+        } else {
+            default_author_meta(&r)
+        };
 
         Ok(Replace {
-            this: ref_name.clone(),
+            this: if replacement_oid != aid { node_ref_name } else { ref_name.clone() },
             prev: prev_ref,
             next: None,
             head: Some(ref_name),
             author_name,
             author_email,
-            updated_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                .to_string(),
+            updated_at,
         })
     }
 
     /// Get replace manifest for stable artifact ID (`aid`).
     #[napi]
-    pub fn replace_manifest(&self, aid: String, type_: Option<String>, path: Option<String>) -> Result<ReplaceManifest> {
-        let node = self.get_replace(aid.clone())?;
+    pub fn replace_manifest(
+        &self,
+        aid: String,
+        type_: Option<String>,
+        path: Option<String>,
+    ) -> Result<ReplaceManifest> {
         let mut revisions = Vec::new();
-        if let Some(n) = node {
+        if let Ok(Some(n)) = self.get_replace(aid.clone()) {
             revisions.push(n);
         }
         let head = revisions.first().and_then(|r| r.head.clone());

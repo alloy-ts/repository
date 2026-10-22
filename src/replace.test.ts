@@ -67,4 +67,45 @@ describe("Replace / Revision / ReplaceManifest NAPI bindings (src/replace.rs)", 
     expect(manifest.revisions.length).toBe(1);
     expect(manifest.head).toBe(`refs/replace/${headId}`);
   });
+
+  test("replacement for each object type (blob, tree, commit, tag, entry)", () => {
+    const headCommit = repo.headCommit();
+
+    // 1. Blob
+    const blobId = repo.writeBlob(Buffer.from("blob obj\n"));
+    const blobRep = repo.setReplace(blobId, blobId, "blob");
+    expect(blobRep.this).toBe(`refs/replace/${blobId}`);
+
+    // 2. Tree
+    const treeId = headCommit.treeId;
+    const treeRep = repo.setReplace(treeId, treeId, "tree");
+    expect(treeRep.this).toBe(`refs/replace/${treeId}`);
+
+    // 3. Commit
+    const commitRep = repo.setReplace(headCommit.id, headCommit.id, "commit");
+    expect(commitRep.this).toBe(`refs/replace/${headCommit.id}`);
+
+    // 4. Tag
+    const tagId = repo.writeTag({
+      name: "v1.0.0-test",
+      target: headCommit.id,
+      targetKind: "commit",
+      message: "tag obj\n",
+    });
+    const tagRep = repo.setReplace(tagId, tagId, "tag");
+    expect(tagRep.this).toBe(`refs/replace/${tagId}`);
+
+    // 5. Entry
+    const entryPath = "Cargo.toml";
+    const entryBlobId = repo.writeBlob(Buffer.from("entry obj\n"));
+    const entryRep = repo.setReplace(entryBlobId, entryBlobId, "entry", entryPath);
+    expect(entryRep.this).toBe(`refs/replace/${entryBlobId}`);
+    expect(typeof entryRep.authorName).toBe("string");
+    expect(typeof entryRep.authorEmail).toBe("string");
+    expect(typeof entryRep.updatedAt).toBe("string");
+
+    const entryManifest = repo.replaceManifest(entryBlobId, "entry", entryPath);
+    expect(entryManifest.type).toBe("entry");
+    expect(entryManifest.path).toBe(entryPath);
+  });
 });

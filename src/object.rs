@@ -73,6 +73,15 @@ pub struct TreeEntry {
     pub id: String,
 }
 
+/// A git entry object (a versioned tree/index file entry) exposed to TypeScript.
+#[derive(Clone)]
+#[napi(object)]
+pub struct Entry {
+    pub path: String,
+    pub mode: String,
+    pub id: String,
+}
+
 /// A git tree exposed to TypeScript.
 #[napi]
 pub struct Tree {
