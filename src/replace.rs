@@ -42,7 +42,7 @@ pub struct ReplaceOptions {
 /// content oid for fast traversal without walking the chain.
 #[derive(Clone, Serialize, Deserialize)]
 #[napi(object)]
-pub struct ReplaceNode {
+pub struct Replace {
     /// This revision's own content oid (its reference).
     #[serde(rename = "this")]
     pub this_ref: String,
@@ -65,11 +65,16 @@ pub struct ReplaceNode {
     pub updated_at: String,
 }
 
+/// Alias for `Replace` representing a single revision node.
+pub type Revision = Replace;
+/// Backward-compatible alias for `Replace`.
+pub type ReplaceNode = Replace;
+
 /// The revision-history manifest for a single replaced object, as stored in the
 /// blob pointed at by `refs/replace/<oid|path>`.
 ///
 /// `id`/`$ref` identify the original object, `head` is the latest revision
-/// content id, `revisions` is the full ordered list of [`ReplaceNode`]s (oldest
+/// content id, `revisions` is the full ordered list of [`Revision`]s (oldest
 /// first), and `path` is present only when the replaced object is a tracked tree
 /// entry (`type == "entry"`).
 #[napi(object)]
@@ -83,7 +88,7 @@ pub struct ReplaceManifest {
     /// The object id of the latest revision content.
     pub head: String,
     /// All revision nodes, oldest first; the last element's `this` equals `head`.
-    pub revisions: Vec<ReplaceNode>,
+    pub revisions: Vec<Revision>,
 }
 
 /// The outcome of a [`Repository::replace`] / [`Repository::try_replace`] call.
@@ -113,7 +118,7 @@ struct Manifest {
     head: String,
     /// Ordered revision nodes, oldest first.
     #[serde(default)]
-    revisions: Vec<ReplaceNode>,
+    revisions: Vec<Revision>,
 }
 
 impl From<Manifest> for ReplaceManifest {
@@ -180,7 +185,8 @@ fn find_entry_path_in_tree(
     target: &gix::ObjectId,
     prefix: String,
 ) -> Option<String> {
-    let tree = r.find_tree(tree_id).ok()?.decode().ok()?;
+    let tree_obj = r.find_tree(tree_id).ok()?;
+    let tree = tree_obj.decode().ok()?;
     for entry in &tree.entries {
         let name = lossy(&entry.filename);
         let full = if prefix.is_empty() {
@@ -188,8 +194,8 @@ fn find_entry_path_in_tree(
         } else {
             format!("{prefix}/{name}")
         };
-        if entry.mode == gix::object::tree::EntryMode::TREE {
-            if let Some(found) = find_entry_path_in_tree(r, entry.oid, target, full) {
+        if entry.mode.is_tree() {
+            if let Some(found) = find_entry_path_in_tree(r, entry.oid.to_owned(), target, full) {
                 return Some(found);
             }
         } else if &entry.oid == target {

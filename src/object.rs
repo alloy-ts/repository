@@ -111,6 +111,21 @@ impl GitObject {
             .map_err(|e| err("peel_to_tree", e))?;
         build_tree(&self.repo, peeled.id)
     }
+
+    /// Replace this object with new `content`, recording a revision history under `refs/replace/*`.
+    ///
+    /// Instance method form of `Repository::replace`.
+    #[napi]
+    pub fn replace(
+        &self,
+        content: napi::bindgen_prelude::Either<Buffer, String>,
+        options: Option<crate::replace::ReplaceOptions>,
+    ) -> Result<crate::replace::ReplaceResult> {
+        let repository = Repository {
+            inner: Arc::clone(&self.repo),
+        };
+        repository.replace(self.id.to_string(), content, options)
+    }
 }
 
 // ---- builders ---------------------------------------------------------------
