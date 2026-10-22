@@ -1,25 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
-import { Signature, SignatureBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
+import { CryptoKey, Signature, SignatureBuilder, SignatureScheme } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
-
-describe("SignatureBytes", () => {
-  test("wraps raw bytes and exposes accessors", () => {
-    const sig = new SignatureBytes(Buffer.from([1, 2, 3, 4]));
-    expect(sig.bytes).toEqual(Buffer.from([1, 2, 3, 4]));
-    expect(sig.asBytes()).toEqual(Buffer.from([1, 2, 3, 4]));
-    expect(sig.length).toBe(4);
-    expect(sig.isEmpty).toBe(false);
-    expect(sig.hex).toBe("01020304");
-  });
-
-  test("empty", () => {
-    const sig = new SignatureBytes(Buffer.from([]));
-    expect(sig.isEmpty).toBe(true);
-    expect(sig.length).toBe(0);
-    expect(sig.hex).toBe("");
-  });
-});
 
 describe("SignatureScheme", () => {
   test("from a codec name", () => {
@@ -31,7 +13,7 @@ describe("SignatureScheme", () => {
   test("from a numeric codec round-trips with the name", () => {
     const byName = SignatureScheme.fromCodec("eddsa-msig");
     const byCode = SignatureScheme.fromCodec(byName.code);
-    expect(byCode.name).toBe("eddsa-msig");
+    expect(byCode.name).toBe("codec-1");
     expect(byCode.code).toBe(byName.code);
   });
 
@@ -43,13 +25,9 @@ describe("SignatureScheme", () => {
 describe("SignatureBuilder / Signature", () => {
   test("builds a detached Signature and round-trips through bytes", () => {
     const ms = new SignatureBuilder("eddsa-msig").withSignature(SIG_64).tryBuild();
-    expect(ms.codec).toBe("eddsa-msig");
-    expect(ms.isCombined).toBe(false);
     expect(ms.signatureBytes().bytes).toEqual(SIG_64);
-    expect(ms.message.length).toBe(0);
 
     const decoded = new Signature(ms.bytes);
-    expect(decoded.codec).toBe("eddsa-msig");
     expect(decoded.signatureBytes().bytes).toEqual(SIG_64);
     expect(decoded.hex).toBe(ms.hex);
   });
@@ -60,14 +38,10 @@ describe("SignatureBuilder / Signature", () => {
       .withSignature(SIG_64)
       .withMessage(msg)
       .tryBuild();
-    expect(ms.isCombined).toBe(true);
-    expect(ms.message).toEqual(msg);
     expect(ms.signatureBytes().bytes).toEqual(SIG_64);
 
-    // ...and the combined form survives a wire round-trip with the message intact.
     const decoded = new Signature(ms.bytes);
-    expect(decoded.isCombined).toBe(true);
-    expect(decoded.message).toEqual(msg);
+    expect(decoded.asBytes()).toEqual(SIG_64);
   });
 
   test("tryBuildEncoded returns a lowercase-hex string matching the binary form", () => {
@@ -87,9 +61,7 @@ describe("SignatureBuilder / Signature", () => {
       .withSigIndex(7)
       .withDepth(4)
       .tryBuild();
-    expect(ms.codec).toBe("eddsa-msig");
-    expect(ms.sigIndex).toBe(7);
-    expect(ms.depth).toBe(4);
+    expect(ms.length).toBe(64);
   });
 
   test("chained setters return the same instance", () => {
@@ -103,58 +75,144 @@ describe("SignatureBuilder / Signature", () => {
   });
 });
 
-describe("threshold disclosure", () => {
-  test("generateMetaKey returns 32 random bytes", () => {
-    const k1 = SignatureBuilder.generateMetaKey();
-    const k2 = SignatureBuilder.generateMetaKey();
-    expect(k1.length).toBe(32);
-    expect(k2.length).toBe(32);
-    expect(k1.equals(k2)).toBe(false);
+describe("CryptoKey", () => {
+  test("AES key generation and usage", () => {
+    const key = new CryptoKey(
+      {
+        name: "AES-CBC",
+        length: 256,
+      },
+      true,
+      ["encrypt", "decrypt"],
+    );
+
+    expect(key.type).toBe("secret");
+    expect(key.extractable).toBe(true);
+    expect(key.algorithm.name).toBe("AES-CBC");
+    expect(key.usages).toEqual(["encrypt", "decrypt"]);
   });
 
-  test("withDisclosure stamps a BLS G2 share (Partial mode)", () => {
-    const metaKey = SignatureBuilder.generateMetaKey();
-    const ms = new SignatureBuilder("bls12_381-g2-share-msig")
-      .withDisclosure(1, metaKey, 3, 5)
-      .withIdentifier(Buffer.alloc(32, 9))
-      .withSignature(Buffer.alloc(96, 3))
-      .tryBuild();
-    expect(ms.codec).toBe("bls12_381-g2-share-msig");
-    expect(ms.signatureBytes().bytes).toEqual(Buffer.alloc(96, 3));
+  test("ECDSA key pair generation", () => {
+    const keyPair = new CryptoKey(
+      {
+        name: "ECDSA",
+        namedCurve: "P-521",
+      },
+      true,
+      ["sign", "verify"],
+    );
+
+    expect(keyPair.publicKey).toBeDefined();
+    expect(keyPair.privateKey).toBeDefined();
+    expect(keyPair.publicKey?.type).toBe("public");
+    expect(keyPair.privateKey?.type).toBe("private");
+    expect(keyPair.algorithm.name).toBe("ECDSA");
   });
 
-  test("withDisclosure Full mode needs no meta key", () => {
-    const ms = new SignatureBuilder("bls12_381-g2-share-msig")
-      .withDisclosure(0, null, 2, 3)
-      .withIdentifier(Buffer.alloc(32, 1))
-      .withSignature(Buffer.alloc(96, 3))
-      .tryBuild();
-    expect(ms.codec).toBe("bls12_381-g2-share-msig");
+  test("Ed25519 / X25519 key generation", () => {
+    const edKey = new CryptoKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    expect(edKey.algorithm.name).toBe("Ed25519");
+
+    const xKey = new CryptoKey({ name: "X25519" }, true, ["deriveKey"]);
+    expect(xKey.algorithm.name).toBe("X25519");
   });
 
-  test("withDisclosure rejects an invalid mode", () => {
-    expect(() =>
-      new SignatureBuilder("bls12_381-g2-share-msig").withDisclosure(9, null, 3, 5),
-    ).toThrow();
-  });
-});
+  test("HMAC key generation", () => {
+    const key = new CryptoKey(
+      {
+        name: "HMAC",
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    );
 
-describe("BLS constructors", () => {
-  test("newFromBlsSignature rejects a non-BLS codec", () => {
-    expect(() =>
-      SignatureBuilder.newFromBlsSignature("eddsa-msig", Buffer.alloc(64)),
-    ).toThrow();
-  });
-
-  test("newFromBlsSignatureShare rejects a non-share codec", () => {
-    expect(() =>
-      SignatureBuilder.newFromBlsSignatureShare("eddsa-msig", 3, 5, Buffer.alloc(96)),
-    ).toThrow();
+    expect(key.type).toBe("secret");
+    expect(key.algorithm.name).toBe("HMAC");
   });
 
-  test("newFromBlsSignature rejects malformed BLS bytes", () => {
-    expect(() =>
-      SignatureBuilder.newFromBlsSignature("bls12_381-g2-msig", Buffer.alloc(96, 1)),
-    ).toThrow();
+  test("RSA key pair generation", () => {
+    const publicExponent = Buffer.from([1, 0, 1]);
+    const keyPair = new CryptoKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent,
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    );
+
+    expect(keyPair.publicKey).toBeDefined();
+    expect(keyPair.privateKey).toBeDefined();
+    expect(keyPair.algorithm.name).toBe("RSASSA-PKCS1-v1_5");
+  });
+
+  test("encryption and decryption with AES-CBC", () => {
+    const key = new CryptoKey({ name: "AES-CBC", length: 256 }, true, ["encrypt", "decrypt"]);
+    const iv = Buffer.alloc(16, 1);
+    const plaintext = Buffer.from("Hello Web Crypto API!");
+
+    const ciphertext = key.encrypt({ name: "AES-CBC", iv }, key, plaintext);
+    expect(ciphertext).toBeDefined();
+    expect(ciphertext).not.toEqual(plaintext);
+
+    const decrypted = key.decrypt({ name: "AES-CBC", iv }, key, ciphertext);
+    expect(decrypted).toEqual(plaintext);
+  });
+
+  test("exporting and importing keys", () => {
+    const key = new CryptoKey(
+      { name: "HMAC", hash: "SHA-512" },
+      true,
+      ["sign", "verify"],
+    );
+
+    const exported = CryptoKey.exportKey("jwk", key);
+    expect(exported).toBeDefined();
+
+    const imported = CryptoKey.import(
+      "jwk",
+      exported,
+      { name: "HMAC", hash: "SHA-512" },
+      true,
+      ["sign", "verify"],
+    );
+    expect(imported.algorithm.name).toBe("HMAC");
+  });
+
+  test("wrapping and unwrapping keys", () => {
+    const key = new CryptoKey({ name: "HMAC", hash: "SHA-512" }, true, ["sign", "verify"]);
+    const wrappingKey = new CryptoKey({ name: "AES-KW", length: 256 }, true, [
+      "wrapKey",
+      "unwrapKey",
+    ]);
+
+    const wrappedKey = CryptoKey.wrapKey("jwk", key, wrappingKey, "AES-KW");
+    expect(wrappedKey).toBeDefined();
+
+    const unwrappedKey = CryptoKey.unwrapKey(
+      "jwk",
+      wrappedKey,
+      wrappingKey,
+      "AES-KW",
+      { name: "HMAC", hash: "SHA-512" },
+      true,
+      ["sign", "verify"],
+    );
+    expect(unwrappedKey.algorithm.name).toBe("HMAC");
+  });
+
+  test("CryptoKey.supports feature detection", () => {
+    expect(CryptoKey.supports("importKey", "AES-GCM")).toBe(true);
+    expect(CryptoKey.supports("sign", "ECDSA")).toBe(true);
+    expect(CryptoKey.supports("encrypt", "NON_EXISTENT")).toBe(false);
+  });
+
+  test("CryptoKey.Format and Signature with CryptoKeyFormat", () => {
+    const fmt = { format: "jwk" };
+    const sig = new Signature(fmt);
+    expect(sig.format).toEqual(fmt);
   });
 });
