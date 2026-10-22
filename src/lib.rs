@@ -14,6 +14,7 @@ mod object;
 mod pathspec;
 mod reference;
 mod remote;
+mod replace;
 mod repository;
 mod revision;
 mod submodule;

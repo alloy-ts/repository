@@ -209,6 +209,15 @@ impl GitObject {
             id: peeled.id,
         })
     }
+
+    /// Replace this object's content with new content, returning the replace manifest.
+    #[napi]
+    pub fn replace(&self, new_content: Buffer, path: Option<String>) -> Result<crate::replace::ReplaceManifest> {
+        let repo = Repository {
+            inner: Arc::clone(&self.repo),
+        };
+        repo.replace(self.id.to_string(), new_content, path)
+    }
 }
 
 /// A git tag object exposed to TypeScript.
