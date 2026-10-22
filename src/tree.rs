@@ -92,8 +92,19 @@ impl Tree {
             mode: mode_string(e.mode().into()),
             filename: lossy(e.filename()),
             id: e.id().detach(),
+            path: path.clone(),
         }))
     }
+}
+
+/// Commit metadata associated with an entry.
+#[napi(object)]
+pub struct CommitMetadata {
+    pub author_name: String,
+    pub author_email: String,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub commit_timestamp: f64,
 }
 
 /// A tree entry resolved through a path lookup, with repository access for further traversal.
@@ -104,6 +115,7 @@ pub struct Entry {
     mode: String,
     filename: String,
     id: gix::ObjectId,
+    path: String,
 }
 
 #[napi]
@@ -118,6 +130,12 @@ impl Entry {
     #[napi(getter)]
     pub fn filename(&self) -> String {
         self.filename.clone()
+    }
+
+    /// The path relative to the root tree.
+    #[napi(getter)]
+    pub fn path(&self) -> String {
+        self.path.clone()
     }
 
     /// The object id this entry points to.
@@ -145,6 +163,32 @@ impl Entry {
             return Ok(None);
         }
         build_tree(&self.repo, self.id).map(Some)
+    }
+
+    /// Find commit metadata containing this tree entry.
+    #[napi]
+    pub fn commit_metadata(&self) -> Result<Option<CommitMetadata>> {
+        let r = thread_local(&self.repo);
+        let mut head_ref = match r.head() {
+            Ok(h) => h,
+            Err(_) => return Ok(None),
+        };
+        let commit = match head_ref.peel_to_commit_in_place() {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+
+        let author = commit.author().map_err(|e| err("author", e))?;
+        let author_time = author.time().map_err(|e| err("author.time", e))?;
+        let committer = commit.committer().map_err(|e| err("committer", e))?;
+
+        Ok(Some(CommitMetadata {
+            author_name: lossy(author.name),
+            author_email: lossy(author.email),
+            committer_name: lossy(committer.name),
+            committer_email: lossy(committer.email),
+            commit_timestamp: author_time.seconds as f64,
+        }))
     }
 }
 
