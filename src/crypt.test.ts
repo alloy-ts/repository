@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { Multisig, MultisigBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
+import { CryptoKey, Multisig, MultisigBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
 
@@ -136,6 +136,21 @@ describe("threshold disclosure", () => {
     expect(() =>
       new MultisigBuilder("bls12_381-g2-share-msig").withDisclosure(9, null, 3, 5),
     ).toThrow();
+  });
+});
+
+describe("CryptoKey", () => {
+  test("instantiates a CryptoKey object", () => {
+    const keyData: CryptoKey = {
+      algorithm: { name: "AES-CBC", length: 256 },
+      extractable: true,
+      type: "secret",
+      usages: ["encrypt", "decrypt"],
+    };
+    expect(keyData.algorithm).toEqual({ name: "AES-CBC", length: 256 });
+    expect(keyData.extractable).toBe(true);
+    expect(keyData.type).toBe("secret");
+    expect(keyData.usages).toEqual(["encrypt", "decrypt"]);
   });
 });
 
