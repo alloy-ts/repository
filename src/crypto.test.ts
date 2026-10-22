@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { CryptoKey, isFormatSupported } from "./main.ts";
+import { CryptoKey, KeyFormat, Signature, isFormatSupported } from "./main.ts";
 
 describe("CryptoKey & format NAPI bindings", () => {
   test("CryptoKey.supports feature detection", () => {
@@ -7,6 +7,12 @@ describe("CryptoKey & format NAPI bindings", () => {
     expect(CryptoKey.supports("sign", "HMAC")).toBe(true);
     expect(CryptoKey.supports("decapsulateKey", "ML-KEM-768")).toBe(true);
     expect(CryptoKey.supports("encrypt", "UNSUPPORTED_ALG")).toBe(false);
+  });
+
+  test("Signature constructor with KeyFormat", () => {
+    const sig = new Signature(KeyFormat.Raw);
+    expect(sig).toBeDefined();
+    expect(sig.keyFormat).toBe(KeyFormat.Raw);
   });
 
   test("isFormatSupported queries key format support", () => {

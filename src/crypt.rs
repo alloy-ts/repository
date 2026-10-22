@@ -2,6 +2,18 @@ use napi::Result;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
+/// Supported key formats for import/export.
+#[napi]
+pub enum KeyFormat {
+    Raw,
+    RawSecret,
+    RawPublic,
+    RawSeed,
+    Spki,
+    Pkcs8,
+    Jwk,
+}
+
 /// Representation of algorithm specification for WebCrypto CryptoKey.
 #[napi(object)]
 pub struct CryptoKeyAlgorithm {
@@ -17,6 +29,7 @@ pub struct CryptoKeyAlgorithm {
 #[derive(Clone)]
 #[napi]
 pub struct CryptoKey {
+    #[napi(js_name = "type")]
     pub type_: String,
     pub extractable: bool,
     pub algorithm_name: String,
@@ -45,6 +58,12 @@ impl CryptoKey {
             usages,
             handle: vec![],
         })
+    }
+
+    /// Key format property accessible via `CryptoKey.Format`.
+    #[napi(getter, js_name = "Format")]
+    pub fn format_enum() -> KeyFormat {
+        KeyFormat::Raw
     }
 
     /// Check if an algorithm and operation are supported.
@@ -131,5 +150,19 @@ impl CryptoKey {
         _usages: Vec<String>,
     ) -> Result<CryptoKey> {
         Err(napi::Error::from_reason("Decapsulate key not implemented"))
+    }
+}
+
+/// A cryptographic signature representation created with a key format.
+#[napi]
+pub struct Signature {
+    pub key_format: KeyFormat,
+}
+
+#[napi]
+impl Signature {
+    #[napi(constructor)]
+    pub fn new(key_format: KeyFormat) -> Self {
+        Signature { key_format }
     }
 }
