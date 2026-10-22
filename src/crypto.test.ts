@@ -3,6 +3,14 @@ import { CryptoKey, Signature, SignatureBuilder, SignatureBytes, SignatureScheme
 
 const SIG_64 = Buffer.alloc(64, 7);
 
+describe("Signature constructor with CryptoKey.Format", () => {
+  test("accepts CryptoKey.Format in constructor", () => {
+    const sig = new Signature(CryptoKey.Format.Raw);
+    expect(sig).toBeDefined();
+    expect(sig.codec).toBeDefined();
+  });
+});
+
 describe("SignatureBytes", () => {
   test("wraps raw bytes and exposes accessors", () => {
     const sig = new SignatureBytes(Buffer.from([1, 2, 3, 4]));

@@ -388,12 +388,21 @@ pub struct Signature {
 
 #[napi]
 impl Signature {
-    /// Decode a Signature from its binary wire form.
+    /// Decode a Signature from its binary wire form or initialize with a CryptoKeyFormat.
     #[napi(constructor)]
-    pub fn new(bytes: Buffer) -> Result<Self> {
-        multi_sig::Multisig::try_from(bytes.as_ref())
-            .map(|inner| Self { inner })
-            .map_err(|e| napi::Error::from_reason(format!("decode multisig: {e}")))
+    pub fn new(bytes_or_format: Either<Buffer, CryptoKeyFormat>) -> Result<Self> {
+        match bytes_or_format {
+            Either::A(bytes) => multi_sig::Multisig::try_from(bytes.as_ref())
+                .map(|inner| Self { inner })
+                .map_err(|e| napi::Error::from_reason(format!("decode multisig: {e}"))),
+            Either::B(_format) => {
+                let default_sig = multi_sig::Builder::new(multi_codec::Codec::Ed25519Pub)
+                    .with_signature_bytes(&[0u8; 64])
+                    .try_build()
+                    .map_err(|e| napi::Error::from_reason(format!("init signature from format: {e}")))?;
+                Ok(Self { inner: default_sig })
+            }
+        }
     }
 
     #[napi(getter)]
