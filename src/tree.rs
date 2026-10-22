@@ -138,6 +138,18 @@ impl Entry {
         self.mode == "040000"
     }
 
+    /// The object type string ("entry", "blob", "tree", "commit", etc.).
+    #[napi(getter)]
+    pub fn object_type(&self) -> String {
+        if self.is_tree() {
+            "tree".to_string()
+        } else if self.mode == "160000" {
+            "commit".to_string()
+        } else {
+            "entry".to_string()
+        }
+    }
+
     /// If this entry is a directory, resolve it as a [`Tree`]; otherwise `null`.
     #[napi]
     pub fn as_tree(&self) -> Result<Option<Tree>> {
