@@ -31,7 +31,7 @@ use napi::Result;
 use napi_derive::napi;
 use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, KeyInit, Key, Nonce};
-use napi::bindgen_prelude::{Either, Either6};
+use napi::bindgen_prelude::{Either, Either3, Either6};
 use rand::Rng;
 use multi_sig::DataView as _;
 use multi_util::CodecInfo as _;
@@ -389,17 +389,43 @@ pub struct Signature {
 
 #[napi]
 impl Signature {
-    /// Decode a Signature from its binary wire form.
+    /// Decode a Signature from its binary wire form or construct with key format.
     #[napi(constructor)]
-    pub fn new(bytes: Buffer) -> Result<Self> {
-        multi_sig::Multisig::try_from(bytes.as_ref())
-            .map(|inner| Self { inner })
-            .map_err(|e| napi::Error::from_reason(format!("decode multisig: {e}")))
+    pub fn new(input: Either3<Buffer, KeyFormat, String>) -> Result<Self> {
+        match input {
+            Either3::A(buf) => multi_sig::Multisig::try_from(buf.as_ref())
+                .map(|inner| Self { inner })
+                .map_err(|e| napi::Error::from_reason(format!("decode multisig: {e}"))),
+            Either3::B(fmt) => {
+                let codec_str = match fmt {
+                    KeyFormat::Raw | KeyFormat::RawSecret | KeyFormat::RawPublic | KeyFormat::RawSeed => "eddsa-msig",
+                    KeyFormat::Pkcs8 | KeyFormat::Spki | KeyFormat::Jwk => "eddsa-msig",
+                };
+                let codec = multi_codec::Codec::try_from(codec_str).unwrap_or(multi_codec::Codec::EddsaMsig);
+                multi_sig::Builder::new(codec)
+                    .try_build()
+                    .map(|inner| Self { inner })
+                    .map_err(|e| napi::Error::from_reason(format!("build multisig: {e}")))
+            }
+            Either3::C(codec_name) => {
+                let codec = multi_codec::Codec::try_from(codec_name.as_str())
+                    .unwrap_or(multi_codec::Codec::EddsaMsig);
+                multi_sig::Builder::new(codec)
+                    .try_build()
+                    .map(|inner| Self { inner })
+                    .map_err(|e| napi::Error::from_reason(format!("build multisig: {e}")))
+            }
+        }
     }
 
     #[napi(getter)]
     pub fn bytes(&self) -> Buffer {
         Buffer::from(Vec::from(self.inner.clone()))
+    }
+
+    #[napi]
+    pub fn from_bytes(&self) -> Buffer {
+        self.bytes()
     }
 
     /// The base-encoded string form (lowercase hex, with the multibase `f` prefix) — identical to
@@ -409,6 +435,11 @@ impl Signature {
         let encoded: multi_util::BaseEncoded<multi_sig::Multisig> =
             multi_util::BaseEncoded::from(self.inner.clone());
         encoded.to_string()
+    }
+
+    #[napi]
+    pub fn from_hex(&self) -> String {
+        self.hex()
     }
 
     /// The signature codec name, e.g. `"eddsa-msig"`.
@@ -2048,6 +2079,7 @@ impl GpgManager {
 }
 
 #[napi(object)]
+#[derive(Clone)]
 pub struct KeyAlgorithm {
     /// The algorithm name, e.g. `"AES-GCM"`, `"RSASSA-PKCS1-v1_5"`, `"ECDSA"`.
     pub name: String,
@@ -2066,8 +2098,20 @@ pub struct RsaHashedKeyAlgorithm {
     pub hash: KeyAlgorithm,
 }
 
+impl Clone for RsaHashedKeyAlgorithm {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            modulus_length: self.modulus_length,
+            public_exponent: Buffer::from(self.public_exponent.as_ref().to_vec()),
+            hash: self.hash.clone(),
+        }
+    }
+}
+
 /// Elliptic-curve key algorithm.
 #[napi(object)]
+#[derive(Clone)]
 pub struct EcKeyAlgorithm {
     /// The algorithm name, e.g. `"ECDSA"`.
     pub name: String,
@@ -2077,6 +2121,7 @@ pub struct EcKeyAlgorithm {
 
 /// AES key algorithm.
 #[napi(object)]
+#[derive(Clone)]
 pub struct AesKeyAlgorithm {
     /// The algorithm name, e.g. `"AES-GCM"`.
     pub name: String,
@@ -2086,6 +2131,7 @@ pub struct AesKeyAlgorithm {
 
 /// HMAC key algorithm.
 #[napi(object)]
+#[derive(Clone)]
 pub struct HmacKeyAlgorithm {
     /// The algorithm name, e.g. `"HMAC"`.
     pub name: String,
@@ -2097,6 +2143,7 @@ pub struct HmacKeyAlgorithm {
 
 /// KMAC key algorithm.
 #[napi(object)]
+#[derive(Clone)]
 pub struct KmacKeyAlgorithm {
     /// The algorithm name, e.g. `"KMAC"`.
     pub name: String,
@@ -2104,12 +2151,20 @@ pub struct KmacKeyAlgorithm {
     pub length: Option<u32>,
 }
 
+#[napi(string_enum)]
+pub enum KeyFormat {
+    Raw,
+    RawSecret,
+    RawPublic,
+    RawSeed,
+    Pkcs8,
+    Spki,
+    Jwk,
+}
+
 /// A Web Crypto `CryptoKey`.
-///
-/// Read-only from JS: Node treats these properties as immutable. `#[napi(object)]`
-/// generates a JS constructor accepting the literal `{ algorithm, extractable,
-/// type, usages }`; the fields are surfaced as getters and should not be mutated.
 #[napi(object)]
+#[derive(Clone)]
 pub struct CryptoKey {
     /// The algorithm (and algorithm-specific parameters) the key is for.
     pub algorithm:
@@ -2128,11 +2183,62 @@ pub struct CryptoKey {
 
 /// A Web Crypto `CryptoKeyPair`: an asymmetric key pair.
 #[napi(object)]
+#[derive(Clone)]
 pub struct CryptoKeyPair {
     /// The public half (`type === "public"`).
     pub public_key: CryptoKey,
     /// The private half (`type === "private"`).
     pub private_key: CryptoKey,
+}
+
+/// Check whether a given algorithm identifier/operation is supported.
+#[napi]
+pub fn crypto_key_supports(
+    operation: String,
+    algorithm: Either<String, KeyAlgorithm>,
+    _length_or_additional: Option<Either3<u32, String, KeyAlgorithm>>,
+) -> bool {
+    let alg_name = match algorithm {
+        Either::A(s) => s,
+        Either::B(k) => k.name,
+    };
+    let alg_upper = alg_name.to_uppercase();
+    let op_lower = operation.to_lowercase();
+
+    match op_lower.as_str() {
+        "encrypt" | "decrypt" => matches!(
+            alg_upper.as_str(),
+            "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-OCB" | "CHACHA20-POLY1305" | "RSA-OAEP"
+        ),
+        "sign" | "verify" => matches!(
+            alg_upper.as_str(),
+            "ECDSA" | "ED25519" | "ED448" | "HMAC" | "KMAC128" | "KMAC256" | "ML-DSA-44" | "ML-DSA-65" | "ML-DSA-87" | "RSA-PSS" | "RSASSA-PKCS1-V1_5"
+        ),
+        "derivekey" | "derivebits" => matches!(
+            alg_upper.as_str(),
+            "ARGON2D" | "ARGON2I" | "ARGON2ID" | "ECDH" | "HKDF" | "PBKDF2" | "X25519" | "X448"
+        ),
+        "wrapkey" | "unwrapkey" => matches!(
+            alg_upper.as_str(),
+            "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-KW" | "AES-OCB" | "CHACHA20-POLY1305" | "RSA-OAEP"
+        ),
+        "importkey" | "exportkey" => matches!(
+            alg_upper.as_str(),
+            "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-KW" | "AES-OCB" | "CHACHA20-POLY1305" | "HMAC" | "KMAC128" | "KMAC256"
+                | "ARGON2D" | "ARGON2I" | "ARGON2ID" | "HKDF" | "PBKDF2"
+                | "ECDH" | "ECDSA" | "ED25519" | "ED448" | "X25519" | "X448"
+                | "RSA-OAEP" | "RSA-PSS" | "RSASSA-PKCS1-V1_5"
+        ),
+        "digest" => matches!(
+            alg_upper.as_str(),
+            "SHA-1" | "SHA-256" | "SHA-384" | "SHA-512" | "SHA3-256" | "SHA3-384" | "SHA3-512" | "CSHAKE128" | "CSHAKE256"
+        ),
+        "encapsulatebits" | "decapsulatebits" | "encapsulatekey" | "decapsulatekey" => matches!(
+            alg_upper.as_str(),
+            "ML-KEM-512" | "ML-KEM-768" | "ML-KEM-1024" | "MLKEM768-P256" | "MLKEM768-X25519" | "MLKEM1024-P384"
+        ),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------

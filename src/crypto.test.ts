@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
+import { cryptoKeySupports, KeyFormat, Signature, SignatureBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
 import type { CryptoKey, CryptoKeyPair } from "./main.ts";
-import { Signature, SignatureBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
 
@@ -140,6 +140,22 @@ describe("threshold disclosure", () => {
   });
 });
 
+describe("cryptoKeySupports / KeyFormat", () => {
+  test("cryptoKeySupports validates operation and algorithm support", () => {
+    expect(cryptoKeySupports("encrypt", "AES-CBC")).toBe(true);
+    expect(cryptoKeySupports("sign", "ECDSA")).toBe(true);
+    expect(cryptoKeySupports("digest", "SHA-256")).toBe(true);
+    expect(cryptoKeySupports("encrypt", "NOT-AN-ALGORITHM")).toBe(false);
+  });
+
+  test("KeyFormat enum exports expected values", () => {
+    expect(KeyFormat.Raw).toBeDefined();
+    expect(KeyFormat.Pkcs8).toBeDefined();
+    expect(KeyFormat.Spki).toBeDefined();
+    expect(KeyFormat.Jwk).toBeDefined();
+  });
+});
+
 describe("CryptoKey / CryptoKeyPair", () => {
   test("creates a symmetric CryptoKey object structure", () => {
     const key: CryptoKey = {
@@ -179,6 +195,16 @@ describe("CryptoKey / CryptoKeyPair", () => {
     expect(pair.privateKey.type).toBe("private");
     expect(pair.publicKey.usages).toEqual(["verify"]);
     expect(pair.privateKey.usages).toEqual(["sign"]);
+  });
+
+  test("Signature constructor with KeyFormat or string", () => {
+    const sig1 = new Signature(KeyFormat.Raw);
+    expect(sig1).toBeDefined();
+    expect(sig1.codec).toBe("eddsa-msig");
+
+    const sig2 = new Signature("eddsa-msig");
+    expect(sig2).toBeDefined();
+    expect(sig2.codec).toBe("eddsa-msig");
   });
 });
 
