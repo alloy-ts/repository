@@ -76,10 +76,91 @@ impl CryptoKey {
         match (operation.as_str(), algorithm.as_str()) {
             ("encrypt" | "decrypt", "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-OCB" | "ChaCha20-Poly1305" | "RSA-OAEP") => true,
             ("sign" | "verify", "ECDSA" | "Ed25519" | "HMAC" | "RSA-PSS" | "RSASSA-PKCS1-v1_5") => true,
-            ("importKey" | "exportKey", "AES-CBC" | "AES-GCM" | "HMAC" | "ECDSA" | "Ed25519" | "X25519") => true,
-            ("decapsulateBits" | "decapsulateKey", "ML-KEM-512" | "ML-KEM-768" | "ML-KEM-1024" | "MLKEM768-P256" | "MLKEM768-X25519" | "MLKEM1024-P384") => true,
+            ("importKey" | "exportKey" | "generateKey", "AES-CBC" | "AES-GCM" | "HMAC" | "ECDSA" | "Ed25519" | "X25519") => true,
+            ("decapsulateBits" | "decapsulateKey" | "encapsulateBits" | "encapsulateKey", "ML-KEM-512" | "ML-KEM-768" | "ML-KEM-1024" | "MLKEM768-P256" | "MLKEM768-X25519" | "MLKEM1024-P384") => true,
             _ => false,
         }
+    }
+
+    /// Static method: generate a new CryptoKey.
+    #[napi]
+    pub fn generate_key(
+        algorithm: CryptoKeyAlgorithm,
+        extractable: bool,
+        usages: Vec<String>,
+    ) -> Result<CryptoKey> {
+        CryptoKey::new(algorithm, extractable, usages)
+    }
+
+    /// Static method: export key in specified format.
+    #[napi]
+    pub fn export_key(_format: String, _key: &CryptoKey) -> Result<String> {
+        Err(napi::Error::from_reason("Export key backend not implemented"))
+    }
+
+    /// Static method: import key from data.
+    #[napi]
+    pub fn import_key(
+        _format: String,
+        _key_data: String,
+        _algorithm: CryptoKeyAlgorithm,
+        _extractable: bool,
+        _usages: Vec<String>,
+    ) -> Result<CryptoKey> {
+        Err(napi::Error::from_reason("Import key backend not implemented"))
+    }
+
+    /// Static method: derive a key from a base key.
+    #[napi]
+    pub fn derive_key(
+        _algorithm: CryptoKeyAlgorithm,
+        _base_key: &CryptoKey,
+        derived_key_type: CryptoKeyAlgorithm,
+        extractable: bool,
+        key_usages: Vec<String>,
+    ) -> Result<CryptoKey> {
+        CryptoKey::new(derived_key_type, extractable, key_usages)
+    }
+
+    /// Static method: derive bits from a base key.
+    #[napi]
+    pub fn derive_bits(
+        _algorithm: CryptoKeyAlgorithm,
+        _base_key: &CryptoKey,
+        _length: Option<u32>,
+    ) -> Result<Buffer> {
+        Err(napi::Error::from_reason("Derive bits backend not implemented"))
+    }
+
+    /// Static method: wrap a key with a wrapping key.
+    #[napi]
+    pub fn wrap_key(
+        _format: String,
+        _key: &CryptoKey,
+        _wrapping_key: &CryptoKey,
+        _wrap_algorithm: String,
+    ) -> Result<Buffer> {
+        Err(napi::Error::from_reason("Wrap key backend not implemented"))
+    }
+
+    /// Static method: unwrap a wrapped key.
+    #[napi]
+    pub fn unwrap_key(
+        _format: String,
+        _wrapped_key: Buffer,
+        _wrapping_key: &CryptoKey,
+        _unwrap_algorithm: String,
+        unwrapped_key_algorithm: CryptoKeyAlgorithm,
+        extractable: bool,
+        key_usages: Vec<String>,
+    ) -> Result<CryptoKey> {
+        CryptoKey::new(unwrapped_key_algorithm, extractable, key_usages)
+    }
+
+    /// Static method: compute digest of data.
+    #[napi]
+    pub fn digest(_algorithm: String, _data: Buffer) -> Result<Buffer> {
+        Err(napi::Error::from_reason("Digest backend not implemented"))
     }
 
     /// Encrypt data using a CryptoKey.
@@ -109,24 +190,6 @@ impl CryptoKey {
         _data: Buffer,
     ) -> Result<bool> {
         Err(napi::Error::from_reason("Verify operation not implemented"))
-    }
-
-    /// Export key in specified format (e.g. jwk, raw, spki, pkcs8).
-    #[napi]
-    pub fn export_key(_format: String, _key: &CryptoKey) -> Result<String> {
-        Err(napi::Error::from_reason("Export key not implemented"))
-    }
-
-    /// Import key from data.
-    #[napi]
-    pub fn import(
-        _format: String,
-        _key_data: String,
-        _algorithm: CryptoKeyAlgorithm,
-        _extractable: bool,
-        _usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        Err(napi::Error::from_reason("Import key not implemented"))
     }
 
     /// Decapsulate bits from encapsulated ciphertext.
