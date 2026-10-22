@@ -1,11 +1,8 @@
+export * from "../dist/index.js";
+
 import * as native from "../dist/index.js";
 
 export const CryptoKey = native.CryptoKey;
-export const Signature = native.Signature;
-export const SignatureBuilder = native.SignatureBuilder;
-export const SignatureScheme = native.SignatureScheme;
-export const Crypto = native.Crypto;
-
 (CryptoKey as any).Format = { format: undefined };
 (CryptoKey as any).exportKey = (format: string, key: any) => key.exportKey(format);
 (CryptoKey as any).encrypt = (alg: any, key: any, data: any) => key.encrypt(alg, data);

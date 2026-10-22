@@ -18,6 +18,112 @@ fn mode_string(kind: gix::object::tree::EntryKind) -> String {
     }
 }
 
+/// Commit metadata associated with a tree, entry, or commit.
+#[napi(object)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CommitMetadata {
+    pub commit_id: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub committer_name: String,
+    pub committer_email: String,
+    pub commit_timestamp: f64,
+    pub message: String,
+}
+
+fn tree_contains_oid(repo: &gix::Repository, tree_id: gix::ObjectId, target: gix::ObjectId) -> bool {
+    if tree_id == target {
+        return true;
+    }
+    if let Ok(tree) = repo.find_tree(tree_id) {
+        if let Ok(decoded) = tree.decode() {
+            for entry in &decoded.entries {
+                if entry.oid == target {
+                    return true;
+                }
+                if entry.mode.is_tree() && tree_contains_oid(repo, entry.oid.to_owned(), target) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Search repository commit history to find commit metadata associated with a tree or entry.
+pub fn find_commit_metadata_for_tree_or_entry(
+    repo: &gix::Repository,
+    tree_id: Option<gix::ObjectId>,
+    entry_id: Option<gix::ObjectId>,
+) -> Option<CommitMetadata> {
+    let mut commit_ids = Vec::new();
+
+    if let Ok(head_commit) = repo.head_commit() {
+        commit_ids.push(head_commit.id().detach());
+    }
+
+    if let Ok(platform) = repo.references() {
+        if let Ok(iter) = platform.all() {
+            for rf in iter.filter_map(|r| r.ok()) {
+                if let Some(id) = rf.try_id() {
+                    commit_ids.push(id.detach());
+                }
+            }
+        }
+    }
+
+    for cid in commit_ids {
+        if let Ok(commit) = repo.find_commit(cid) {
+            let commit_tree_id = commit.tree_id().ok().map(|t| t.detach());
+            let matches_commit = entry_id == Some(commit.id().detach());
+            let matches_tree = tree_id.is_some() && tree_id == commit_tree_id;
+
+            if matches_commit || matches_tree {
+                let author_name = commit.author().map(|a| a.name.to_string()).unwrap_or_default();
+                let author_email = commit.author().map(|a| a.email.to_string()).unwrap_or_default();
+                let committer_name = commit.committer().map(|c| c.name.to_string()).unwrap_or_default();
+                let committer_email = commit.committer().map(|c| c.email.to_string()).unwrap_or_default();
+                let commit_timestamp = commit.committer().ok().and_then(|c| c.time().ok()).map(|t| t.seconds as f64).unwrap_or(0.0);
+                let message = commit.message_raw_sloppy().to_string();
+
+                return Some(CommitMetadata {
+                    commit_id: commit.id().to_string(),
+                    author_name,
+                    author_email,
+                    committer_name,
+                    committer_email,
+                    commit_timestamp,
+                    message,
+                });
+            }
+
+            if let Ok(tree) = commit.tree() {
+                if let Some(eid) = entry_id {
+                    if tree_contains_oid(repo, tree.id, eid) {
+                        let author_name = commit.author().map(|a| a.name.to_string()).unwrap_or_default();
+                        let author_email = commit.author().map(|a| a.email.to_string()).unwrap_or_default();
+                        let committer_name = commit.committer().map(|c| c.name.to_string()).unwrap_or_default();
+                        let committer_email = commit.committer().map(|c| c.email.to_string()).unwrap_or_default();
+                        let commit_timestamp = commit.committer().ok().and_then(|c| c.time().ok()).map(|t| t.seconds as f64).unwrap_or(0.0);
+                        let message = commit.message_raw_sloppy().to_string();
+
+                        return Some(CommitMetadata {
+                            commit_id: commit.id().to_string(),
+                            author_name,
+                            author_email,
+                            committer_name,
+                            committer_email,
+                            commit_timestamp,
+                            message,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// A single entry of a git tree.
 #[napi(object)]
 pub struct TreeEntry {
@@ -39,6 +145,13 @@ impl Tree {
     #[napi(getter)]
     pub fn id(&self) -> String {
         self.id.to_string()
+    }
+
+    /// Commit metadata for the commit containing this tree.
+    #[napi(getter)]
+    pub fn commit_metadata(&self) -> Result<Option<CommitMetadata>> {
+        let r = thread_local(&self.repo);
+        Ok(find_commit_metadata_for_tree_or_entry(&r, Some(self.id), None))
     }
 
     /// All entries of the tree.
@@ -132,6 +245,13 @@ impl Entry {
         self.tree_id.to_string()
     }
 
+    /// Commit metadata for the commit containing this entry's tree.
+    #[napi(getter)]
+    pub fn commit_metadata(&self) -> Result<Option<CommitMetadata>> {
+        let r = thread_local(&self.repo);
+        Ok(find_commit_metadata_for_tree_or_entry(&r, Some(self.tree_id), Some(self.id)))
+    }
+
     /// Whether this entry is a directory (subtree).
     #[napi]
     pub fn is_tree(&self) -> bool {
@@ -148,6 +268,23 @@ impl Entry {
     }
 }
 
+/// Construct an [`Entry`] wrapper.
+pub fn build_entry(
+    repo: &Arc<gix::ThreadSafeRepository>,
+    tree_id: gix::ObjectId,
+    filename: String,
+    mode: String,
+    id: gix::ObjectId,
+) -> Entry {
+    Entry {
+        repo: Arc::clone(repo),
+        tree_id,
+        filename,
+        mode,
+        id,
+    }
+}
+
 /// Construct a [`Tree`] wrapper from a repository and object id (used by `Repository` / `GitObject`).
 pub fn build_tree(repo: &Arc<gix::ThreadSafeRepository>, id: gix::ObjectId) -> Result<Tree> {
     Ok(Tree {
@@ -157,7 +294,7 @@ pub fn build_tree(repo: &Arc<gix::ThreadSafeRepository>, id: gix::ObjectId) -> R
 }
 
 /// Input structure for constructing a tree item.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[napi(object)]
 pub struct TreeItemInput {
     pub path: String,
@@ -245,10 +382,6 @@ impl Repository {
                             .remove_leaf(e.path.as_str())
                             .map_err(|e| err("edit_tree.remove_leaf", e))?;
                     }
-                    // The facade editor has no `remove_if_leaf()`; emulate it by checking the
-                    // base tree: remove only when the entry exists and is not a tree. Note the
-                    // editor's own `get()` only sees in-memory trees, so it can't be used on a
-                    // freshly created editor.
                     Some("ifLeaf") => {
                         let base_tree = r.find_tree(base).map_err(|e| err("find_tree", e))?;
                         let is_tree = base_tree

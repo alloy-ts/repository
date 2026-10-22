@@ -10,7 +10,7 @@ use crate::commit::Commit;
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::Repository;
 use crate::tag::{Tag, build_tag};
-use crate::tree::{Tree, build_tree};
+use crate::tree::{Tree, Entry, build_tree, build_entry, find_commit_metadata_for_tree_or_entry, TreeItemInput};
 
 pub(crate) fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -85,6 +85,31 @@ impl GitObject {
         Ok(Some(build_tag(&self.repo, tag)?))
     }
 
+    /// Expose as an Entry if this object is a committed tree entry.
+    #[napi]
+    pub fn as_entry(&self) -> Result<Option<Entry>> {
+        let r = thread_local(&self.repo);
+        let head_commit = match r.head_commit() {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        let head_tree = match head_commit.tree() {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        if let Ok(Some(entry)) = head_tree.lookup_entry_by_path(std::path::Path::new(&self.id.to_string())) {
+            let mode_str = match entry.mode().into() {
+                gix::object::tree::EntryKind::Blob => "100644",
+                gix::object::tree::EntryKind::BlobExecutable => "100755",
+                gix::object::tree::EntryKind::Tree => "040000",
+                gix::object::tree::EntryKind::Link => "120000",
+                gix::object::tree::EntryKind::Commit => "160000",
+            }.to_string();
+            return Ok(Some(build_entry(&self.repo, head_tree.id, lossy(entry.filename()), mode_str, entry.id().detach())));
+        }
+        Ok(None)
+    }
+
     /// Follow tag/commit objects until a commit is reached, returning it.
     #[napi]
     pub fn peel_to_commit(&self) -> Result<Commit> {
@@ -111,8 +136,6 @@ impl GitObject {
     }
 }
 
-// ---- builders ---------------------------------------------------------------
-
 pub fn build_object(
     repo: &Arc<gix::ThreadSafeRepository>,
     object: gix::Object,
@@ -134,13 +157,9 @@ pub fn build_object(
 /// An object header: its kind, the size of its encoded data in bytes, and where it was found.
 #[napi(object)]
 pub struct ObjectHeader {
-    /// The object kind (`"blob"`, `"tree"`, `"commit"`, or `"tag"`).
     pub kind: String,
-    /// The size of the object's encoded data in bytes.
     pub size: f64,
-    /// `true` if the object was located in a pack (vs. a loose object).
     pub is_packed: bool,
-    /// Number of deltas decoded to obtain this header; `null` for loose objects, always present for packed ones.
     pub num_deltas: Option<f64>,
 }
 
@@ -193,9 +212,48 @@ pub(crate) fn string_to_kind(s: &str) -> Result<gix::object::Kind> {
     }
 }
 
+/// Replacement record for a single replacement step.
+#[napi(object)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReplaceRecord {
+    pub init_oid: String,
+    pub replace_oid: String,
+    pub kind: String,
+    pub path: Option<String>,
+    pub committer_name: Option<String>,
+    pub committer_email: Option<String>,
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    pub commit_timestamp: Option<f64>,
+    pub timestamp: f64,
+}
+
+/// Replace manifest holding history of replacements for a canonical initial object ID.
+#[napi(object)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReplaceManifest {
+    pub init_oid: String,
+    pub latest_replace_oid: String,
+    pub kind: String,
+    pub path: Option<String>,
+    pub history: Vec<ReplaceRecord>,
+}
+
+/// Options for replacing an object.
+#[napi(object)]
+pub struct ReplaceOptions {
+    pub content: Option<Buffer>,
+    pub entries: Option<Vec<TreeItemInput>>,
+    pub path: Option<String>,
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    pub committer_name: Option<String>,
+    pub committer_email: Option<String>,
+    pub commit_timestamp: Option<f64>,
+}
+
 #[napi]
 impl Repository {
-    /// Find an object of any kind, returning a wrapper with `as_commit()` / `as_tree()` / etc.
     #[napi]
     pub fn find_object(&self, id: String) -> Result<GitObject> {
         let r = thread_local(&self.inner);
@@ -205,7 +263,6 @@ impl Repository {
         build_object(&self.inner, object)
     }
 
-    /// Whether an object with the given id exists.
     #[napi]
     pub fn object_exists(&self, id: String) -> bool {
         let r = thread_local(&self.inner);
@@ -215,7 +272,6 @@ impl Repository {
         }
     }
 
-    /// Peel an object to a target object kind (`commit`, `tree`, `blob`, `tag`).
     #[napi]
     pub fn peel(&self, id: String, kind: String) -> Result<String> {
         let r = thread_local(&self.inner);
@@ -232,7 +288,6 @@ impl Repository {
         Ok(peeled.id().to_string())
     }
 
-    /// Try to find an object by id, returning null if missing instead of throwing.
     #[napi]
     pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
         let r = thread_local(&self.inner);
@@ -245,7 +300,6 @@ impl Repository {
         }
     }
 
-    /// Write a raw object of the given `kind` (`commit`, `tree`, `blob`, `tag`) and return its id.
     #[napi]
     pub fn write_object(&self, kind: String, data: Buffer) -> Result<String> {
         let r = thread_local(&self.inner);
@@ -258,7 +312,6 @@ impl Repository {
         Ok(id.to_string())
     }
 
-    /// Read an object's kind and raw, decompressed body (the inverse of [`write_object`](Self::write_object)).
     #[napi]
     pub fn read_object(&self, id: String) -> Result<ObjectData> {
         let r = thread_local(&self.inner);
@@ -272,8 +325,6 @@ impl Repository {
         })
     }
 
-    /// Compute the object id of `data` of the given `kind` (`commit`, `tree`, `blob`, `tag`)
-    /// without writing it to the object database.
     #[napi]
     pub fn compute_hash(&self, kind: String, data: Buffer) -> Result<String> {
         let r = thread_local(&self.inner);
@@ -283,11 +334,6 @@ impl Repository {
         Ok(id.to_string())
     }
 
-    /// Read an object's header (kind + size) without decoding its full content.
-    ///
-    /// Note: the repo-level header does not distinguish loose vs. packed objects, so `is_packed` is
-    /// always `false` and `num_deltas` is always `null` here. For the pack-aware distinction, use
-    /// [`ObjectHandle::try_header`]/[`ObjectDatabase::try_header`].
     #[napi]
     pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
         let r = thread_local(&self.inner);
@@ -302,7 +348,6 @@ impl Repository {
         })
     }
 
-    /// Like [`find_header`](Self::find_header) but returns `null` if the object is missing.
     #[napi]
     pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
         let r = thread_local(&self.inner);
@@ -320,10 +365,6 @@ impl Repository {
         }
     }
 
-    /// Set the in-memory object cache size (in bytes). Pass `0` to disable.
-    ///
-    /// Note: each synchronous call gets a fresh thread-local repository view, so this only
-    /// affects the cache of the view used within this single call.
     #[napi]
     pub fn object_cache_size(&self, bytes: f64) -> Result<()> {
         let mut r = thread_local(&self.inner);
@@ -331,9 +372,6 @@ impl Repository {
         Ok(())
     }
 
-    /// Set the object cache size only if it has not been set already.
-    ///
-    /// See [`object_cache_size`](Self::object_cache_size) for the scoping caveat.
     #[napi]
     pub fn object_cache_size_if_unset(&self, bytes: f64) -> Result<()> {
         let mut r = thread_local(&self.inner);
@@ -341,8 +379,6 @@ impl Repository {
         Ok(())
     }
 
-    /// Compute a recommended object cache size (in bytes) for tree-diff operations,
-    /// based on the number of tracked files in the index.
     #[napi]
     pub fn compute_object_cache_size_for_tree_diffs(&self) -> Result<f64> {
         let r = thread_local(&self.inner);
@@ -350,13 +386,166 @@ impl Repository {
         Ok(r.compute_object_cache_size_for_tree_diffs(&*index) as f64)
     }
 
-    /// Enable keeping decompressed objects in memory for the lifetime of this view.
-    ///
-    /// See [`object_cache_size`](Self::object_cache_size) for the scoping caveat.
     #[napi]
     pub fn with_object_memory(&self) -> Result<()> {
         let r = thread_local(&self.inner);
         r.with_object_memory();
         Ok(())
+    }
+
+    /// Replace an object (`blob`, `tree`, `commit`, `tag`, `entry`) with a new replacement object.
+    #[napi]
+    pub fn replace_object(
+        &self,
+        target_id: String,
+        kind_input: Option<String>,
+        options: Option<ReplaceOptions>,
+    ) -> Result<ReplaceManifest> {
+        let r = thread_local(&self.inner);
+        let opts = options.unwrap_or_else(|| ReplaceOptions {
+            content: None,
+            entries: None,
+            path: None,
+            author_name: None,
+            author_email: None,
+            committer_name: None,
+            committer_email: None,
+            commit_timestamp: None,
+        });
+
+        let (init_oid, detected_kind) = match parse_oid(&target_id) {
+            Ok(oid) => {
+                if let Ok(obj) = r.find_object(oid) {
+                    (oid.to_string(), kind_to_string(obj.kind))
+                } else {
+                    (target_id.clone(), kind_input.clone().unwrap_or_else(|| "blob".into()))
+                }
+            }
+            Err(_) => (target_id.clone(), kind_input.clone().unwrap_or_else(|| "blob".into())),
+        };
+
+        let kind = if opts.path.is_some() {
+            "entry".to_string()
+        } else if let Some(ref k) = kind_input {
+            k.clone()
+        } else {
+            detected_kind
+        };
+
+        let commit_meta = find_commit_metadata_for_tree_or_entry(
+            &r,
+            parse_oid(&init_oid).ok(),
+            parse_oid(&init_oid).ok(),
+        );
+
+        let author_name = opts.author_name.or_else(|| commit_meta.as_ref().map(|m| m.author_name.clone()));
+        let author_email = opts.author_email.or_else(|| commit_meta.as_ref().map(|m| m.author_email.clone()));
+        let committer_name = opts.committer_name.or_else(|| commit_meta.as_ref().map(|m| m.committer_name.clone()));
+        let committer_email = opts.committer_email.or_else(|| commit_meta.as_ref().map(|m| m.committer_email.clone()));
+        let commit_timestamp = opts.commit_timestamp.or_else(|| commit_meta.as_ref().map(|m| m.commit_timestamp));
+
+        let replace_oid = if kind == "tree" {
+            let tree_entries = opts.entries.unwrap_or_default();
+            self.write_tree(tree_entries)?
+        } else if kind == "commit" {
+            let buf = opts.content.unwrap_or_else(|| Buffer::from(vec![]));
+            self.write_object("commit".into(), buf)?
+        } else {
+            let buf = opts.content.unwrap_or_else(|| Buffer::from(vec![]));
+            self.write_blob(buf)?
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
+        let new_record = ReplaceRecord {
+            init_oid: init_oid.clone(),
+            replace_oid: replace_oid.clone(),
+            kind: kind.clone(),
+            path: opts.path.clone(),
+            committer_name,
+            committer_email,
+            author_name,
+            author_email,
+            commit_timestamp,
+            timestamp: now,
+        };
+
+        let record_json = serde_json::to_string(&new_record)
+            .map_err(|e| err_str("replace_object", format!("serialize record: {e}")))?;
+        let record_blob_id = r.write_blob(record_json.as_bytes())
+            .map_err(|e| err("replace_object", e))?;
+        let _ = r.reference(
+            format!("refs/replace/{replace_oid}").as_str(),
+            record_blob_id,
+            gix::refs::transaction::PreviousValue::Any,
+            "replace: create replace record",
+        );
+
+        let manifest_ref = format!("refs/replace/{init_oid}");
+        let mut history = Vec::new();
+
+        if let Ok(Some(existing_blob)) = r.try_find_reference(manifest_ref.as_str()) {
+            if let Some(id) = existing_blob.try_id() {
+                if let Ok(blob) = r.find_blob(id.detach()) {
+                    if let Ok(existing_manifest) = serde_json::from_slice::<ReplaceManifest>(&blob.data) {
+                        history = existing_manifest.history;
+                    }
+                }
+            }
+        }
+
+        history.push(new_record);
+
+        let manifest = ReplaceManifest {
+            init_oid: init_oid.clone(),
+            latest_replace_oid: replace_oid.clone(),
+            kind,
+            path: opts.path,
+            history,
+        };
+
+        let manifest_json = serde_json::to_string(&manifest)
+            .map_err(|e| err_str("replace_object", format!("serialize manifest: {e}")))?;
+        let manifest_blob_id = r.write_blob(manifest_json.as_bytes())
+            .map_err(|e| err("replace_object", e))?;
+
+        r.reference(
+            manifest_ref.as_str(),
+            manifest_blob_id,
+            gix::refs::transaction::PreviousValue::Any,
+            "replace: update manifest",
+        )
+        .map_err(|e| err("replace_object.ref", e))?;
+
+        let obj_ref = format!("refs/objects/{init_oid}");
+        let replace_blob_oid = parse_oid(&replace_oid)?;
+        let _ = r.reference(
+            obj_ref.as_str(),
+            replace_blob_oid,
+            gix::refs::transaction::PreviousValue::Any,
+            "replace: update object ref",
+        );
+
+        Ok(manifest)
+    }
+
+    /// Read the replace manifest for an object ID from `refs/replace/{init_oid}`.
+    #[napi]
+    pub fn get_replace_manifest(&self, init_oid: String) -> Result<Option<ReplaceManifest>> {
+        let r = thread_local(&self.inner);
+        let manifest_ref = format!("refs/replace/{init_oid}");
+        if let Ok(Some(rf)) = r.try_find_reference(manifest_ref.as_str()) {
+            if let Some(id) = rf.try_id() {
+                if let Ok(blob) = r.find_blob(id.detach()) {
+                    if let Ok(manifest) = serde_json::from_slice::<ReplaceManifest>(&blob.data) {
+                        return Ok(Some(manifest));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 }
