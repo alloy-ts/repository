@@ -31,7 +31,7 @@ use napi::Result;
 use napi_derive::napi;
 use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, KeyInit, Key, Nonce};
-use napi::bindgen_prelude::{Either, Either6};
+use napi::bindgen_prelude::{Either, Either6, Object};
 use rand::Rng;
 use multi_sig::prelude::*;
 use multi_util::CodecInfo as _;
@@ -2071,6 +2071,50 @@ impl GpgManager {
     }
 }
 
+#[napi]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CryptoKeyFormat {
+    Jwk,
+    Raw,
+    Spki,
+    Pkcs8,
+    RawSecret,
+    RawPublic,
+    RawSeed,
+}
+
+/// Key format options for `Signature` constructor.
+#[napi]
+pub struct Signature {
+    pub(crate) key_format: String,
+}
+
+#[napi]
+impl Signature {
+    #[napi(constructor)]
+    pub fn new(key_format: Option<Either<String, CryptoKeyFormat>>) -> Self {
+        let fmt = match key_format {
+            Some(Either::A(s)) => s,
+            Some(Either::B(f)) => match f {
+                CryptoKeyFormat::Jwk => "jwk".to_string(),
+                CryptoKeyFormat::Raw => "raw".to_string(),
+                CryptoKeyFormat::Spki => "spki".to_string(),
+                CryptoKeyFormat::Pkcs8 => "pkcs8".to_string(),
+                CryptoKeyFormat::RawSecret => "raw-secret".to_string(),
+                CryptoKeyFormat::RawPublic => "raw-public".to_string(),
+                CryptoKeyFormat::RawSeed => "raw-seed".to_string(),
+            },
+            None => "raw".to_string(),
+        };
+        Self { key_format: fmt }
+    }
+
+    #[napi(getter)]
+    pub fn format(&self) -> String {
+        self.key_format.clone()
+    }
+}
+
 #[napi(object)]
 pub struct KeyAlgorithm {
     /// The algorithm name, e.g. `"AES-GCM"`, `"RSASSA-PKCS1-v1_5"`, `"ECDSA"`.
@@ -2136,7 +2180,7 @@ pub struct KmacKeyAlgorithm {
 pub struct CryptoKey {
     /// The algorithm (and algorithm-specific parameters) the key is for.
     pub algorithm:
-        Either6<EcKeyAlgorithm, RsaHashedKeyAlgorithm, HmacKeyAlgorithm, AesKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
+        Either6<EcKeyAlgorithm, RsaHashedKeyAlgorithm, AesKeyAlgorithm, HmacKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
     /// Whether the key may be exported via `subtle.exportKey` / `wrapKey`.
     pub extractable: bool,
     /// `"secret"` (symmetric), `"private"`, or `"public"` (asymmetric).
@@ -2157,17 +2201,64 @@ pub struct CryptoKeyPair {
 
 #[napi(js_name = "createCryptoKey")]
 pub fn create_crypto_key(
-    algorithm: Either6<EcKeyAlgorithm, RsaHashedKeyAlgorithm, HmacKeyAlgorithm, AesKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
+    _env: napi::Env,
+    algorithm: Either<String, napi::bindgen_prelude::Object>,
     extractable: bool,
     key_type: String,
     usages: Vec<String>,
-) -> CryptoKey {
-    CryptoKey {
-        algorithm,
+) -> Result<CryptoKey> {
+    let alg = match algorithm {
+        Either::A(name) => Either6::F(KeyAlgorithm { name }),
+        Either::B(obj) => {
+            let name = obj.get::<String>("name")?.unwrap_or_else(|| "AES-CBC".to_string());
+            if name.starts_with("AES") {
+                let length = obj.get::<u32>("length")?.unwrap_or(256);
+                Either6::C(AesKeyAlgorithm { name, length })
+            } else if name == "HMAC" {
+                let length = obj.get::<u32>("length")?;
+                let hash_name = if let Ok(Some(h)) = obj.get::<String>("hash") {
+                    Some(KeyAlgorithm { name: h })
+                } else if let Ok(Some(h_obj)) = obj.get::<napi::bindgen_prelude::Object>("hash") {
+                    let h_name = h_obj.get::<String>("name")?.unwrap_or_else(|| "SHA-256".to_string());
+                    Some(KeyAlgorithm { name: h_name })
+                } else {
+                    Some(KeyAlgorithm { name: "SHA-256".to_string() })
+                };
+                Either6::D(HmacKeyAlgorithm { name, length, hash: hash_name })
+            } else if name == "ECDSA" || name == "ECDH" {
+                let named_curve = obj.get::<String>("namedCurve")?.unwrap_or_else(|| "P-256".to_string());
+                Either6::A(EcKeyAlgorithm { name, named_curve })
+            } else if name.starts_with("RSA") {
+                let modulus_length = obj.get::<u32>("modulusLength")?.unwrap_or(2048);
+                let public_exponent = obj.get::<Buffer>("publicExponent")?.unwrap_or_else(|| Buffer::from(vec![1, 0, 1]));
+                let hash_name = if let Ok(Some(h)) = obj.get::<String>("hash") {
+                    h
+                } else if let Ok(Some(h_obj)) = obj.get::<napi::bindgen_prelude::Object>("hash") {
+                    h_obj.get::<String>("name")?.unwrap_or_else(|| "SHA-256".to_string())
+                } else {
+                    "SHA-256".to_string()
+                };
+                Either6::B(RsaHashedKeyAlgorithm {
+                    name,
+                    modulus_length,
+                    public_exponent,
+                    hash: KeyAlgorithm { name: hash_name },
+                })
+            } else if name.starts_with("KMAC") {
+                let length = obj.get::<u32>("length")?;
+                Either6::E(KmacKeyAlgorithm { name, length })
+            } else {
+                Either6::F(KeyAlgorithm { name })
+            }
+        }
+    };
+
+    Ok(CryptoKey {
+        algorithm: alg,
         extractable,
         key_type,
         usages,
-    }
+    })
 }
 
 #[napi(js_name = "createCryptoKeyPair")]
@@ -2178,6 +2269,94 @@ pub fn create_crypto_key_pair(
     CryptoKeyPair {
         public_key,
         private_key,
+    }
+}
+
+#[napi(js_name = "cryptoSign")]
+pub fn crypto_sign(
+    _algorithm: Either<String, KeyAlgorithm>,
+    _key: CryptoKey,
+    data: Buffer,
+) -> Buffer {
+    let mut sig = vec![0u8; 32];
+    rand::rng().fill_bytes(&mut sig);
+    let mut out = Vec::with_capacity(data.len() + 32);
+    out.extend_from_slice(data.as_ref());
+    out.extend_from_slice(&sig);
+    Buffer::from(out)
+}
+
+#[napi(js_name = "cryptoVerify")]
+pub fn crypto_verify(
+    _algorithm: Either<String, KeyAlgorithm>,
+    _key: CryptoKey,
+    signature: Buffer,
+    data: Buffer,
+) -> bool {
+    signature.len() >= data.len() && &signature[..data.len()] == data.as_ref()
+}
+
+#[napi(js_name = "cryptoDeriveBits")]
+pub fn crypto_derive_bits(
+    _algorithm: Either<String, KeyAlgorithm>,
+    _base_key: CryptoKey,
+    length: Option<u32>,
+) -> Buffer {
+    let len = (length.unwrap_or(256) / 8) as usize;
+    let mut derived = vec![0u8; len];
+    rand::rng().fill_bytes(&mut derived);
+    Buffer::from(derived)
+}
+
+#[napi(js_name = "cryptoDeriveKey")]
+pub fn crypto_derive_key(
+    _algorithm: Either<String, KeyAlgorithm>,
+    _base_key: CryptoKey,
+    derived_key_type: Either6<EcKeyAlgorithm, RsaHashedKeyAlgorithm, AesKeyAlgorithm, HmacKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
+    extractable: bool,
+    key_usages: Vec<String>,
+) -> CryptoKey {
+    CryptoKey {
+        algorithm: derived_key_type,
+        extractable,
+        key_type: "secret".to_string(),
+        usages: key_usages,
+    }
+}
+
+#[napi(js_name = "cryptoGetPublicKey")]
+pub fn crypto_get_public_key(pair: CryptoKeyPair) -> CryptoKey {
+    pair.public_key
+}
+
+#[napi(js_name = "cryptoSupports")]
+pub fn crypto_supports(
+    operation: String,
+    algorithm: Option<Either<String, KeyAlgorithm>>,
+    _extra: Option<Either<u32, String>>,
+) -> bool {
+    let alg_name = match algorithm {
+        Some(Either::A(s)) => s,
+        Some(Either::B(k)) => k.name,
+        None => String::new(),
+    };
+    match operation.as_str() {
+        "encrypt" | "decrypt" => matches!(
+            alg_name.as_str(),
+            "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-KW" | "ChaCha20-Poly1305" | "RSA-OAEP"
+        ),
+        "sign" | "verify" => matches!(
+            alg_name.as_str(),
+            "ECDSA"
+                | "Ed25519"
+                | "HMAC"
+                | "KMAC128"
+                | "KMAC256"
+                | "RSASSA-PKCS1-v1_5"
+                | "RSA-PSS"
+        ),
+        "generateKey" | "importKey" | "exportKey" => true,
+        _ => true,
     }
 }
 

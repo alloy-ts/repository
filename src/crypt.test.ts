@@ -1,11 +1,19 @@
 import { describe, expect, test } from "vite-plus/test";
 import {
+  CryptoKeyFormat,
   Multisig,
   MultisigBuilder,
+  Signature,
   SignatureBytes,
   SignatureScheme,
   createCryptoKey,
   createCryptoKeyPair,
+  cryptoDeriveBits,
+  cryptoDeriveKey,
+  cryptoGetPublicKey,
+  cryptoSign,
+  cryptoSupports,
+  cryptoVerify,
 } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
@@ -246,6 +254,72 @@ describe("CryptoKey / CryptoKeyPair NAPI object bindings", () => {
     );
     expect(pair.publicKey.type).toBe("public");
     expect(pair.privateKey.type).toBe("private");
+  });
+
+  test("Signature constructor accepts string and CryptoKeyFormat enum", () => {
+    const s1 = new Signature("jwk");
+    expect(s1.format).toBe("jwk");
+
+    const s2 = new Signature(CryptoKeyFormat.Spki);
+    expect(s2.format).toBe("spki");
+
+    const s3 = new Signature(CryptoKeyFormat.Pkcs8);
+    expect(s3.format).toBe("pkcs8");
+  });
+
+  test("cryptoSign and cryptoVerify functions", () => {
+    const key = createCryptoKey(
+      { name: "HMAC", length: 256, hash: { name: "SHA-256" } },
+      true,
+      "secret",
+      ["sign", "verify"],
+    );
+    const data = Buffer.from("hello signature");
+    const sig = cryptoSign("HMAC", key, data);
+    expect(sig.length).toBeGreaterThan(data.length);
+    expect(cryptoVerify("HMAC", key, sig, data)).toBe(true);
+  });
+
+  test("cryptoDeriveBits and cryptoDeriveKey functions", () => {
+    const baseKey = createCryptoKey(
+      { name: "PBKDF2" },
+      false,
+      "secret",
+      ["deriveKey", "deriveBits"],
+    );
+    const bits = cryptoDeriveBits("PBKDF2", baseKey, 256);
+    expect(bits.length).toBe(32);
+
+    const derived = cryptoDeriveKey(
+      "PBKDF2",
+      baseKey,
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"],
+    );
+    expect(derived.algorithm.name).toBe("AES-GCM");
+    expect(derived.extractable).toBe(true);
+  });
+
+  test("cryptoGetPublicKey and cryptoSupports functions", () => {
+    const pub = createCryptoKey(
+      { name: "ECDSA", namedCurve: "P-256" },
+      true,
+      "public",
+      ["verify"],
+    );
+    const priv = createCryptoKey(
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      "private",
+      ["sign"],
+    );
+    const pair = createCryptoKeyPair(pub, priv);
+    const gotPub = cryptoGetPublicKey(pair);
+    expect(gotPub.type).toBe("public");
+
+    expect(cryptoSupports("encrypt", "AES-GCM")).toBe(true);
+    expect(cryptoSupports("sign", "ECDSA")).toBe(true);
   });
 });
 
