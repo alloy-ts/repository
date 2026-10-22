@@ -297,12 +297,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[napi]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Signature {
+pub struct SignatureBytes {
     bytes: Vec<u8>,
 }
 
 #[napi]
-impl Signature {
+impl SignatureBytes {
     /// Create from raw bytes.
     #[napi(constructor)]
     pub fn new(bytes: Buffer) -> Self {
@@ -317,7 +317,7 @@ impl Signature {
         Buffer::from(self.bytes.clone())
     }
 
-    /// Alias for [`Signature::bytes`].
+    /// Alias for [`SignatureBytes::bytes`].
     #[napi]
     pub fn as_bytes(&self) -> Buffer {
         Buffer::from(self.bytes.clone())
@@ -384,7 +384,7 @@ impl SignatureScheme {
 #[napi]
 #[derive(Clone)]
 pub struct Signature {
-    inner: multi_sig::Signature,
+    inner: multi_sig::Multisig,
 }
 
 #[napi]
@@ -392,21 +392,21 @@ impl Signature {
     /// Decode a Signature from its binary wire form.
     #[napi(constructor)]
     pub fn new(bytes: Buffer) -> Result<Self> {
-        multi_sig::Signature::try_from(bytes.as_ref())
+        multi_sig::Multisig::try_from(bytes.as_ref())
             .map(|inner| Self { inner })
             .map_err(|e| napi::Error::from_reason(format!("decode multisig: {e}")))
     }
 
-    #[napi(factory)]
-    pub fn from_bytes(&self) -> Buffer {
+    #[napi(getter)]
+    pub fn bytes(&self) -> Buffer {
         Buffer::from(Vec::from(self.inner.clone()))
     }
 
     /// The base-encoded string form (lowercase hex, with the multibase `f` prefix) — identical to
     /// what [`SignatureBuilder::try_build_encoded`] produces.
-    #[napi(factory)]
-    pub fn from_hex(&self) -> String {
-        let encoded: multi_util::BaseEncoded<multi_sig::Signature> =
+    #[napi(getter)]
+    pub fn hex(&self) -> String {
+        let encoded: multi_util::BaseEncoded<multi_sig::Multisig> =
             multi_util::BaseEncoded::from(self.inner.clone());
         encoded.to_string()
     }
@@ -425,7 +425,7 @@ impl Signature {
 
     /// The raw signature bytes.
     #[napi]
-    pub fn signature_bytes(&self) -> Result<Signature> {
+    pub fn signature_bytes(&self) -> Result<SignatureBytes> {
         let data = multi_sig::ViewBuilder::new(&self.inner)
             .data()
             .build()
@@ -433,7 +433,7 @@ impl Signature {
         let bytes = data
             .sig_bytes()
             .map_err(|e| napi::Error::from_reason(format!("sig bytes: {e}")))?;
-        Ok(Signature::new(Buffer::from(bytes)))
+        Ok(SignatureBytes::new(Buffer::from(bytes)))
     }
 
     /// The in-band signed message (empty for a detached signature).
@@ -2104,13 +2104,13 @@ pub struct KmacKeyAlgorithm {
     pub length: Option<u32>,
 }
 
-/// A Web Crypto `CryptKey`.
+/// A Web Crypto `CryptoKey`.
 ///
 /// Read-only from JS: Node treats these properties as immutable. `#[napi(object)]`
 /// generates a JS constructor accepting the literal `{ algorithm, extractable,
 /// type, usages }`; the fields are surfaced as getters and should not be mutated.
 #[napi(object)]
-pub struct CryptKey {
+pub struct CryptoKey {
     /// The algorithm (and algorithm-specific parameters) the key is for.
     pub algorithm:
         Either6<AesKeyAlgorithm, HmacKeyAlgorithm, EcKeyAlgorithm, RsaHashedKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
@@ -2126,13 +2126,13 @@ pub struct CryptKey {
     pub usages: Vec<String>,
 }
 
-/// A Web Crypto `CryptKeyPair`: an asymmetric key pair.
+/// A Web Crypto `CryptoKeyPair`: an asymmetric key pair.
 #[napi(object)]
-pub struct CryptKeyPair {
+pub struct CryptoKeyPair {
     /// The public half (`type === "public"`).
-    pub public_key: CryptKey,
+    pub public_key: CryptoKey,
     /// The private half (`type === "private"`).
-    pub private_key: CryptKey,
+    pub private_key: CryptoKey,
 }
 
 // ---------------------------------------------------------------------------

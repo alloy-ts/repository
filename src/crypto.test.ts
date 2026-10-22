@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
+import type { CryptoKey, CryptoKeyPair } from "./main.ts";
 import { Signature, SignatureBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
@@ -136,6 +137,48 @@ describe("threshold disclosure", () => {
     expect(() =>
       new SignatureBuilder("bls12_381-g2-share-msig").withDisclosure(9, null, 3, 5),
     ).toThrow();
+  });
+});
+
+describe("CryptoKey / CryptoKeyPair", () => {
+  test("creates a symmetric CryptoKey object structure", () => {
+    const key: CryptoKey = {
+      algorithm: { name: "AES-CBC", length: 256 },
+      extractable: true,
+      type: "secret",
+      usages: ["encrypt", "decrypt"],
+    };
+
+    expect(key.algorithm).toEqual({ name: "AES-CBC", length: 256 });
+    expect(key.extractable).toBe(true);
+    expect(key.type).toBe("secret");
+    expect(key.usages).toEqual(["encrypt", "decrypt"]);
+  });
+
+  test("creates an asymmetric CryptoKeyPair object structure", () => {
+    const publicKey: CryptoKey = {
+      algorithm: { name: "ECDSA", namedCurve: "P-521" },
+      extractable: true,
+      type: "public",
+      usages: ["verify"],
+    };
+
+    const privateKey: CryptoKey = {
+      algorithm: { name: "ECDSA", namedCurve: "P-521" },
+      extractable: false,
+      type: "private",
+      usages: ["sign"],
+    };
+
+    const pair: CryptoKeyPair = {
+      publicKey,
+      privateKey,
+    };
+
+    expect(pair.publicKey.type).toBe("public");
+    expect(pair.privateKey.type).toBe("private");
+    expect(pair.publicKey.usages).toEqual(["verify"]);
+    expect(pair.privateKey.usages).toEqual(["sign"]);
   });
 });
 
