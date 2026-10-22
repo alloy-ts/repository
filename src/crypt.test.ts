@@ -1,5 +1,12 @@
 import { describe, expect, test } from "vite-plus/test";
-import { Multisig, MultisigBuilder, SignatureBytes, SignatureScheme } from "./main.ts";
+import {
+  Multisig,
+  MultisigBuilder,
+  SignatureBytes,
+  SignatureScheme,
+  createCryptoKey,
+  createCryptoKeyPair,
+} from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
 
@@ -136,6 +143,109 @@ describe("threshold disclosure", () => {
     expect(() =>
       new MultisigBuilder("bls12_381-g2-share-msig").withDisclosure(9, null, 3, 5),
     ).toThrow();
+  });
+});
+
+describe("CryptoKey / CryptoKeyPair NAPI object bindings", () => {
+  test("AES key object structure created via NAPI binding", () => {
+    const key = createCryptoKey(
+      {
+        name: "AES-CBC",
+        length: 256,
+      },
+      true,
+      "secret",
+      ["encrypt", "decrypt"],
+    );
+
+    expect(key.algorithm.name).toBe("AES-CBC");
+    expect((key.algorithm as any).length).toBe(256);
+    expect(key.extractable).toBe(true);
+    expect(key.type).toBe("secret");
+    expect(key.usages).toEqual(["encrypt", "decrypt"]);
+  });
+
+  test("ECDSA key pair object structure created via NAPI binding", () => {
+    const pub = createCryptoKey(
+      {
+        name: "ECDSA",
+        namedCurve: "P-521",
+      },
+      true,
+      "public",
+      ["verify"],
+    );
+
+    const priv = createCryptoKey(
+      {
+        name: "ECDSA",
+        namedCurve: "P-521",
+      },
+      false,
+      "private",
+      ["sign"],
+    );
+
+    const pair = createCryptoKeyPair(pub, priv);
+
+    expect(pair.publicKey.algorithm.name).toBe("ECDSA");
+    expect((pair.publicKey.algorithm as any).namedCurve).toBe("P-521");
+    expect(pair.publicKey.type).toBe("public");
+    expect(pair.privateKey.type).toBe("private");
+    expect(pair.privateKey.usages).toEqual(["sign"]);
+  });
+
+  test("HMAC key object structure created via NAPI binding", () => {
+    const key = createCryptoKey(
+      {
+        name: "HMAC",
+        length: 256,
+        hash: { name: "SHA-256" },
+      },
+      true,
+      "secret",
+      ["sign", "verify"],
+    );
+
+    expect(key.algorithm.name).toBe("HMAC");
+    expect((key.algorithm as any).hash?.name).toBe("SHA-256");
+    expect(key.usages).toEqual(["sign", "verify"]);
+  });
+
+  test("RSA key pair object structure created via NAPI binding", () => {
+    const publicExponent = Buffer.from([1, 0, 1]);
+    const pub = createCryptoKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent,
+        hash: { name: "SHA-256" },
+      },
+      true,
+      "public",
+      ["verify"],
+    );
+
+    const priv = createCryptoKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent,
+        hash: { name: "SHA-256" },
+      },
+      false,
+      "private",
+      ["sign"],
+    );
+
+    const pair = createCryptoKeyPair(pub, priv);
+
+    expect((pair.publicKey.algorithm as any).modulusLength).toBe(2048);
+    expect(Buffer.from((pair.publicKey.algorithm as any).publicExponent)).toEqual(
+      Buffer.from([1, 0, 1]),
+    );
+    expect(pair.publicKey.type).toBe("public");
+    expect(pair.privateKey.type).toBe("private");
   });
 });
 
