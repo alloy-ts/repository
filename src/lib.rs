@@ -1,9 +1,11 @@
 mod branch;
 mod commit;
 mod config;
+mod crypt;
 mod diff;
 mod dirwalk;
 mod error;
+mod format;
 mod index;
 mod mailmap;
 mod merge;
