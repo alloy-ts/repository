@@ -33,7 +33,7 @@ use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, KeyInit, Key, Nonce};
 use napi::bindgen_prelude::{Either, Either6};
 use rand::Rng;
-use multi_sig::DataView as _;
+use multi_sig::prelude::*;
 use multi_util::CodecInfo as _;
 use thiserror::Error;
 
@@ -102,14 +102,13 @@ pub const NONCE_SIZE: usize = 12;
 /// Magic header identifying crypt-encrypted payloads.
 const MAGIC_HEADER: &[u8] = b"GITCRYPT";
 
-/// A symmetric ChaCha20-Poly1305 key. Exposed to JS as the `CryptoKey` class.
-#[napi]
+/// A symmetric ChaCha20-Poly1305 key used internally by the crypt subsystem.
 #[derive(Clone)]
-pub struct CryptoKey {
+pub struct GitCryptKey {
     key: [u8; KEY_SIZE],
 }
 
-impl CryptoKey {
+impl GitCryptKey {
     /// Generate a new random key from the OS CSPRNG.
     pub fn generate_random() -> Self {
         let mut key = [0u8; KEY_SIZE];
@@ -117,7 +116,7 @@ impl CryptoKey {
         Self { key }
     }
 
-    /// Alias for [`CryptoKey::generate_random`].
+    /// Alias for [`GitCryptKey::generate_random`].
     pub fn generate() -> Self {
         Self::generate_random()
     }
@@ -154,7 +153,7 @@ impl CryptoKey {
         Ok(result)
     }
 
-    /// Decrypt a payload produced by [`CryptoKey::encrypt`].
+    /// Decrypt a payload produced by [`GitCryptKey::encrypt`].
     pub fn decrypt(&self, ciphertext: &[u8]) -> CryptResult<Vec<u8>> {
         let min_size = MAGIC_HEADER.len() + NONCE_SIZE;
         if ciphertext.len() < min_size {
@@ -223,14 +222,14 @@ impl KeyManager {
     }
 
     /// Generate a new random key and persist it.
-    pub fn generate_key(&self) -> CryptResult<CryptoKey> {
-        let key = CryptoKey::generate();
+    pub fn generate_key(&self) -> CryptResult<GitCryptKey> {
+        let key = GitCryptKey::generate();
         self.save_key(&key)?;
         Ok(key)
     }
 
     /// Persist `key` to the default path with `0600` permissions on Unix.
-    pub fn save_key(&self, key: &CryptoKey) -> CryptResult<()> {
+    pub fn save_key(&self, key: &GitCryptKey) -> CryptResult<()> {
         let key_path = self.default_key_path();
         if let Some(parent) = key_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -251,7 +250,7 @@ impl KeyManager {
     }
 
     /// Load the default key from disk.
-    pub fn load_key(&self) -> CryptResult<CryptoKey> {
+    pub fn load_key(&self) -> CryptResult<GitCryptKey> {
         let key_path = self.default_key_path();
         if !key_path.exists() {
             return Err(CryptError::KeyNotFound("default".into()));
@@ -259,7 +258,7 @@ impl KeyManager {
         let mut file = std::fs::File::open(&key_path)?;
         let mut key_bytes = Vec::new();
         file.read_to_end(&mut key_bytes)?;
-        CryptoKey::from_bytes(&key_bytes)
+        GitCryptKey::from_bytes(&key_bytes)
     }
 
     /// Export the default key to `output_path` (with `0600` on Unix).
@@ -284,7 +283,7 @@ impl KeyManager {
         let mut file = std::fs::File::open(input_path)?;
         let mut key_bytes = Vec::new();
         file.read_to_end(&mut key_bytes)?;
-        let key = CryptoKey::from_bytes(&key_bytes)?;
+        let key = GitCryptKey::from_bytes(&key_bytes)?;
         self.save_key(&key)?;
         Ok(())
     }
@@ -380,9 +379,9 @@ impl SignatureScheme {
     #[napi(factory)]
     pub fn from_codec(codec: Either<String, u32>) -> Result<Self> {
         let c = match codec {
-            Either::A(name) => multi_codec::Codec::try_from(name.as_str())
+            Either::A(name) => Codec::try_from(name.as_str())
                 .map_err(|e| napi::Error::from_reason(format!("unknown codec '{name}': {e}")))?,
-            Either::B(code) => multi_codec::Codec::try_from(code)
+            Either::B(code) => Codec::try_from(code)
                 .map_err(|e| napi::Error::from_reason(format!("unknown codec {code}: {e}")))?,
         };
         Ok(Self {
@@ -431,8 +430,8 @@ impl Multisig {
     /// what [`MultisigBuilder::try_build_encoded`] produces.
     #[napi(getter)]
     pub fn hex(&self) -> String {
-        let encoded: multi_util::BaseEncoded<multi_sig::Multisig> =
-            multi_util::BaseEncoded::from(self.inner.clone());
+        let encoded: BaseEncoded<multi_sig::Multisig> =
+            BaseEncoded::from(self.inner.clone());
         encoded.to_string()
     }
 
@@ -486,12 +485,12 @@ impl Multisig {
     }
 }
 
-/// Resolve an `Either<String, u32>` codec argument into a `multi_codec::Codec`.
-fn resolve_codec(codec: Either<String, u32>) -> Result<multi_codec::Codec> {
+/// Resolve an `Either<String, u32>` codec argument into a `multi_sig::prelude::Codec`.
+fn resolve_codec(codec: Either<String, u32>) -> Result<Codec> {
     match codec {
-        Either::A(name) => multi_codec::Codec::try_from(name.as_str())
+        Either::A(name) => Codec::try_from(name.as_str())
             .map_err(|e| napi::Error::from_reason(format!("unknown codec '{name}': {e}"))),
-        Either::B(code) => multi_codec::Codec::try_from(code)
+        Either::B(code) => Codec::try_from(code)
             .map_err(|e| napi::Error::from_reason(format!("unknown codec {code}: {e}"))),
     }
 }
@@ -633,7 +632,7 @@ impl MultisigBuilder {
     pub fn new_from_bls_signature(codec: Either<String, u32>, signature: Buffer) -> Result<Self> {
         let c = resolve_codec(codec)?;
         let inner = match c {
-            multi_codec::Codec::Bls12381G1Msig => {
+            Codec::Bls12381G1Msig => {
                 let sig = blsful::Signature::<blsful::Bls12381G1Impl>::try_from(signature.as_ref())
                     .map_err(|e| {
                         napi::Error::from_reason(format!("invalid BLS12-381 G1 signature: {e}"))
@@ -641,7 +640,7 @@ impl MultisigBuilder {
                 multi_sig::Builder::new_from_bls_signature_with_codec(c, &sig)
                     .map_err(|e| napi::Error::from_reason(format!("bls signature: {e}")))?
             }
-            multi_codec::Codec::Bls12381G2Msig => {
+            Codec::Bls12381G2Msig => {
                 let sig = blsful::Signature::<blsful::Bls12381G2Impl>::try_from(signature.as_ref())
                     .map_err(|e| {
                         napi::Error::from_reason(format!("invalid BLS12-381 G2 signature: {e}"))
@@ -669,7 +668,7 @@ impl MultisigBuilder {
     ) -> Result<Self> {
         let c = resolve_codec(codec)?;
         let inner = match c {
-            multi_codec::Codec::Bls12381G1ShareMsig => {
+            Codec::Bls12381G1ShareMsig => {
                 let s = blsful::SignatureShare::<blsful::Bls12381G1Impl>::try_from(share.as_ref())
                     .map_err(|e| {
                         napi::Error::from_reason(format!("invalid BLS12-381 G1 share: {e}"))
@@ -682,7 +681,7 @@ impl MultisigBuilder {
                 )
                 .map_err(|e| napi::Error::from_reason(format!("bls share: {e}")))?
             }
-            multi_codec::Codec::Bls12381G2ShareMsig => {
+            Codec::Bls12381G2ShareMsig => {
                 let s = blsful::SignatureShare::<blsful::Bls12381G2Impl>::try_from(share.as_ref())
                     .map_err(|e| {
                         napi::Error::from_reason(format!("invalid BLS12-381 G2 share: {e}"))
@@ -752,7 +751,7 @@ impl Crypt {
     }
 
     /// Load the default key, ensuring the repository is initialized first.
-    fn load_key(&self) -> CryptResult<CryptoKey> {
+    fn load_key(&self) -> CryptResult<GitCryptKey> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptError::NotInitialized);
@@ -902,7 +901,7 @@ impl Crypt {
     /// Whether `data` carries the crypt magic header.
     #[napi]
     pub fn is_encrypted(&self, data: Buffer) -> bool {
-        CryptoKey::is_encrypted(data.as_ref())
+        GitCryptKey::is_encrypted(data.as_ref())
     }
 }
 
@@ -1246,10 +1245,10 @@ impl Crypt {
 
 /// Clean filter: encrypt stdin to stdout (idempotent on already-encrypted input).
 #[allow(dead_code)]
-pub fn clean_filter(key: &CryptoKey) -> CryptResult<()> {
+pub fn clean_filter(key: &GitCryptKey) -> CryptResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if CryptoKey::is_encrypted(&input) {
+    if GitCryptKey::is_encrypted(&input) {
         io::stdout().write_all(&input)?;
         return Ok(());
     }
@@ -1260,10 +1259,10 @@ pub fn clean_filter(key: &CryptoKey) -> CryptResult<()> {
 
 /// Smudge filter: decrypt stdin to stdout (pass-through if not encrypted).
 #[allow(dead_code)]
-pub fn smudge_filter(key: &CryptoKey) -> CryptResult<()> {
+pub fn smudge_filter(key: &GitCryptKey) -> CryptResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if !CryptoKey::is_encrypted(&input) {
+    if !GitCryptKey::is_encrypted(&input) {
         io::stdout().write_all(&input)?;
         return Ok(());
     }
@@ -1277,7 +1276,7 @@ pub fn smudge_filter(key: &CryptoKey) -> CryptResult<()> {
 pub fn diff_filter() -> CryptResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if CryptoKey::is_encrypted(&input) {
+    if GitCryptKey::is_encrypted(&input) {
         writeln!(io::stdout(), "*** This file is encrypted with crypt ***")?;
     } else {
         io::stdout().write_all(&input)?;
@@ -1344,7 +1343,7 @@ impl RingManager {
     /// Encrypt the repo's symmetric key so only the holder of the matching ed25519 SSH
     /// private key can recover it. `recipient` is the contents of an `ssh-ed25519` public
     /// (or private) key file.
-    pub fn encrypt_key_for_ssh_recipient(key: &CryptoKey, recipient: &str) -> CryptResult<Vec<u8>> {
+    pub fn encrypt_key_for_ssh_recipient(key: &GitCryptKey, recipient: &str) -> CryptResult<Vec<u8>> {
         let recipient_pk = ssh_ed25519_public_bytes(recipient)?;
         let x25519_pk = ed25519_to_x25519_public(&recipient_pk)?;
 
@@ -1380,7 +1379,7 @@ impl RingManager {
         encrypted: &[u8],
         identity_content: &str,
         passphrase: Option<&str>,
-    ) -> CryptResult<CryptoKey> {
+    ) -> CryptResult<GitCryptKey> {
         if encrypted.len() < 8 + 32 + NONCE_SIZE {
             return Err(CryptError::Ssh("envelope too short".into()));
         }
@@ -1405,7 +1404,7 @@ impl RingManager {
         nonce_arr.copy_from_slice(nonce_bytes);
 
         let key_bytes = aead_open(&aead_key, &nonce_arr, ct)?;
-        CryptoKey::from_bytes(&key_bytes)
+        GitCryptKey::from_bytes(&key_bytes)
     }
 }
 
@@ -2065,7 +2064,7 @@ pub struct GpgManager;
 impl GpgManager {
     /// Encrypt a key for a GPG recipient. Currently a stub: certificate/keyring lookup is
     /// not implemented, so this returns an actionable error instead of panicking.
-    pub fn encrypt_key_for_recipient(_key: &CryptoKey, _recipient: &str) -> CryptResult<Vec<u8>> {
+    pub fn encrypt_key_for_recipient(_key: &GitCryptKey, _recipient: &str) -> CryptResult<Vec<u8>> {
         Err(CryptError::Gpg(
             "GPG recipient encryption is not yet implemented (keyring lookup pending)".into(),
         ))
@@ -2084,8 +2083,10 @@ pub struct RsaHashedKeyAlgorithm {
     /// The algorithm name, e.g. `"RSASSA-PKCS1-v1_5"`.
     pub name: String,
     /// RSA modulus length in bits.
+    #[napi(js_name = "modulusLength")]
     pub modulus_length: u32,
     /// RSA public exponent (BigInt serialized as bytes, e.g. 65537 -> `010001`).
+    #[napi(js_name = "publicExponent")]
     pub public_exponent: Buffer,
     /// The associated hashing algorithm.
     pub hash: KeyAlgorithm,
@@ -2097,6 +2098,7 @@ pub struct EcKeyAlgorithm {
     /// The algorithm name, e.g. `"ECDSA"`.
     pub name: String,
     /// The named curve, e.g. `"P-256"`.
+    #[napi(js_name = "namedCurve")]
     pub named_curve: String,
 }
 
@@ -2130,24 +2132,17 @@ pub struct KmacKeyAlgorithm {
 }
 
 /// A Web Crypto `CryptoKey`.
-///
-/// Read-only from JS: Node treats these properties as immutable. `#[napi(object)]`
-/// generates a JS constructor accepting the literal `{ algorithm, extractable,
-/// type, usages }`; the fields are surfaced as getters and should not be mutated.
 #[napi(object)]
 pub struct CryptoKey {
     /// The algorithm (and algorithm-specific parameters) the key is for.
     pub algorithm:
-        Either6<AesKeyAlgorithm, HmacKeyAlgorithm, EcKeyAlgorithm, RsaHashedKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
+        Either6<EcKeyAlgorithm, RsaHashedKeyAlgorithm, HmacKeyAlgorithm, AesKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
     /// Whether the key may be exported via `subtle.exportKey` / `wrapKey`.
     pub extractable: bool,
     /// `"secret"` (symmetric), `"private"`, or `"public"` (asymmetric).
     #[napi(js_name = "type")]
     pub key_type: String,
     /// The operations this key may be used for.
-    /// One or more of: encrypt, decrypt, sign, verify, deriveKey, deriveBits,
-    /// encapsulateBits, decapsulateBits, encapsulateKey, decapsulateKey,
-    /// wrapKey, unwrapKey.
     pub usages: Vec<String>,
 }
 
@@ -2160,6 +2155,32 @@ pub struct CryptoKeyPair {
     pub private_key: CryptoKey,
 }
 
+#[napi(js_name = "createCryptoKey")]
+pub fn create_crypto_key(
+    algorithm: Either6<EcKeyAlgorithm, RsaHashedKeyAlgorithm, HmacKeyAlgorithm, AesKeyAlgorithm, KmacKeyAlgorithm, KeyAlgorithm>,
+    extractable: bool,
+    key_type: String,
+    usages: Vec<String>,
+) -> CryptoKey {
+    CryptoKey {
+        algorithm,
+        extractable,
+        key_type,
+        usages,
+    }
+}
+
+#[napi(js_name = "createCryptoKeyPair")]
+pub fn create_crypto_key_pair(
+    public_key: CryptoKey,
+    private_key: CryptoKey,
+) -> CryptoKeyPair {
+    CryptoKeyPair {
+        public_key,
+        private_key,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2169,15 +2190,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn deterministic_key(byte: u8) -> CryptoKey {
-        CryptoKey::from_bytes(&vec![byte; KEY_SIZE]).unwrap()
+    fn deterministic_key(byte: u8) -> GitCryptKey {
+        GitCryptKey::from_bytes(&vec![byte; KEY_SIZE]).unwrap()
     }
 
-    // ---- CryptoKey ----
+    // ---- GitCryptKey ----
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let key = CryptoKey::generate();
+        let key = GitCryptKey::generate();
         let plaintext = b"Hello, World!";
         let ciphertext = key.encrypt(plaintext).unwrap();
         assert_ne!(plaintext.as_slice(), &ciphertext[..]);
@@ -2187,18 +2208,18 @@ mod tests {
 
     #[test]
     fn encrypt_is_randomized_and_detected() {
-        let key = CryptoKey::generate();
+        let key = GitCryptKey::generate();
         let c1 = key.encrypt(b"same").unwrap();
         let c2 = key.encrypt(b"same").unwrap();
         assert_ne!(c1, c2, "fresh nonce per call");
-        assert!(CryptoKey::is_encrypted(&c1));
-        assert!(!CryptoKey::is_encrypted(b"plain"));
+        assert!(GitCryptKey::is_encrypted(&c1));
+        assert!(!GitCryptKey::is_encrypted(b"plain"));
     }
 
     #[test]
     fn wrong_key_fails_and_tamper_detected() {
-        let key1 = CryptoKey::generate();
-        let key2 = CryptoKey::generate();
+        let key1 = GitCryptKey::generate();
+        let key2 = GitCryptKey::generate();
         let ct = key1.encrypt(b"secret").unwrap();
         assert!(key2.decrypt(&ct).is_err());
 
@@ -2210,11 +2231,11 @@ mod tests {
 
     #[test]
     fn empty_and_invalid_format() {
-        let key = CryptoKey::generate();
+        let key = GitCryptKey::generate();
         let ct = key.encrypt(b"").unwrap();
         assert_eq!(key.decrypt(&ct).unwrap(), b"".to_vec());
         assert!(key.decrypt(&[1, 2, 3]).is_err());
-        assert!(CryptoKey::from_bytes(&[0u8; KEY_SIZE - 1]).is_err());
+        assert!(GitCryptKey::from_bytes(&[0u8; KEY_SIZE - 1]).is_err());
     }
 
     // ---- KeyManager ----
@@ -2332,7 +2353,7 @@ mod tests {
         // Build an unencrypted OpenSSH private-key PEM for the same keypair.
         let pem = build_openssh_ed25519_pem(&seed, &public);
 
-        let repo_key = CryptoKey::generate();
+        let repo_key = GitCryptKey::generate();
         let enc = RingManager::encrypt_key_for_ssh_recipient(&repo_key, &pub_string).unwrap();
         let dec = RingManager::decrypt_key_with_ssh_identity(&enc, &pem, None).unwrap();
         assert_eq!(dec.as_bytes(), repo_key.as_bytes());
