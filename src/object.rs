@@ -75,6 +75,25 @@ pub struct TreeEntry {
     pub id: String,
 }
 
+/// A git entry object (a file committed in a tree/commit).
+#[derive(Clone)]
+#[napi(object)]
+pub struct Entry {
+    pub path: String,
+    pub mode: String,
+    pub id: String,
+    #[napi(js_name = "authorName")]
+    pub author_name: Option<String>,
+    #[napi(js_name = "authorEmail")]
+    pub author_email: Option<String>,
+    #[napi(js_name = "committerName")]
+    pub committer_name: Option<String>,
+    #[napi(js_name = "committerEmail")]
+    pub committer_email: Option<String>,
+    #[napi(js_name = "commitTimestamp")]
+    pub commit_timestamp: Option<String>,
+}
+
 /// A git tree exposed to TypeScript.
 #[napi]
 pub struct Tree {

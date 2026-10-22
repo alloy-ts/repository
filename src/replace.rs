@@ -26,6 +26,15 @@ pub struct Replace {
     #[napi(js_name = "authorEmail")]
     #[serde(rename = "authorEmail")]
     pub author_email: String,
+    #[napi(js_name = "committerName")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub committer_name: Option<String>,
+    #[napi(js_name = "committerEmail")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub committer_email: Option<String>,
+    #[napi(js_name = "commitTimestamp")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub commit_timestamp: Option<String>,
     pub updated_at: String,
 }
 
@@ -43,6 +52,34 @@ pub struct ReplaceManifest {
     pub revisions: Vec<Replace>,
 }
 
+fn is_blob_in_head_tree(r: &gix::Repository, oid: gix::ObjectId) -> bool {
+    if let Ok(head_commit) = r.head_commit() {
+        if let Ok(tree_id) = head_commit.tree_id() {
+            if let Ok(tree) = r.find_tree(tree_id) {
+                if let Ok(decoded) = tree.decode() {
+                    return decoded.entries.iter().any(|e| e.oid == oid);
+                }
+            }
+        }
+    }
+    false
+}
+
+fn detect_object_type(r: &gix::Repository, oid: gix::ObjectId, has_path: bool) -> String {
+    if has_path || is_blob_in_head_tree(r, oid) {
+        return "entry".to_string();
+    }
+    match r.find_object(oid) {
+        Ok(obj) => match obj.kind {
+            gix::object::Kind::Commit => "commit".to_string(),
+            gix::object::Kind::Tree => "tree".to_string(),
+            gix::object::Kind::Blob => "blob".to_string(),
+            gix::object::Kind::Tag => "tag".to_string(),
+        },
+        Err(_) => "blob".to_string(),
+    }
+}
+
 #[napi]
 impl Repository {
     /// Replace an existing object with new content and record a new revision node.
@@ -54,7 +91,7 @@ impl Repository {
         path: Option<String>,
     ) -> Result<ReplaceManifest> {
         let r = thread_local(&self.inner);
-        let _orig_id = parse_oid(&original_oid)?;
+        let orig_id = parse_oid(&original_oid)?;
 
         // 1. Write the new object content
         let new_oid = r
@@ -62,6 +99,8 @@ impl Repository {
             .map_err(|e| err("write_blob", e))?
             .detach();
         let new_oid_str = new_oid.to_string();
+
+        let object_type = detect_object_type(&r, orig_id, path.is_some());
 
         // 2. Fetch or initialize existing manifest
         let manifest_ref = format!("refs/replace/{original_oid}");
@@ -74,7 +113,7 @@ impl Repository {
                     .unwrap_or_else(|_| ReplaceManifest {
                         id: original_oid.clone(),
                         path: path.clone(),
-                        r#type: "blob".to_string(),
+                        r#type: object_type.clone(),
                         head: original_oid.clone(),
                         revisions: vec![],
                     })
@@ -82,7 +121,7 @@ impl Repository {
             Err(_) => ReplaceManifest {
                 id: original_oid.clone(),
                 path: path.clone(),
-                r#type: if path.is_some() { "entry" } else { "blob" }.to_string(),
+                r#type: object_type,
                 head: original_oid.clone(),
                 revisions: vec![],
             },
@@ -94,16 +133,28 @@ impl Repository {
             Some(manifest.head.clone())
         };
 
-        // 3. Construct the new individual revision node
-        let author = r.author().and_then(|res| res.ok());
-        let author_name = author
-            .as_ref()
-            .map(|a| String::from_utf8_lossy(a.name).into_owned())
-            .unwrap_or_else(|| "gitoxide".to_string());
-        let author_email = author
-            .as_ref()
-            .map(|a| String::from_utf8_lossy(a.email).into_owned())
-            .unwrap_or_else(|| "gitoxide@localhost".to_string());
+        // 3. Construct author/committer metadata from repo defaults or HEAD commit
+        let mut author_name = "gitoxide".to_string();
+        let mut author_email = "gitoxide@localhost".to_string();
+        let mut committer_name: Option<String> = None;
+        let mut committer_email: Option<String> = None;
+        let mut commit_timestamp: Option<String> = None;
+
+        if let Ok(head_commit) = r.head_commit() {
+            if let Ok(decoded) = head_commit.decode() {
+                if let Ok(a) = decoded.author() {
+                    author_name = String::from_utf8_lossy(a.name).into_owned();
+                    author_email = String::from_utf8_lossy(a.email).into_owned();
+                }
+                if let Ok(c) = decoded.committer() {
+                    committer_name = Some(String::from_utf8_lossy(c.name).into_owned());
+                    committer_email = Some(String::from_utf8_lossy(c.email).into_owned());
+                    if let Ok(t) = c.time() {
+                        commit_timestamp = Some(t.seconds.to_string());
+                    }
+                }
+            }
+        }
 
         let node = Replace {
             this_id: new_oid_str.clone(),
@@ -112,6 +163,9 @@ impl Repository {
             head: Some(new_oid_str.clone()),
             author_name,
             author_email,
+            committer_name,
+            committer_email,
+            commit_timestamp,
             updated_at: Utc::now().to_rfc3339(),
         };
 
