@@ -6,6 +6,7 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
+use crate::replace::resolve_replace_id;
 use crate::repository::Repository;
 
 #[napi]
@@ -20,7 +21,8 @@ impl Blob {
     #[napi]
     pub fn content(&self) -> Result<Buffer> {
         let r = thread_local(&self.repo);
-        let blob = r.find_blob(self.id).map_err(|e| err("find_blob", e))?;
+        let target_id = resolve_replace_id(&r, self.id);
+        let blob = r.find_blob(target_id).map_err(|e| err("find_blob", e))?;
         Ok(Buffer::from(blob.data.to_vec()))
     }
 

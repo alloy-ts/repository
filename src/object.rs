@@ -8,6 +8,7 @@ use napi_derive::napi;
 use crate::blob::{Blob, build_blob};
 use crate::commit::Commit;
 use crate::error::{err, err_str, parse_oid, thread_local};
+use crate::replace::resolve_replace_id;
 use crate::repository::Repository;
 use crate::tag::{Tag, build_tag};
 use crate::tree::{Tree, build_tree};
@@ -40,8 +41,9 @@ impl GitObject {
     #[napi]
     pub fn data(&self) -> Result<Buffer> {
         let r = thread_local(&self.repo);
+        let target_id = resolve_replace_id(&r, self.id);
         let obj = r
-            .find_object(self.id)
+            .find_object(target_id)
             .map_err(|e| err("find_object", e))?
             .detach();
         Ok(Buffer::from(obj.data))
@@ -53,7 +55,8 @@ impl GitObject {
             return Ok(None);
         }
         let r = thread_local(&self.repo);
-        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let target_id = resolve_replace_id(&r, self.id);
+        let commit = r.find_commit(target_id).map_err(|e| err("find_commit", e))?;
         Ok(Some(crate::commit::build_commit(&self.repo, commit)?))
     }
 
@@ -63,7 +66,8 @@ impl GitObject {
             return Ok(None);
         }
         let r = thread_local(&self.repo);
-        let tree = r.find_tree(self.id).map_err(|e| err("find_tree", e))?;
+        let target_id = resolve_replace_id(&r, self.id);
+        let tree = r.find_tree(target_id).map_err(|e| err("find_tree", e))?;
         Ok(Some(build_tree(&self.repo, tree.id)?))
     }
 
@@ -81,7 +85,8 @@ impl GitObject {
             return Ok(None);
         }
         let r = thread_local(&self.repo);
-        let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
+        let target_id = resolve_replace_id(&r, self.id);
+        let tag = r.find_tag(target_id).map_err(|e| err("find_tag", e))?;
         Ok(Some(build_tag(&self.repo, tag)?))
     }
 
@@ -89,7 +94,8 @@ impl GitObject {
     #[napi]
     pub fn peel_to_commit(&self) -> Result<Commit> {
         let r = thread_local(&self.repo);
-        let obj = r.find_object(self.id).map_err(|e| err("find_object", e))?;
+        let target_id = resolve_replace_id(&r, self.id);
+        let obj = r.find_object(target_id).map_err(|e| err("find_object", e))?;
         let peeled = obj
             .peel_to_kind(gix::object::Kind::Commit)
             .map_err(|e| err("peel_to_commit", e))?;
@@ -103,7 +109,8 @@ impl GitObject {
     #[napi]
     pub fn peel_to_tree(&self) -> Result<Tree> {
         let r = thread_local(&self.repo);
-        let obj = r.find_object(self.id).map_err(|e| err("find_object", e))?;
+        let target_id = resolve_replace_id(&r, self.id);
+        let obj = r.find_object(target_id).map_err(|e| err("find_object", e))?;
         let peeled = obj
             .peel_to_kind(gix::object::Kind::Tree)
             .map_err(|e| err("peel_to_tree", e))?;
@@ -199,8 +206,10 @@ impl Repository {
     #[napi]
     pub fn find_object(&self, id: String) -> Result<GitObject> {
         let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let target_oid = resolve_replace_id(&r, oid);
         let object = r
-            .find_object(parse_oid(&id)?)
+            .find_object(target_oid)
             .map_err(|e| err("find_object", e))?;
         build_object(&self.inner, object)
     }
@@ -210,7 +219,10 @@ impl Repository {
     pub fn object_exists(&self, id: String) -> bool {
         let r = thread_local(&self.inner);
         match parse_oid(&id) {
-            Ok(oid) => r.has_object(oid),
+            Ok(oid) => {
+                let target_oid = resolve_replace_id(&r, oid);
+                r.has_object(target_oid)
+            }
             Err(_) => false,
         }
     }
@@ -220,6 +232,7 @@ impl Repository {
     pub fn peel(&self, id: String, kind: String) -> Result<String> {
         let r = thread_local(&self.inner);
         let oid = parse_oid(&id)?;
+        let target_oid = resolve_replace_id(&r, oid);
         let target_kind = match kind.to_lowercase().as_str() {
             "commit" => gix::objs::Kind::Commit,
             "tree" => gix::objs::Kind::Tree,
@@ -227,7 +240,7 @@ impl Repository {
             "tag" => gix::objs::Kind::Tag,
             _ => return Err(err_str("peel", format!("invalid target kind {kind}"))),
         };
-        let obj = r.find_object(oid).map_err(|e| err("find_object", e))?;
+        let obj = r.find_object(target_oid).map_err(|e| err("find_object", e))?;
         let peeled = obj.peel_to_kind(target_kind).map_err(|e| err("peel", e))?;
         Ok(peeled.id().to_string())
     }
@@ -237,10 +250,13 @@ impl Repository {
     pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
         let r = thread_local(&self.inner);
         match parse_oid(&id) {
-            Ok(oid) => match r.find_object(oid) {
-                Ok(obj) => Ok(Some(build_object(&self.inner, obj)?)),
-                Err(_) => Ok(None),
-            },
+            Ok(oid) => {
+                let target_oid = resolve_replace_id(&r, oid);
+                match r.find_object(target_oid) {
+                    Ok(obj) => Ok(Some(build_object(&self.inner, obj)?)),
+                    Err(_) => Ok(None),
+                }
+            }
             Err(_) => Ok(None),
         }
     }
@@ -262,8 +278,10 @@ impl Repository {
     #[napi]
     pub fn read_object(&self, id: String) -> Result<ObjectData> {
         let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let target_oid = resolve_replace_id(&r, oid);
         let obj = r
-            .find_object(parse_oid(&id)?)
+            .find_object(target_oid)
             .map_err(|e| err("find_object", e))?
             .detach();
         Ok(ObjectData {
@@ -291,8 +309,10 @@ impl Repository {
     #[napi]
     pub fn find_header(&self, id: String) -> Result<ObjectHeader> {
         let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let target_oid = resolve_replace_id(&r, oid);
         let header = r
-            .find_header(parse_oid(&id)?)
+            .find_header(target_oid)
             .map_err(|e| err("find_header", e))?;
         Ok(ObjectHeader {
             kind: kind_to_string(header.kind()),
@@ -307,15 +327,18 @@ impl Repository {
     pub fn try_find_header(&self, id: String) -> Result<Option<ObjectHeader>> {
         let r = thread_local(&self.inner);
         match parse_oid(&id) {
-            Ok(oid) => match r.find_header(oid) {
-                Ok(header) => Ok(Some(ObjectHeader {
-                    kind: kind_to_string(header.kind()),
-                    size: header.size() as f64,
-                    is_packed: false,
-                    num_deltas: None,
-                })),
-                Err(_) => Ok(None),
-            },
+            Ok(oid) => {
+                let target_oid = resolve_replace_id(&r, oid);
+                match r.find_header(target_oid) {
+                    Ok(header) => Ok(Some(ObjectHeader {
+                        kind: kind_to_string(header.kind()),
+                        size: header.size() as f64,
+                        is_packed: false,
+                        num_deltas: None,
+                    })),
+                    Err(_) => Ok(None),
+                }
+            }
             Err(_) => Ok(None),
         }
     }
