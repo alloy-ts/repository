@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::io;
-use std::io::Write;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -143,7 +143,7 @@ mod crypto {
         let cipher = XChaCha20Poly1305::new_from_slice(key)
             .map_err(|_| SafeError::DecryptionFailed)?;
         let nonce: [u8; 24] = rand::random();
-        let nonce_ga = aead::Nonce::from_slice(&nonce);
+        let nonce_ga = chacha20poly1305::aead::Nonce::<XChaCha20Poly1305>::from_slice(&nonce);
         let mut buf = pt.to_vec();
         cipher
             .encrypt_in_place(nonce_ga, aad, &mut buf)
@@ -154,7 +154,7 @@ mod crypto {
     fn aead_decrypt(key: &[u8; 32], nonce: &[u8], ct: &[u8], aad: &[u8]) -> SafeResult<Vec<u8>> {
         let cipher = XChaCha20Poly1305::new_from_slice(key)
             .map_err(|_| SafeError::DecryptionFailed)?;
-        let nonce_ga = aead::Nonce::from_slice(nonce);
+        let nonce_ga = chacha20poly1305::aead::Nonce::<XChaCha20Poly1305>::from_slice(nonce);
         let mut buf = ct.to_vec();
         cipher
             .decrypt_in_place(nonce_ga, aad, &mut buf)
@@ -2094,12 +2094,10 @@ pub fn rotation_due(file: &VaultFile) -> Vec<(String, i64, String)> {
 
 // ── KeyManager (moved from crypto.rs) ────────────────────────────────────────
 
-#[cfg(feature = "crypto")]
 pub struct KeyManager {
     git_dir: PathBuf,
 }
 
-#[cfg(feature = "crypto")]
 impl KeyManager {
     /// Create a manager rooted at `git_dir` (the `.git` directory).
     pub fn new(git_dir: impl AsRef<Path>) -> Self {
@@ -2226,18 +2224,18 @@ impl KeyManager {
 
 // ── IdentityManager (moved from crypto.rs, ssh subsystem) ────────────────────
 
-#[cfg(all(feature = "crypto", feature = "ssh"))]
+#[cfg(feature = "ssh")]
 pub struct IdentityManager;
 
-#[cfg(all(feature = "crypto", feature = "ssh"))]
+#[cfg(feature = "ssh")]
 mod ssh_keys {
     use crate::crypto::{CryptoError, CryptoResult, SymmetricCryptoKey};
     use curve25519_dalek::edwards::CompressedEdwardsY;
     use curve25519_dalek::montgomery::MontgomeryPoint;
-    use curve25519_dalek::x25519::{X25519PublicKey, X25519Secret};
-    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey};
-    use ring::rand::SystemRandom;
-    use sha2::{Digest, Sha256};
+    use curve25519_dalek::scalar::Scalar;
+    use chacha20poly1305::aead::{AeadInPlace, KeyInit, Nonce};
+    use chacha20poly1305::ChaCha20Poly1305;
+    use sha2::{Digest, Sha256, Sha512};
 
     use ssh_key::private::KeypairData;
     use ssh_key::public::KeyData;
@@ -2312,36 +2310,32 @@ mod ssh_keys {
         }
     }
 
-    pub fn ed25519_to_x25519_public(edwards: &[u8; 32]) -> CryptoResult<X25519PublicKey> {
+    pub fn ed25519_to_x25519_public(edwards: &[u8; 32]) -> CryptoResult<MontgomeryPoint> {
         let compressed = CompressedEdwardsY::from_slice(edwards)
             .map_err(|_| CryptoError::Ssh("invalid ed25519 public point".into()))?;
         let point = compressed
             .decompress()
             .ok_or_else(|| CryptoError::Ssh("invalid ed25519 public point".into()))?;
         let mont: MontgomeryPoint = point.to_montgomery();
-        Ok(X25519PublicKey::from(mont.to_bytes()))
+        Ok(mont)
     }
 
-    pub fn ed25519_seed_to_x25519_scalar(seed: &[u8; 32]) -> [u8; 32] {
+    pub fn ed25519_seed_to_x25519_scalar(seed: &[u8; 32]) -> Scalar {
         let hash = Sha512::digest(seed);
-        let mut scalar = [0u8; 32];
-        scalar.copy_from_slice(&hash[..32]);
-        scalar[0] &= 248;
-        scalar[31] &= 127;
-        scalar[31] |= 64;
-        scalar
+        let mut scalar_bytes = [0u8; 32];
+        scalar_bytes.copy_from_slice(&hash[..32]);
+        scalar_bytes[0] &= 248;
+        scalar_bytes[31] &= 127;
+        scalar_bytes[31] |= 64;
+        Scalar::from_bits(scalar_bytes)
     }
 
     pub fn derive_aead_key(shared: &[u8]) -> CryptoResult<[u8; 32]> {
-        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"gitcrypt-ssh-v1");
-        let prk = salt.extract(shared);
-        let okm = prk
-            .expand(&[b"ssh-recipient-key"], hkdf::HKDF_SHA256)
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(b"gitcrypt-ssh-v1"), shared);
+        let mut okm = [0u8; 32];
+        hk.expand(b"ssh-recipient-key", &mut okm)
             .map_err(|_| CryptoError::Ssh("hkdf expand failed".into()))?;
-        let mut key = [0u8; 32];
-        okm.fill(&mut key)
-            .map_err(|_| CryptoError::Ssh("hkdf fill failed".into()))?;
-        Ok(key)
+        Ok(okm)
     }
 
     pub fn aead_seal(
@@ -2349,13 +2343,12 @@ mod ssh_keys {
         nonce: &[u8; NONCE_SIZE],
         plaintext: &[u8],
     ) -> CryptoResult<Vec<u8>> {
-        let unbound = UnboundKey::new(&ring::aead::AES_256_GCM, key)
+        let cipher = ChaCha20Poly1305::new_from_slice(key)
             .map_err(|_| CryptoError::Ssh("invalid aead key".into()))?;
-        let key = LessSafeKey::new(unbound);
-        let nonce = Nonce::try_assume_unique_for_key(nonce)
-            .map_err(|_| CryptoError::Ssh("invalid nonce".into()))?;
+        let nonce_ga = Nonce::from_slice(nonce);
         let mut in_out = plaintext.to_vec();
-        key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+        cipher
+            .encrypt_in_place(nonce_ga, &[], &mut in_out)
             .map_err(|_| CryptoError::Ssh("encryption failed".into()))?;
         Ok(in_out)
     }
@@ -2365,23 +2358,19 @@ mod ssh_keys {
         nonce: &[u8; NONCE_SIZE],
         ciphertext: &[u8],
     ) -> CryptoResult<Vec<u8>> {
-        let unbound = UnboundKey::new(&ring::aead::AES_256_GCM, key)
+        let cipher = ChaCha20Poly1305::new_from_slice(key)
             .map_err(|_| CryptoError::Ssh("invalid aead key".into()))?;
-        let key = LessSafeKey::new(unbound);
-        let nonce = Nonce::try_assume_unique_for_key(nonce)
-            .map_err(|_| CryptoError::Ssh("invalid nonce".into()))?;
+        let nonce_ga = Nonce::from_slice(nonce);
         let mut in_out = ciphertext.to_vec();
-        let plain = key
-            .open_in_place(nonce, Aad::empty(), &mut in_out)
+        cipher
+            .decrypt_in_place(nonce_ga, &[], &mut in_out)
             .map_err(|_| CryptoError::Ssh("decryption failed (wrong key or tampered)".into()))?;
-        Ok(plain.to_vec())
+        Ok(in_out)
     }
 
     pub fn vault_seal(key: &[u8; 32], plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
         let mut nonce = [0u8; NONCE_SIZE];
-        SystemRandom::new()
-            .fill(&mut nonce)
-            .map_err(|_| CryptoError::Ssh("RNG failure".into()))?;
+        rand::thread_rng().fill_bytes(&mut nonce);
         let ct = aead_seal(key, &nonce, plaintext)?;
         let mut out = Vec::with_capacity(VAULT_MAGIC.len() + NONCE_SIZE + ct.len());
         out.extend_from_slice(VAULT_MAGIC);
@@ -2403,7 +2392,7 @@ mod ssh_keys {
     }
 }
 
-#[cfg(all(feature = "crypto", feature = "ssh"))]
+#[cfg(feature = "ssh")]
 impl IdentityManager {
     /// Encrypt the repo's symmetric key so only the holder of the matching
     /// ed25519 SSH private key can recover it.
@@ -2411,24 +2400,24 @@ impl IdentityManager {
         key: &crate::crypto::SymmetricCryptoKey,
         recipient: &str,
     ) -> crate::crypto::CryptoResult<Vec<u8>> {
-        use ssh_keys::{aead_seal, derive_aead_key, ed25519_to_x25519_public, ssh_ed25519_public_bytes, MAGIC, NONCE_SIZE};
+        use ssh_keys::{aead_seal, derive_aead_key, ed25519_pub_from_ssh_public, ed25519_to_x25519_public, ssh_ed25519_public_bytes, MAGIC, NONCE_SIZE};
+        use curve25519_dalek::montgomery::MontgomeryPoint;
+        use curve25519_dalek::scalar::Scalar;
+        use rand::RngCore;
+
         let recipient_pk = ssh_ed25519_public_bytes(recipient)?;
-        let x25519_pk = ed25519_to_x25519_public(&recipient_pk)?;
+        let mont_pk = ed25519_to_x25519_public(&recipient_pk)?;
 
         let mut ephemeral = [0u8; 32];
-        ring::rand::SystemRandom::new()
-            .fill(&mut ephemeral)
-            .map_err(|_| crate::crypto::CryptoError::Ssh("RNG failure".into()))?;
-        let esk = curve25519_dalek::x25519::X25519Secret::from(ephemeral);
-        let epk = curve25519_dalek::x25519::X25519PublicKey::from(&esk);
+        rand::thread_rng().fill_bytes(&mut ephemeral);
+        let esk = Scalar::from_bits(ephemeral);
+        let epk = curve25519_dalek::constants::X25519_BASEPOINT * esk;
 
-        let shared = esk.diffie_hellman(&x25519_pk);
+        let shared = mont_pk * esk;
         let aead_key = derive_aead_key(shared.as_bytes())?;
 
         let mut nonce = [0u8; NONCE_SIZE];
-        ring::rand::SystemRandom::new()
-            .fill(&mut nonce)
-            .map_err(|_| crate::crypto::CryptoError::Ssh("RNG failure".into()))?;
+        rand::thread_rng().fill_bytes(&mut nonce);
 
         let ciphertext = aead_seal(&aead_key, &nonce, key.as_bytes())?;
 
@@ -2447,6 +2436,8 @@ impl IdentityManager {
         passphrase: Option<&str>,
     ) -> crate::crypto::CryptoResult<crate::crypto::SymmetricCryptoKey> {
         use ssh_keys::{aead_open, derive_aead_key, ed25519_seed_to_x25519_scalar, ssh_ed25519_seed, MAGIC, NONCE_SIZE};
+        use curve25519_dalek::montgomery::MontgomeryPoint;
+
         if encrypted.len() < 8 + 32 + NONCE_SIZE {
             return Err(crate::crypto::CryptoError::Ssh("envelope too short".into()));
         }
@@ -2459,12 +2450,11 @@ impl IdentityManager {
 
         let mut epk_arr = [0u8; 32];
         epk_arr.copy_from_slice(epk_bytes);
-        let epk = curve25519_dalek::x25519::X25519PublicKey::from(epk_arr);
+        let epk = MontgomeryPoint(epk_arr);
 
         let seed = ssh_ed25519_seed(identity_content, passphrase)?;
         let scalar = ed25519_seed_to_x25519_scalar(&seed);
-        let sk = curve25519_dalek::x25519::X25519Secret::from(scalar);
-        let shared = sk.diffie_hellman(&epk);
+        let shared = epk * scalar;
         let aead_key = derive_aead_key(shared.as_bytes())?;
 
         let mut nonce_arr = [0u8; NONCE_SIZE];
@@ -2476,6 +2466,12 @@ impl IdentityManager {
 }
 
 // ── napi bindings ─────────────────────────────────────────────────────────────
+
+#[napi(object)]
+pub struct VaultHistoryItem {
+    pub version: u32,
+    pub updated_at: String,
+}
 
 /// JS-facing handle to an open [`Vault`]. All methods lock internally so the
 /// JS object can be shared.
@@ -2493,6 +2489,30 @@ impl VaultHandle {
         Ok(Self {
             inner: Mutex::new(vault),
         })
+    }
+
+    /// Open a vault using a raw 32-byte pre-derived key (DEK).
+    #[napi]
+    pub fn open_with_key(path: String, key: Buffer, read_only: Option<bool>) -> napi::Result<Self> {
+        if key.len() != 32 {
+            return Err(napi::Error::from_reason("key must be 32 bytes"));
+        }
+        let mut key_arr = [0u8; 32];
+        key_arr.copy_from_slice(key.as_ref());
+        let vault = if read_only.unwrap_or(false) {
+            Vault::open_with_key_read_only(Path::new(&path), key_arr)
+        } else {
+            Vault::open_with_key(Path::new(&path), key_arr)
+        }?;
+        Ok(Self {
+            inner: Mutex::new(vault),
+        })
+    }
+
+    /// Check if a vault is a team vault (has age recipients / wrapped DEK).
+    #[napi]
+    pub fn is_team_vault(path: String) -> bool {
+        Vault::is_team_vault(Path::new(&path))
     }
 
     /// Open an existing vault. Pass `readOnly: true` for a read-only handle.
@@ -2548,6 +2568,64 @@ impl VaultHandle {
             .iter()
             .map(|s| s.to_string())
             .collect())
+    }
+
+    /// Export all secrets as a key-value Record object.
+    #[napi]
+    pub fn export_all(&self) -> napi::Result<HashMap<String, String>> {
+        Ok(self.inner.lock().unwrap().export_all()?)
+    }
+
+    /// Get a specific version of a secret.
+    #[napi]
+    pub fn get_version(&self, key: String, version: u32) -> napi::Result<String> {
+        let v = self.inner.lock().unwrap().get_version(&key, version as usize)?;
+        Ok((*v).clone())
+    }
+
+    /// Get version history metadata for a key: array of { version, updatedAt }.
+    #[napi]
+    pub fn history(&self, key: String) -> napi::Result<Vec<VaultHistoryItem>> {
+        let items = self.inner.lock().unwrap().history(&key)?;
+        Ok(items
+            .into_iter()
+            .map(|(ver, ts)| VaultHistoryItem {
+                version: ver as u32,
+                updated_at: ts.to_rfc3339(),
+            })
+            .collect())
+    }
+
+    /// Revert a secret to a previous version.
+    #[napi]
+    pub fn revert_to_version(&self, key: String, version: u32) -> napi::Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .revert_to_version(&key, version as usize)?;
+        Ok(())
+    }
+
+    /// Prune history entries for a key, keeping at most `keep_n`.
+    #[napi]
+    pub fn prune_history(&self, key: String, keep_n: u32) -> napi::Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .prune_history(&key, keep_n as usize)?;
+        Ok(())
+    }
+
+    /// Whether a whole-file rollback is suspected.
+    #[napi(getter)]
+    pub fn rollback_suspected(&self) -> napi::Result<bool> {
+        Ok(self.inner.lock().unwrap().rollback_suspected())
+    }
+
+    /// Path to the vault file.
+    #[napi(getter)]
+    pub fn path(&self) -> napi::Result<String> {
+        Ok(self.inner.lock().unwrap().path().to_string_lossy().into_owned())
     }
 
     /// Rename a secret.

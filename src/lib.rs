@@ -5,7 +5,6 @@ mod branch;
 mod commit;
 mod commit_graph;
 mod config;
-#[cfg(feature = "crypto")]
 mod crypto;
 mod vault;
 mod diff;
