@@ -209,7 +209,7 @@ impl IdentityManager {
 
         // Ephemeral X25519 keypair (random).
         let mut ephemeral = [0u8; 32];
-        rand::rng().fill_bytes(&mut ephemeral);
+        rand::thread_rng().fill_bytes(&mut ephemeral);
         let esk = x25519_dalek::StaticSecret::from(ephemeral);
         let epk = x25519_dalek::PublicKey::from(&esk);
 
@@ -217,7 +217,7 @@ impl IdentityManager {
         let aead_key = derive_aead_key(shared.as_bytes())?;
 
         let mut nonce = [0u8; NONCE_SIZE];
-        rand::rng().fill_bytes(&mut nonce);
+        rand::thread_rng().fill_bytes(&mut nonce);
 
         let ciphertext = aead_seal(&aead_key, &nonce, key.as_bytes())?;
 
@@ -948,8 +948,6 @@ mod vault_crypto {
         };
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        rand::thread_rng().fill_bytes(&mut ephemeral);
-        rand::thread_rng().fill_bytes(&mut nonce);
 
         let ct = match cipher_kind {
             CipherKind::XChaCha20Poly1305 => {
