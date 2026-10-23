@@ -13,6 +13,7 @@ mod replace;
 mod repository;
 mod revision;
 mod submodule;
+mod vault;
 mod worktree;
 
 use napi_derive::napi;
