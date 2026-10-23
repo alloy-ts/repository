@@ -143,7 +143,7 @@ mod crypto {
         let cipher = XChaCha20Poly1305::new_from_slice(key)
             .map_err(|_| SafeError::DecryptionFailed)?;
         let nonce: [u8; 24] = rand::random();
-        let nonce_ga = aead::Nonce::from_slice(&nonce);
+        let nonce_ga = chacha20poly1305::XNonce::from_slice(&nonce);
         let mut buf = pt.to_vec();
         cipher
             .encrypt_in_place(nonce_ga, aad, &mut buf)
@@ -154,7 +154,7 @@ mod crypto {
     fn aead_decrypt(key: &[u8; 32], nonce: &[u8], ct: &[u8], aad: &[u8]) -> SafeResult<Vec<u8>> {
         let cipher = XChaCha20Poly1305::new_from_slice(key)
             .map_err(|_| SafeError::DecryptionFailed)?;
-        let nonce_ga = aead::Nonce::from_slice(nonce);
+        let nonce_ga = chacha20poly1305::XNonce::from_slice(nonce);
         let mut buf = ct.to_vec();
         cipher
             .decrypt_in_place(nonce_ga, aad, &mut buf)
@@ -2897,12 +2897,10 @@ impl KvVault {
     pub fn list(&self, prefix: String) -> napi::Result<Vec<String>> {
         let mut keys = Vec::new();
         for guard in self.partition.prefix(prefix) {
-            let guard =
-                guard.map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
             let key = guard
                 .key()
                 .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-            let s = String::from_utf8((*key).to_vec()).map_err(|_| {
+            let s = String::from_utf8(key.to_vec()).map_err(|_| {
                 napi::Error::new(napi::Status::GenericFailure, "key is not valid UTF-8")
             })?;
             keys.push(s);
@@ -3307,7 +3305,7 @@ mod tests {
         let file = legacy_vault_file(pw(), "legacy-value");
         let original = serde_json::to_string_pretty(&file).unwrap();
         std::fs::write(&path, &original).unwrap();
-        std::fs::write(dir.path().join("snapshots"), b"in the way").unwrap();
+        std::fs::write(dir.path().join(".snapshots"), b"in the way").unwrap();
 
         let mut vault = Vault::open(&path, pw()).unwrap();
         match vault.set("NEW_SECRET", "new-value", HashMap::new()) {
