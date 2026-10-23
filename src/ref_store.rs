@@ -72,6 +72,7 @@ pub fn init_backend(_version: Option<u32>) -> RefStoreType {
 #[napi]
 pub struct RefStore {
     repo: Arc<gix::ThreadSafeRepository>,
+    namespace: Option<String>,
 }
 
 #[napi]
@@ -84,6 +85,7 @@ impl RefStore {
     pub fn new(repository: &Repository) -> RefStore {
         RefStore {
             repo: Arc::clone(&repository.inner),
+            namespace: None,
         }
     }
 
@@ -96,7 +98,56 @@ impl RefStore {
     pub fn open(repository: &Repository) -> RefStore {
         RefStore {
             repo: Arc::clone(&repository.inner),
+            namespace: None,
         }
+    }
+
+    /// Create a new store at the given location, typically the `.git/` directory.
+    #[napi]
+    pub fn at(git_dir: String, _object_hash: Option<String>) -> Result<RefStore> {
+        let repo = gix::open(git_dir.as_str()).map_err(|e| err("at", e))?;
+        Ok(RefStore {
+            repo: Arc::new(repo.into_sync()),
+            namespace: None,
+        })
+    }
+
+    /// Create a new store at the given location with additional options.
+    #[napi]
+    pub fn at_opts(
+        git_dir: String,
+        _object_hash: Option<String>,
+        _precompose_unicode: Option<bool>,
+    ) -> Result<RefStore> {
+        let repo = gix::open(git_dir.as_str()).map_err(|e| err("at_opts", e))?;
+        Ok(RefStore {
+            repo: Arc::new(repo.into_sync()),
+            namespace: None,
+        })
+    }
+
+    /// Return a new handle which sees all references.
+    #[napi]
+    pub fn to_handle(&self) -> RefStore {
+        RefStore {
+            repo: Arc::clone(&self.repo),
+            namespace: None,
+        }
+    }
+
+    /// Return a handle limited to the given reference namespace (if `Some`).
+    #[napi]
+    pub fn to_handle_namespaced(&self, namespace: Option<String>) -> RefStore {
+        RefStore {
+            repo: Arc::clone(&self.repo),
+            namespace,
+        }
+    }
+
+    /// The reference namespace currently active on this store handle, if any.
+    #[napi(getter)]
+    pub fn namespace(&self) -> Option<String> {
+        self.namespace.clone()
     }
 
     /// The backend format this store uses.
@@ -108,13 +159,21 @@ impl RefStore {
         RefStoreType::Files
     }
 
+    fn get_repo(&self) -> gix::Repository {
+        let mut r = thread_local(&self.repo);
+        if let Some(ns) = &self.namespace {
+            let _ = r.set_namespace(ns.as_str());
+        }
+        r
+    }
+
     /// The repository's git directory (`.git`, or the repo root for bare repos).
     ///
     /// Mirrors the path facts exposed by the gix `file::Store`; equivalent to
     /// `Repository::git_dir`.
     #[napi(getter)]
     pub fn git_dir(&self) -> String {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         r.git_dir().to_string_lossy().into_owned()
     }
 
@@ -123,7 +182,7 @@ impl RefStore {
     /// `Repository::common_dir`.
     #[napi(getter)]
     pub fn common_dir(&self) -> String {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         r.common_dir().to_string_lossy().into_owned()
     }
 
@@ -132,7 +191,7 @@ impl RefStore {
     /// worktree. Mirrors `file::Store::common_dir_resolved`.
     #[napi(getter)]
     pub fn common_dir_resolved(&self) -> String {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         r.common_dir().to_string_lossy().into_owned()
     }
 
@@ -141,8 +200,29 @@ impl RefStore {
     /// `packedRefsPath`.
     #[napi(getter)]
     pub fn packed_refs_path(&self) -> String {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         r.refs.packed_refs_path().to_string_lossy().into_owned()
+    }
+
+    /// Look up a reference by partial or full name. Throws if not found.
+    #[napi]
+    pub fn find(&self, partial_name: String) -> Result<Reference> {
+        let r = self.get_repo();
+        let reference = r
+            .find_reference(partial_name.as_str())
+            .map_err(|e| err("find", e))?;
+        build_reference(&self.repo, reference)
+    }
+
+    /// Look up a reference by partial or full name, returning `null` if not found.
+    #[napi]
+    pub fn try_find(&self, partial_name: String) -> Result<Option<Reference>> {
+        let r = self.get_repo();
+        match r.try_find_reference(partial_name.as_str()) {
+            Ok(Some(reference)) => Ok(Some(build_reference(&self.repo, reference)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("try_find", e)),
+        }
     }
 
     /// Whether a reference named `refName` exists.
@@ -150,7 +230,7 @@ impl RefStore {
     /// Mirrors `git_ref_store_exists`.
     #[napi]
     pub fn exists(&self, ref_name: String) -> Result<bool> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         match r.try_find_reference(ref_name.as_str()) {
             Ok(Some(_)) => Ok(true),
             Ok(None) => Ok(false),
@@ -163,7 +243,7 @@ impl RefStore {
     /// Mirrors `git_ref_store_lookup`. Throws when the reference does not exist.
     #[napi]
     pub fn lookup(&self, ref_name: String) -> Result<Reference> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let reference = r
             .find_reference(ref_name.as_str())
             .map_err(|e| err("lookup", e))?;
@@ -178,7 +258,7 @@ impl RefStore {
     /// "return the symref" behaviour).
     #[napi]
     pub fn resolve(&self, ref_name: String, max_nesting: Option<i32>) -> Result<Reference> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let mut reference = r
             .find_reference(ref_name.as_str())
             .map_err(|e| err("resolve", e))?;
@@ -216,7 +296,7 @@ impl RefStore {
     /// into a name list; [`ReferenceIterator::next`] re-resolves each name.
     #[napi]
     pub fn iterator(&self, glob: Option<String>) -> Result<ReferenceIterator> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let platform = r.references().map_err(|e| err("iterator", e))?;
         let iter = platform.all().map_err(|e| err("iterator", e))?;
         let mut names = Vec::new();
@@ -262,7 +342,7 @@ impl RefStore {
         deref: Option<bool>,
         update_reflog: Option<bool>,
     ) -> Result<Reference> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let full_name =
             gix::refs::FullName::try_from(name.as_str()).map_err(|e| err("write", e))?;
         let target = parse_target(&target)?;
@@ -304,7 +384,7 @@ impl RefStore {
         signature: Option<Signature>,
         message: Option<String>,
     ) -> Result<Reference> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let old = r
             .find_reference(old_name.as_str())
             .map_err(|e| err("rename", e))?;
@@ -354,7 +434,7 @@ impl RefStore {
     /// `RefEdit::with_deref`).
     #[napi]
     pub fn delete(&self, ref_name: String, expected_target: Option<String>, deref: Option<bool>) -> Result<()> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let name =
             gix::refs::FullName::try_from(ref_name.as_str()).map_err(|e| err("delete", e))?;
         let previous = previous_value(expected_target, None, true)?;
@@ -375,7 +455,7 @@ impl RefStore {
     /// has no reflog (including when the ref does not exist).
     #[napi]
     pub fn reflog_read(&self, ref_name: String) -> Result<Vec<ReflogEntry>> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let full_name =
             gix::refs::FullName::try_from(ref_name.as_str()).map_err(|e| err("reflog_read", e))?;
         let mut platform = gix::refs::file::log::iter::Platform {
@@ -386,7 +466,8 @@ impl RefStore {
         let mut out = Vec::new();
         if let Some(iter) = platform.all().map_err(|e| err("reflog_read", e))? {
             for line in iter {
-                let line = line.map_err(|e| err("reflog line", e))?;
+                let line: gix::refs::log::Line =
+                    line.map_err(|e| err("reflog line", e))?.into();
                 out.push(ReflogEntry {
                     previous_oid: line.previous_oid.to_string(),
                     new_oid: line.new_oid.to_string(),
@@ -411,7 +492,7 @@ impl RefStore {
     /// `notes/`/`HEAD` rules.
     #[napi]
     pub fn should_write_reflog(&self, ref_name: String) -> Result<bool> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let logall = match r.config_snapshot().string("core.logAllRefUpdates") {
             Some(v) => match v.to_string().as_str() {
                 "true" | "on" | "yes" => 1,
@@ -456,7 +537,7 @@ impl RefStore {
     /// returns `true` when it ultimately points at `refName`.
     #[napi]
     pub fn should_write_head_reflog(&self, ref_name: String) -> Result<bool> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         let input = r
             .find_reference(ref_name.as_str())
             .map_err(|e| err("should_write_head_reflog", e))?;
@@ -493,7 +574,7 @@ impl RefStore {
     /// Mirrors `git_ref_store_has_log`.
     #[napi]
     pub fn has_log(&self, ref_name: String) -> Result<bool> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         r.refs
             .reflog_exists(ref_name.as_str())
             .map_err(|e| err("has_log", e))
@@ -506,7 +587,7 @@ impl RefStore {
     /// exists (reflogs for missing refs cannot be pre-created).
     #[napi]
     pub fn ensure_log(&self, ref_name: String) -> Result<()> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         match r.try_find_reference(ref_name.as_str()) {
             Ok(Some(_)) => Ok(()),
             Ok(None) => Err(err_str(
@@ -529,7 +610,7 @@ impl RefStore {
         _mode: Option<u32>,
         _flags: Option<u32>,
     ) -> Result<()> {
-        let r = thread_local(&self.repo);
+        let r = self.get_repo();
         if let Some(target) = head_target {
             let target_full =
                 gix::refs::FullName::try_from(target.as_str()).map_err(|e| err("init", e))?;
@@ -698,6 +779,7 @@ impl RefLock {
     ) -> Result<Reference> {
         let store = RefStore {
             repo: Arc::clone(&self.repo),
+            namespace: None,
         };
         store.write(
             self.ref_name.clone(),
