@@ -27,6 +27,7 @@ mod reference;
 mod refspec;
 mod progress;
 mod remote;
+mod replace;
 mod repository;
 mod revision;
 mod submodule;

@@ -110,6 +110,7 @@ impl Reference {
             .find_reference(self.name.as_str())
             .map_err(|e| err("find_reference", e))?;
         let id = reference.peel_to_id().map_err(|e| err("peel_to_id", e))?;
+        let id = crate::replace::resolve_replace_oid(&self.repo, id.detach());
         Ok(id.to_string())
     }
 
@@ -232,7 +233,10 @@ pub fn build_reference(
 ) -> Result<Reference> {
     let name = reference.name().to_string();
     let (target, symbolic_target) = match reference.target() {
-        gix::refs::TargetRef::Object(id) => (id.to_string(), None),
+        gix::refs::TargetRef::Object(id) => {
+            let target_oid = crate::replace::resolve_replace_oid(repo, id.to_owned());
+            (target_oid.to_string(), None)
+        }
         gix::refs::TargetRef::Symbolic(name) => (String::new(), Some(name.to_string())),
     };
     Ok(Reference {

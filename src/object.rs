@@ -199,8 +199,10 @@ impl Repository {
     #[napi]
     pub fn find_object(&self, id: String) -> Result<GitObject> {
         let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let oid = crate::replace::resolve_replace_oid(&self.inner, oid);
         let object = r
-            .find_object(parse_oid(&id)?)
+            .find_object(oid)
             .map_err(|e| err("find_object", e))?;
         build_object(&self.inner, object)
     }
@@ -237,10 +239,13 @@ impl Repository {
     pub fn try_find_object(&self, id: String) -> Result<Option<GitObject>> {
         let r = thread_local(&self.inner);
         match parse_oid(&id) {
-            Ok(oid) => match r.find_object(oid) {
-                Ok(obj) => Ok(Some(build_object(&self.inner, obj)?)),
-                Err(_) => Ok(None),
-            },
+            Ok(oid) => {
+                let oid = crate::replace::resolve_replace_oid(&self.inner, oid);
+                match r.find_object(oid) {
+                    Ok(obj) => Ok(Some(build_object(&self.inner, obj)?)),
+                    Err(_) => Ok(None),
+                }
+            }
             Err(_) => Ok(None),
         }
     }
@@ -262,8 +267,10 @@ impl Repository {
     #[napi]
     pub fn read_object(&self, id: String) -> Result<ObjectData> {
         let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        let oid = crate::replace::resolve_replace_oid(&self.inner, oid);
         let obj = r
-            .find_object(parse_oid(&id)?)
+            .find_object(oid)
             .map_err(|e| err("find_object", e))?
             .detach();
         Ok(ObjectData {

@@ -20,7 +20,8 @@ impl Blob {
     #[napi]
     pub fn content(&self) -> Result<Buffer> {
         let r = thread_local(&self.repo);
-        let blob = r.find_blob(self.id).map_err(|e| err("find_blob", e))?;
+        let id = crate::replace::resolve_replace_oid(&self.repo, self.id);
+        let blob = r.find_blob(id).map_err(|e| err("find_blob", e))?;
         Ok(Buffer::from(blob.data.to_vec()))
     }
 
@@ -45,6 +46,7 @@ impl Repository {
     #[napi]
     pub fn find_blob(&self, id: String) -> Result<Blob> {
         let id = parse_oid(&id)?;
+        let id = crate::replace::resolve_replace_oid(&self.inner, id);
         Ok(build_blob(&self.inner, id))
     }
 
