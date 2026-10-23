@@ -84,6 +84,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2 0.10.6",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -161,6 +173,15 @@ dependencies = [
  "radium",
  "tap",
  "wyz",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -825,6 +846,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.6",
+ "subtle",
 ]
 
 [[package]]
@@ -2838,7 +2860,7 @@ version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c5d7ad4b2161d806aebbe88803f1305d7d1af68372c7e46f330916c0d438d7d"
 dependencies = [
- "blake2",
+ "blake2 0.11.0",
  "blake3",
  "digest 0.11.3",
  "hex",
@@ -2867,7 +2889,7 @@ checksum = "0981195f82c6e0fedb0595f12a9a2f1c60db2bd6731aba534fbbb2949d1b193c"
 dependencies = [
  "aes-gcm",
  "bcrypt-pbkdf",
- "blake2",
+ "blake2 0.11.0",
  "blake3",
  "blsful",
  "chacha20",
@@ -2929,7 +2951,7 @@ version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8976f531815072cd97bb7f6e00eaee8356a2e94a34c2e526220086637da23cc3"
 dependencies = [
- "blake2",
+ "blake2 0.11.0",
  "blake3",
  "blsful",
  "chacha20poly1305",
@@ -2959,7 +2981,7 @@ version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa820b3d9554e0ca7a73488ea1f70aa055271f972201f935cf045fea93c67af2"
 dependencies = [
- "blake2",
+ "blake2 0.11.0",
  "blake3",
  "blsful",
  "chacha20poly1305",
@@ -3199,6 +3221,17 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
 ]
 
 [[package]]
@@ -3482,6 +3515,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "repository"
 version = "0.0.0"
 dependencies = [
+ "argon2",
  "blsful",
  "chacha20poly1305",
  "chrono",
