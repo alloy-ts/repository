@@ -7,6 +7,8 @@ mod commit_graph;
 mod config;
 #[cfg(feature = "crypto")]
 mod crypto;
+#[cfg(feature = "crypto")]
+mod vault;
 mod diff;
 mod dirwalk;
 mod entry;
