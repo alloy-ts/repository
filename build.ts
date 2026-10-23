@@ -27,6 +27,7 @@ async function run() {
     useNapiCross,
     crossCompile,
     useCross,
+    cargoOptions: ["--ignore-rust-version"],
   });
 }
 

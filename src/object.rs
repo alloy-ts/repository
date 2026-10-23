@@ -32,7 +32,7 @@ pub struct Object {
 
 /// Decode a found `gix::Object` into its owned, content-bearing form.
 fn decode_object(obj: gix::Object<'_>) -> Result<gix::objs::Object> {
-    obj.decode().map_err(|e| err("decode", e))
+    Ok(obj.detach().into_object())
 }
 
 /// Construct an [`Object`] by reading and decoding `id` from `repo`.

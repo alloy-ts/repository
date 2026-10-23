@@ -393,8 +393,8 @@ impl RefStore {
                     signature: to_signature(
                         &line.signature.name,
                         &line.signature.email,
-                        line.signature.time.seconds,
-                        line.signature.time.offset,
+                        signature_from_actor(&line.signature).time.seconds,
+                        signature_from_actor(&line.signature).time.offset,
                     ),
                     message: lossy(&line.message),
                 });

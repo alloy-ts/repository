@@ -757,7 +757,7 @@ impl ObjectHandle {
                 Err(e) => return Err(err("statistics", e)),
             };
             if let Some(header) =
-                OdbHeader::try_header(store, &id).map_err(|e| err("statistics", e))?
+                OdbHeader::try_header(&store.to_handle_arc(), &id).map_err(|e| err("statistics", e))?
             {
                 stats.consume(header);
             }
