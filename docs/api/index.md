@@ -9,6 +9,11 @@ inspected, mutated, and written back. All paths are repository-relative with `/`
 separators (never absolute, never platform-native). Entry stage numbers follow
 git: `0` = unconflicted, `1` = base, `2` = ours, `3` = theirs.
 
+## Related Documentation
+
+- [Revision & Replacement API](revision.md)
+- [WebCrypto & Cryptography API](crypto.md)
+
 ## Opening an index
 
 ### `Repository`

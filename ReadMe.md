@@ -6,7 +6,13 @@ bindings for the Rust [`gitoxide`](https://github.com/GitoxideLabs/gitoxide)
 
 `@alloy-ts/repository` exposes `gix::Repository` capabilities to
 JavaScript/TypeScript, providing safe, high-speed Git operations with modern
-async support and full type definitions.
+async support, WebCrypto & BLS12-381 threshold signature support, and full type definitions.
+
+## Key Features
+
+- **High-Performance Git Operations:** Repositories, commits, trees, blobs, references, diffs, blame, and worktree streams.
+- **Object Revisions & Replacements:** Replace git objects (`blob`, `tree`, `commit`, `tag`, `entry`) via `refs/replace/{oid}` using `ReplaceManifest` and `Revision`. Retrieve commit metadata (`authorName`, `authorEmail`, `committerName`, `committerEmail`, `commitTimestamp`).
+- **WebCrypto & Pure-Rust Cryptography:** Web Crypto `CryptoKey` supporting symmetric (AES, HMAC, ChaCha20) and asymmetric (Ed25519, X25519, ECDSA, RSA) operations with BLS12-381 multisig threshold signatures (`blsful`).
 
 ## Getting Started
 
