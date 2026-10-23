@@ -7,12 +7,15 @@ mod commit_graph;
 mod config;
 #[cfg(feature = "crypto")]
 mod crypto;
+#[cfg(feature = "crypto")]
+mod vault;
 mod diff;
 mod dirwalk;
 mod entry;
 mod error;
 mod filter;
 mod format;
+mod fsperm;
 mod identity;
 mod index;
 mod mailmap;
