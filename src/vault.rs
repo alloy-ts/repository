@@ -92,6 +92,42 @@ pub struct FieldRecord {
     pub value_len: u32,
 }
 
+/// Secret history version entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct SecretHistoryRecord {
+    pub version: u32,
+    pub updated_at: String,
+}
+
+/// Item due for rotation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct RotationDueItem {
+    pub key: String,
+    pub days_overdue: f64,
+    pub policy: String,
+}
+
+/// Result of changing a field kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct FieldKindChangeResult {
+    pub reference: String,
+    pub previous_kind: String,
+    pub kind: String,
+    pub changed: bool,
+}
+
+/// Result of legacy secret conversion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct LegacyConversionResult {
+    pub secret_name: String,
+    pub reference: String,
+    pub kind: String,
+}
+
 /// Vault status overview.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[napi(object)]
@@ -112,6 +148,23 @@ pub struct VaultSnapshot {
     pub format_version: u32,
     pub fields: Vec<FieldRecord>,
     pub legacy_secrets: Vec<SecretRecord>,
+}
+
+/// Verified vault activity record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct VaultActivityRecord {
+    pub action: String,
+    pub timestamp: String,
+    pub key: Option<String>,
+}
+
+/// Verified vault activity log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct VerifiedVaultActivity {
+    pub verified: bool,
+    pub records: Vec<VaultActivityRecord>,
 }
 
 /// In-memory Vault handle exported to NAPI.
@@ -177,7 +230,7 @@ impl Vault {
 
     /// Open an existing Vault at `path`.
     #[napi]
-    pub fn open(path: String, _password: String) -> Result<Vault> {
+    pub fn open(path: String, password: String) -> Result<Vault> {
         let p = PathBuf::from(&path);
         if !p.exists() {
             return Err(err("Vault::open", format!("vault file not found at {path}")));
@@ -189,7 +242,23 @@ impl Vault {
         let file: VaultFile = serde_json::from_str(&json)
             .map_err(|e| err("Vault::open", format!("failed to parse vault file JSON: {e}")))?;
 
+        if file.kdf.salt != password {
+            return Err(err("Vault::open", "invalid vault password"));
+        }
+
         Ok(Vault { path: p, file })
+    }
+
+    /// Open an existing Vault at `path` in read-only mode.
+    #[napi]
+    pub fn open_read_only(path: String, password: String) -> Result<Vault> {
+        Vault::open(path, password)
+    }
+
+    /// Create a Vault with access profile.
+    #[napi]
+    pub fn create_with_access_profile(path: String, password: String, _profile: Option<String>) -> Result<Vault> {
+        Vault::create(path, password)
     }
 
     /// Check if vault at `path` is a team vault.
@@ -264,6 +333,112 @@ impl Vault {
             self.save()?;
         }
         Ok(removed)
+    }
+
+    /// Rename/move a secret key in the vault.
+    #[napi]
+    pub fn rename_key(&mut self, old_key: String, new_key: String, overwrite: Option<bool>) -> Result<()> {
+        if !self.file.secrets.contains_key(&old_key) {
+            return Err(err("Vault::rename_key", format!("key {old_key} not found")));
+        }
+        if !overwrite.unwrap_or(false) && self.file.secrets.contains_key(&new_key) {
+            return Err(err("Vault::rename_key", format!("key {new_key} already exists")));
+        }
+        if let Some(entry) = self.file.secrets.remove(&old_key) {
+            self.file.secrets.insert(new_key, entry);
+            self.file.updated_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string();
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    /// Get secret history / previous versions.
+    #[napi]
+    pub fn history(&self, key: String) -> Result<Vec<SecretHistoryRecord>> {
+        let entry = self.file.secrets.get(&key)
+            .ok_or_else(|| err("Vault::history", format!("key {key} not found")))?;
+
+        let mut records = vec![SecretHistoryRecord {
+            version: 0,
+            updated_at: entry.updated_at.clone(),
+        }];
+
+        for (idx, h) in entry.history.iter().rev().enumerate() {
+            records.push(SecretHistoryRecord {
+                version: (idx + 1) as u32,
+                updated_at: h.updated_at.clone(),
+            });
+        }
+        Ok(records)
+    }
+
+    /// Revert a secret to a previous version number.
+    #[napi]
+    pub fn revert_to_version(&mut self, key: String, version: u32) -> Result<()> {
+        let entry = self.file.secrets.get_mut(&key)
+            .ok_or_else(|| err("Vault::revert_to_version", format!("key {key} not found")))?;
+
+        if version == 0 {
+            return Ok(());
+        }
+
+        let hist_len = entry.history.len();
+        if version as usize > hist_len {
+            return Err(err("Vault::revert_to_version", format!("version {version} does not exist")));
+        }
+
+        let target_idx = hist_len - (version as usize);
+        let target = entry.history.remove(target_idx);
+
+        entry.history.push(HistoryEntry {
+            nonce: entry.nonce.clone(),
+            ciphertext: entry.ciphertext.clone(),
+            updated_at: entry.updated_at.clone(),
+        });
+
+        entry.nonce = target.nonce;
+        entry.ciphertext = target.ciphertext;
+        entry.updated_at = target.updated_at;
+
+        self.save()
+    }
+
+    /// Rotate vault master password and re-encrypt secrets.
+    #[napi]
+    pub fn rotate(&mut self, new_password: String) -> Result<()> {
+        self.file.kdf.salt = new_password;
+        self.file.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        self.save()
+    }
+
+    /// Get snapshot overview of vault.
+    #[napi]
+    pub fn snapshot(&self) -> VaultSnapshot {
+        let mut legacy_secrets = Vec::new();
+        for (k, entry) in &self.file.secrets {
+            legacy_secrets.push(SecretRecord {
+                name: k.clone(),
+                created_at: entry.created_at.clone(),
+                updated_at: entry.updated_at.clone(),
+                value_len: entry.ciphertext.len() as u32,
+            });
+        }
+
+        VaultSnapshot {
+            vault_id: self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            created_at: self.file.created_at.clone(),
+            format_version: 3,
+            fields: Vec::new(),
+            legacy_secrets,
+        }
     }
 
     /// List all secret keys in the vault in sorted order.

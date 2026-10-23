@@ -32,7 +32,8 @@ describe("Vault NAPI bindings (src/vault.rs)", () => {
     expect(status.homeState).toBe("Initialized");
   });
 
-  test("Vault.open opens an existing vault", () => {
+  test("Vault.open opens an existing vault with password check", () => {
+    expect(() => Vault.open(vaultPath, "wrongpass")).toThrow("invalid vault password");
     const vault = Vault.open(vaultPath, "masterpass");
     expect(vault.path()).toBe(vaultPath);
     expect(vault.list()).toEqual([]);
@@ -58,6 +59,38 @@ describe("Vault NAPI bindings (src/vault.rs)", () => {
     expect(deleted).toBe(true);
     expect(vault.get("API_KEY")).toBe(null);
     expect(vault.list()).toEqual(["DB_PASSWORD"]);
+  });
+
+  test("renameKey renames keys", () => {
+    const vault = Vault.open(vaultPath, "masterpass");
+    vault.renameKey("DB_PASSWORD", "PROD_DB_PASSWORD");
+    expect(vault.get("DB_PASSWORD")).toBe(null);
+    expect(vault.get("PROD_DB_PASSWORD")).toBe("s3cr3t");
+  });
+
+  test("history and revertToVersion manage versioning", () => {
+    const vault = Vault.open(vaultPath, "masterpass");
+    const history = vault.history("PROD_DB_PASSWORD");
+    expect(history.length).toBeGreaterThanOrEqual(1);
+
+    expect(() => vault.revertToVersion("PROD_DB_PASSWORD", 0)).not.toThrow();
+  });
+
+  test("rotate updates master password", () => {
+    let vault = Vault.open(vaultPath, "masterpass");
+    vault.rotate("newmasterpass");
+
+    expect(() => Vault.open(vaultPath, "masterpass")).toThrow();
+    vault = Vault.open(vaultPath, "newmasterpass");
+    expect(vault.get("PROD_DB_PASSWORD")).toBe("s3cr3t");
+  });
+
+  test("snapshot returns vault overview", () => {
+    const vault = Vault.open(vaultPath, "newmasterpass");
+    const snap = vault.snapshot();
+    expect(snap.formatVersion).toBe(3);
+    expect(snap.legacySecrets.length).toBe(1);
+    expect(snap.legacySecrets[0].name).toBe("PROD_DB_PASSWORD");
   });
 
   test("isTeamVault detects age recipients", () => {
