@@ -54,6 +54,24 @@ describe("RefStore lifecycle (src/ref_store.rs)", () => {
   test("storeType() reports the backend format", () => {
     expect(store.storeType()).toBe(RefStoreType.Files);
   });
+
+  test("at() and atOpts() create a store from git directory path", () => {
+    const a = RefStore.at(store.gitDir(), undefined);
+    expect(a.storeType()).toBe(RefStoreType.Files);
+    expect(a.exists("HEAD")).toBe(true);
+
+    const b = RefStore.atOpts(store.gitDir(), undefined, true);
+    expect(b.storeType()).toBe(RefStoreType.Files);
+    expect(b.exists("HEAD")).toBe(true);
+  });
+
+  test("toHandle() and toHandleNamespaced() return store handles", () => {
+    const h1 = store.toHandle();
+    expect(h1.namespace()).toBe(null);
+
+    const h2 = store.toHandleNamespaced("ns1");
+    expect(h2.namespace()).toBe("ns1");
+  });
 });
 
 describe("RefStore lookup (src/ref_store.rs)", () => {
@@ -67,6 +85,23 @@ describe("RefStore lookup (src/ref_store.rs)", () => {
     expect(store.lookup("refs/heads/main").name).toBe("refs/heads/main");
     expect(store.lookup("HEAD").kind).toBe("symbolic");
     expect(() => store.lookup("refs/heads/__nope__")).toThrow();
+  });
+
+  test("find() and tryFind() resolve partial or full reference names", () => {
+    const ref = store.find("main");
+    expect(ref.name).toBe("refs/heads/main");
+
+    const full = store.find("refs/heads/main");
+    expect(full.name).toBe("refs/heads/main");
+
+    expect(() => store.find("nonexistent-ref-name")).toThrow();
+
+    const found = store.tryFind("main");
+    expect(found).not.toBe(null);
+    expect(found!.name).toBe("refs/heads/main");
+
+    const missing = store.tryFind("nonexistent-ref-name");
+    expect(missing).toBe(null);
   });
 
   test("resolve() follows symbolic refs to the object ref", () => {
