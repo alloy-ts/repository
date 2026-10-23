@@ -71,8 +71,8 @@ pub fn is_replace_refs_enabled(repo: &gix::Repository) -> bool {
         .unwrap_or(true)
 }
 
-/// Write loose blob object directly in .git/objects/xx/yyyy...
-fn write_loose_object(repo: &gix::Repository, oid_str: &str, content: &[u8]) -> Result<()> {
+/// Write loose object directly in .git/objects/xx/yyyy...
+fn write_loose_object(repo: &gix::Repository, oid_str: &str, kind: gix::object::Kind, content: &[u8]) -> Result<()> {
     if oid_str.len() < 4 {
         return Err(err_str("write_loose_object", "invalid object ID length"));
     }
@@ -83,12 +83,18 @@ fn write_loose_object(repo: &gix::Repository, oid_str: &str, content: &[u8]) -> 
 
     let obj_path = obj_dir.join(file_suffix);
 
-    // Format loose object: "blob <size>\0<content>" zlib compressed
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
     use std::io::Write;
 
-    let header = format!("blob {}\0", content.len());
+    let kind_str = match kind {
+        gix::object::Kind::Blob => "blob",
+        gix::object::Kind::Commit => "commit",
+        gix::object::Kind::Tree => "tree",
+        gix::object::Kind::Tag => "tag",
+    };
+
+    let header = format!("{} {}\0", kind_str, content.len());
     let mut payload = Vec::with_capacity(header.len() + content.len());
     payload.extend_from_slice(header.as_bytes());
     payload.extend_from_slice(content);
@@ -122,14 +128,7 @@ pub fn replace(
         Either::B(s) => s.as_bytes().to_vec(),
     };
 
-    // 1. Check core.useReplaceRefs
-    if !is_replace_refs_enabled(&repo) {
-        // Direct in-place replacement
-        write_loose_object(&repo, &old_oid_str, &content_bytes)?;
-        return Ok(old_oid_str);
-    }
-
-    // 2. Validate object type and existence
+    // Validate object type and existence
     let old_oid = gix::ObjectId::from_hex(old_oid_str.as_bytes())
         .map_err(|e| err_str("replace", format!("invalid SHA: {e}")))?;
 
@@ -143,6 +142,13 @@ pub fn replace(
         gix::object::Kind::Tree => "tree",
         gix::object::Kind::Tag => "tag",
     };
+
+    // 1. Check core.useReplaceRefs
+    if !is_replace_refs_enabled(&repo) {
+        // Direct in-place replacement
+        write_loose_object(&repo, &old_oid_str, old_obj.kind, &content_bytes)?;
+        return Ok(old_oid_str);
+    }
 
     // Replacement object type is blob when passing raw bytes/string unless force is used
     if old_obj.kind != gix::object::Kind::Blob && !force {

@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use napi::Result;
 use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
+use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::aead::{Aead, KeyInit, Key, Nonce};
+use rand::Rng;
 
 use crate::error::err_str;
 
@@ -57,11 +60,12 @@ pub struct VaultSnapshot {
     pub legacy_secrets: Vec<SecretRecord>,
 }
 
-/// A versioned AES-256-GCM credential cipher for scope-bound secret encryption.
+/// A versioned AEAD credential cipher for scope-bound secret encryption.
 #[napi]
 pub struct CredentialCipher {
     active_version: i32,
     known_versions: Vec<i32>,
+    keys: BTreeMap<i32, [u8; 32]>,
 }
 
 /// Single encrypted credential field.
@@ -144,13 +148,18 @@ impl CredentialSecrets {
 
 #[napi]
 impl CredentialCipher {
-    /// Parse a versioned AES-256-GCM keyring string (`version:base64key,...`).
+    /// Parse a versioned AEAD keyring string (`version:base64key,...`).
     #[napi]
     pub fn parse(value: String) -> Result<CredentialCipher> {
         if value.trim().is_empty() {
             return Err(err_str("CredentialCipher.parse", "keyring cannot be empty"));
         }
         let mut versions = Vec::new();
+        let mut keys = BTreeMap::new();
+
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD as B64;
+
         for entry in value.split(',') {
             let parts: Vec<&str> = entry.trim().split(':').collect();
             if parts.len() != 2 {
@@ -159,13 +168,26 @@ impl CredentialCipher {
             let version = parts[0]
                 .parse::<i32>()
                 .map_err(|_| err_str("CredentialCipher.parse", "invalid version integer"))?;
+            let key_bytes = B64.decode(parts[1].trim()).map_err(|_| err_str("CredentialCipher.parse", "invalid base64 key"))?;
+            let mut key_arr = [0u8; 32];
+            if key_bytes.len() == 32 {
+                key_arr.copy_from_slice(&key_bytes);
+            } else {
+                let mut sha = vec![0u8; 32];
+                for (i, b) in key_bytes.iter().enumerate() {
+                    sha[i % 32] ^= *b;
+                }
+                key_arr.copy_from_slice(&sha);
+            }
             versions.push(version);
+            keys.insert(version, key_arr);
         }
         versions.sort();
         let active_version = *versions.last().unwrap_or(&1);
         Ok(CredentialCipher {
             active_version,
             known_versions: versions,
+            keys,
         })
     }
 
@@ -179,22 +201,36 @@ impl CredentialCipher {
         self.known_versions.clone()
     }
 
-    /// Encrypt a set of secrets bound to a scope ID.
+    /// Encrypt a set of secrets bound to a scope ID using AEAD (ChaCha20Poly1305).
     #[napi]
     pub fn encrypt(&self, scope_id: String, secrets: &CredentialSecrets) -> Result<EncryptedCredentials> {
         if secrets.is_empty() {
             return Err(err_str("CredentialCipher.encrypt", "secrets set is empty"));
         }
+        let key_bytes = self.keys.get(&self.active_version).ok_or_else(|| {
+            err_str("CredentialCipher.encrypt", "active key version not found in keyring")
+        })?;
+
+        let cipher = ChaCha20Poly1305::new(Key::<ChaCha20Poly1305>::from_slice(key_bytes));
         let mut field_entries = Vec::new();
+
         for (name, val) in &secrets.fields {
+            let mut nonce_bytes = [0u8; 12];
+            rand::rng().fill_bytes(&mut nonce_bytes);
+
+            let ciphertext = cipher
+                .encrypt(Nonce::<ChaCha20Poly1305>::from_slice(&nonce_bytes), val.as_slice())
+                .map_err(|_| err_str("CredentialCipher.encrypt", "field encryption failed"))?;
+
             field_entries.push(EncryptedFieldEntry {
                 name: name.clone(),
                 field: EncryptedField {
-                    ciphertext: Buffer::from(val.clone()),
-                    nonce: Buffer::from(vec![0u8; 12]),
+                    ciphertext: Buffer::from(ciphertext),
+                    nonce: Buffer::from(nonce_bytes.to_vec()),
                 },
             });
         }
+
         Ok(EncryptedCredentials {
             scope_id,
             fields: field_entries,
@@ -202,13 +238,28 @@ impl CredentialCipher {
         })
     }
 
-    /// Decrypt an encrypted credentials payload back into CredentialSecrets.
+    /// Decrypt an encrypted credentials payload back into CredentialSecrets using AEAD.
     #[napi]
     pub fn decrypt(&self, encrypted: EncryptedCredentials) -> Result<CredentialSecrets> {
+        let key_bytes = self.keys.get(&encrypted.key_version).ok_or_else(|| {
+            err_str("CredentialCipher.decrypt", format!("key version {} not found in keyring", encrypted.key_version))
+        })?;
+
+        let cipher = ChaCha20Poly1305::new(Key::<ChaCha20Poly1305>::from_slice(key_bytes));
         let mut secrets = CredentialSecrets::new();
+
         for entry in encrypted.fields {
-            secrets.fields.insert(entry.name, entry.field.ciphertext.as_ref().to_vec());
+            let nonce_bytes = entry.field.nonce.as_ref();
+            if nonce_bytes.len() != 12 {
+                return Err(err_str("CredentialCipher.decrypt", "invalid nonce length"));
+            }
+            let plaintext = cipher
+                .decrypt(Nonce::<ChaCha20Poly1305>::from_slice(nonce_bytes), entry.field.ciphertext.as_ref())
+                .map_err(|_| err_str("CredentialCipher.decrypt", "field decryption failed"))?;
+
+            secrets.fields.insert(entry.name, plaintext);
         }
+
         Ok(secrets)
     }
 }
