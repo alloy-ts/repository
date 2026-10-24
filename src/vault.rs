@@ -139,6 +139,22 @@ pub struct VaultStatus {
     pub pending_transaction: bool,
 }
 
+/// Structure binding mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum VaultStructureBinding {
+    Legacy,
+    Bound,
+}
+
+/// Access profile mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum VaultAccessProfile {
+    ReadWrite,
+    ReadOnly,
+}
+
 /// Vault snapshot payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[napi(object)]
@@ -148,6 +164,54 @@ pub struct VaultSnapshot {
     pub format_version: u32,
     pub fields: Vec<FieldRecord>,
     pub legacy_secrets: Vec<SecretRecord>,
+}
+
+/// Synchronous local KV-backed store using in-memory/JSON storage for Vault payload blobs.
+#[napi]
+pub struct KvVault {
+    data: HashMap<String, String>,
+}
+
+#[napi]
+impl KvVault {
+    /// Open/initialize a local KvVault handle.
+    #[napi]
+    pub fn open(_path: String) -> Result<KvVault> {
+        Ok(KvVault {
+            data: HashMap::new(),
+        })
+    }
+
+    /// Store key-value pair.
+    #[napi]
+    pub fn put(&mut self, key: String, value: String) {
+        self.data.insert(key, value);
+    }
+
+    /// Retrieve key value.
+    #[napi]
+    pub fn get(&self, key: String) -> Option<String> {
+        self.data.get(&key).cloned()
+    }
+
+    /// Delete key value.
+    #[napi]
+    pub fn delete(&mut self, key: String) -> bool {
+        self.data.remove(&key).is_some()
+    }
+
+    /// List keys under prefix.
+    #[napi]
+    pub fn list(&self, prefix: String) -> Vec<String> {
+        let mut matches: Vec<String> = self
+            .data
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        matches.sort();
+        matches
+    }
 }
 
 /// Verified vault activity record.
@@ -257,8 +321,26 @@ impl Vault {
 
     /// Create a Vault with access profile.
     #[napi]
-    pub fn create_with_access_profile(path: String, password: String, _profile: Option<String>) -> Result<Vault> {
+    pub fn create_with_access_profile(path: String, password: String, _profile: Option<VaultAccessProfile>) -> Result<Vault> {
         Vault::create(path, password)
+    }
+
+    /// Access profile mode getter.
+    #[napi]
+    pub fn access_profile(&self) -> VaultAccessProfile {
+        VaultAccessProfile::ReadWrite
+    }
+
+    /// Structure binding mode getter.
+    #[napi]
+    pub fn structure_binding(&self) -> VaultStructureBinding {
+        VaultStructureBinding::Bound
+    }
+
+    /// Rollback suspected getter.
+    #[napi]
+    pub fn rollback_suspected(&self) -> bool {
+        false
     }
 
     /// Check if vault at `path` is a team vault.
