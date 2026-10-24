@@ -209,7 +209,7 @@ impl IdentityManager {
 
         // Ephemeral X25519 keypair (random).
         let mut ephemeral = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut ephemeral);
+        rand::rng().fill_bytes(&mut ephemeral);
         let esk = x25519_dalek::StaticSecret::from(ephemeral);
         let epk = x25519_dalek::PublicKey::from(&esk);
 
@@ -217,7 +217,7 @@ impl IdentityManager {
         let aead_key = derive_aead_key(shared.as_bytes())?;
 
         let mut nonce = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
 
         let ciphertext = aead_seal(&aead_key, &nonce, key.as_bytes())?;
 
@@ -848,7 +848,7 @@ mod vault_crypto {
 
     pub fn random_salt() -> Vec<u8> {
         let mut salt = vec![0u8; 16];
-        rand::thread_rng().fill_bytes(&mut salt);
+        rand::rng().fill_bytes(&mut salt);
         salt
     }
 
@@ -914,7 +914,7 @@ mod vault_crypto {
         purpose: KeyPurpose,
         cipher: CipherKind,
         plaintext: &[u8],
-    ) -> SafeResult<([u8; 12], Vec<u8>)> {
+    ) -> SafeResult<(Vec<u8>, Vec<u8>)> {
         encrypt_with_key_schedule_aad(key, schedule, purpose, cipher, plaintext, &[])
     }
 
@@ -936,41 +936,44 @@ mod vault_crypto {
         cipher_kind: CipherKind,
         plaintext: &[u8],
         aad: &[u8],
-    ) -> SafeResult<([u8; 12], Vec<u8>)> {
+    ) -> SafeResult<(Vec<u8>, Vec<u8>)> {
         use chacha20poly1305::{
             aead::{Aead, KeyInit, Payload},
-            ChaCha20Poly1305, Nonce,
+            ChaCha20Poly1305, XChaCha20Poly1305, Nonce, XNonce,
         };
 
         let subkey = match schedule {
             KeySchedule::HkdfSha256V1 => derive_subkey(key, purpose)?,
             KeySchedule::LegacyDirect => *key,
         };
-        let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
-        let ct = match cipher_kind {
+        match cipher_kind {
             CipherKind::XChaCha20Poly1305 => {
+                let mut nonce_bytes = [0u8; 24];
+                rand::rng().fill_bytes(&mut nonce_bytes);
                 let cipher_instance =
-                    ChaCha20Poly1305::new_from_slice(&subkey).map_err(|_| SafeError::DecryptionFailed)?;
-                let nonce = Nonce::from_slice(&nonce_bytes);
+                    XChaCha20Poly1305::new_from_slice(&subkey).map_err(|_| SafeError::DecryptionFailed)?;
+                let nonce = XNonce::from_slice(&nonce_bytes);
                 let payload = Payload { msg: plaintext, aad };
-                cipher_instance
+                let ct = cipher_instance
                     .encrypt(nonce, payload)
-                    .map_err(|_| SafeError::DecryptionFailed)?
+                    .map_err(|_| SafeError::DecryptionFailed)?;
+                Ok((nonce_bytes.to_vec(), ct))
             }
             CipherKind::Aes256Gcm => {
                 use aes_gcm::{Aes256Gcm, KeyInit as _};
+                let mut nonce_bytes = [0u8; 12];
+                rand::rng().fill_bytes(&mut nonce_bytes);
                 let cipher_instance =
                     Aes256Gcm::new_from_slice(&subkey).map_err(|_| SafeError::DecryptionFailed)?;
                 let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
                 let payload = aes_gcm::aead::Payload { msg: plaintext, aad };
-                cipher_instance
+                let ct = cipher_instance
                     .encrypt(nonce, payload)
-                    .map_err(|_| SafeError::DecryptionFailed)?
+                    .map_err(|_| SafeError::DecryptionFailed)?;
+                Ok((nonce_bytes.to_vec(), ct))
             }
-        };
-        Ok((nonce_bytes, ct))
+        }
     }
 
     pub fn decrypt_with_key_schedule_aad(
@@ -984,12 +987,9 @@ mod vault_crypto {
     ) -> SafeResult<Vec<u8>> {
         use chacha20poly1305::{
             aead::{Aead, KeyInit, Payload},
-            ChaCha20Poly1305, Nonce,
+            ChaCha20Poly1305, XChaCha20Poly1305, Nonce, XNonce,
         };
 
-        if nonce.len() != 12 {
-            return Err(SafeError::DecryptionFailed);
-        }
         let subkey = match schedule {
             KeySchedule::HkdfSha256V1 => derive_subkey(key, purpose)?,
             KeySchedule::LegacyDirect => *key,
@@ -997,15 +997,30 @@ mod vault_crypto {
 
         let pt = match cipher_kind {
             CipherKind::XChaCha20Poly1305 => {
-                let cipher_instance =
-                    ChaCha20Poly1305::new_from_slice(&subkey).map_err(|_| SafeError::DecryptionFailed)?;
-                let nonce_arr = Nonce::from_slice(nonce);
-                let payload = Payload { msg: ciphertext, aad };
-                cipher_instance
-                    .decrypt(nonce_arr, payload)
-                    .map_err(|_| SafeError::DecryptionFailed)?
+                if nonce.len() == 24 {
+                    let cipher_instance =
+                        XChaCha20Poly1305::new_from_slice(&subkey).map_err(|_| SafeError::DecryptionFailed)?;
+                    let nonce_arr = XNonce::from_slice(nonce);
+                    let payload = Payload { msg: ciphertext, aad };
+                    cipher_instance
+                        .decrypt(nonce_arr, payload)
+                        .map_err(|_| SafeError::DecryptionFailed)?
+                } else if nonce.len() == 12 {
+                    let cipher_instance =
+                        ChaCha20Poly1305::new_from_slice(&subkey).map_err(|_| SafeError::DecryptionFailed)?;
+                    let nonce_arr = Nonce::from_slice(nonce);
+                    let payload = Payload { msg: ciphertext, aad };
+                    cipher_instance
+                        .decrypt(nonce_arr, payload)
+                        .map_err(|_| SafeError::DecryptionFailed)?
+                } else {
+                    return Err(SafeError::DecryptionFailed);
+                }
             }
             CipherKind::Aes256Gcm => {
+                if nonce.len() != 12 {
+                    return Err(SafeError::DecryptionFailed);
+                }
                 use aes_gcm::{Aes256Gcm, KeyInit as _};
                 let cipher_instance =
                     Aes256Gcm::new_from_slice(&subkey).map_err(|_| SafeError::DecryptionFailed)?;
@@ -1271,6 +1286,16 @@ impl Vault {
         if file.kdf.m_cost < KDF_M_COST_MIN || file.kdf.m_cost > KDF_M_COST_MAX {
             return Err(SafeError::InvalidVault {
                 reason: format!("KDF m_cost {} is outside allowed range", file.kdf.m_cost),
+            });
+        }
+        if file.kdf.t_cost < KDF_T_COST_MIN || file.kdf.t_cost > KDF_T_COST_MAX {
+            return Err(SafeError::InvalidVault {
+                reason: format!("KDF t_cost {} is outside allowed range", file.kdf.t_cost),
+            });
+        }
+        if file.kdf.p_cost < KDF_P_COST_MIN || file.kdf.p_cost > KDF_P_COST_MAX {
+            return Err(SafeError::InvalidVault {
+                reason: format!("KDF p_cost {} is outside allowed range", file.kdf.p_cost),
             });
         }
         let salt = vault_crypto::decode_b64(&file.kdf.salt)?;
@@ -2215,12 +2240,12 @@ impl Vault {
         self.path().to_string_lossy().into_owned()
     }
 
-    #[napi(factory)]
+    #[napi]
     pub fn check_is_team_vault(path: String) -> bool {
         Self::is_team_vault(Path::new(&path))
     }
 
-    #[napi(factory)]
+    #[napi]
     pub fn get_vault_status(path: String) -> VaultStatusObject {
         let p = Path::new(&path);
         let exists = p.exists();
@@ -2244,7 +2269,7 @@ impl Vault {
         }
     }
 
-    #[napi(factory)]
+    #[napi]
     pub fn get_vault_lock_state(path: String) -> VaultLockStateObject {
         match lock_state(Path::new(&path)) {
             Some(LockState::HeldBy(pid)) => VaultLockStateObject {
