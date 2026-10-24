@@ -1,6 +1,11 @@
 import { describe, expect, test, afterAll } from "vite-plus/test";
 import {
   Vault,
+  KeyManager,
+  checkIsSupportedSchema,
+  checkSchemaIsBound,
+  liveLockHolderPid,
+  lockStateInfo,
   type VaultAccessProfile,
   type VaultStructureBinding,
 } from "./main.ts";
@@ -175,5 +180,62 @@ describe("Vault", () => {
     globalThis.gc?.();
     const v = Vault.open(p, pw());
     expect(v.get("k")).toBe("v1");
+  });
+});
+
+describe("KeyManager & Vault Diagnostics", () => {
+  test("KeyManager initDirs, generateKey, loadKey, saveKey, exportKey, importKey", () => {
+    const gitDir = path.join(
+      os.tmpdir(),
+      `km-test-${Math.random().toString(36).slice(2)}`,
+    );
+    fs.mkdirSync(gitDir, { recursive: true });
+    createdPaths.push(gitDir);
+
+    const km = new KeyManager(gitDir);
+    expect(km.isInitialized()).toBe(false);
+    km.initDirs();
+    expect(km.isInitialized()).toBe(true);
+    expect(km.gitCryptDir()).toBe(path.join(gitDir, "crypt"));
+
+    const key = km.generateKey();
+    expect(key.length).toBe(32);
+
+    const loaded = km.loadKey();
+    expect(loaded).toEqual(key);
+
+    const exportPath = path.join(gitDir, "exported_key");
+    km.exportKey(exportPath);
+    expect(fs.existsSync(exportPath)).toBe(true);
+
+    const km2Dir = path.join(
+      os.tmpdir(),
+      `km2-test-${Math.random().toString(36).slice(2)}`,
+    );
+    fs.mkdirSync(km2Dir, { recursive: true });
+    createdPaths.push(km2Dir);
+
+    const km2 = new KeyManager(km2Dir);
+    km2.initDirs();
+    km2.importKey(exportPath);
+    expect(km2.loadKey()).toEqual(key);
+  });
+
+  test("Lock state & schema diagnostic helpers", () => {
+    expect(checkIsSupportedSchema("tsafe/vault/v3")).toBe(true);
+    expect(checkIsSupportedSchema("invalid/schema")).toBe(false);
+
+    expect(checkSchemaIsBound("tsafe/vault/v3")).toBe(true);
+    expect(checkSchemaIsBound("tsafe/vault/v1")).toBe(false);
+
+    const p = tmpVaultPath();
+    createdPaths.push(p);
+    const v = new Vault(p, pw());
+
+    const pid = liveLockHolderPid(p);
+    expect(pid).toBe(process.pid);
+
+    const info = lockStateInfo(p);
+    expect(info).toBe(`held_by:${process.pid}`);
   });
 });
