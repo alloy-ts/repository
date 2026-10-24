@@ -2752,21 +2752,104 @@ impl KeyManagerHandle {
         Ok(())
     }
 
+    /// Export the default key to `output_path`.
+    #[napi]
+    pub fn export_key(&self, output_path: String) -> napi::Result<()> {
+        self.inner.export_key(Path::new(&output_path))?;
+        Ok(())
+    }
+
     /// Import a key file as the default key.
     #[napi]
     pub fn import_key(&self, input_path: String) -> napi::Result<()> {
-        self.inner.save_key(&crate::crypto::SymmetricCryptoKey::from_bytes(
-            std::fs::read(&input_path)
-                .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?
-                .as_slice(),
-        )?)?;
+        self.inner.import_key(Path::new(&input_path))?;
         Ok(())
+    }
+
+    /// Create the `crypt` and `crypt/keys` directories.
+    #[napi]
+    pub fn init_dirs(&self) -> napi::Result<()> {
+        self.inner.init_dirs()?;
+        Ok(())
+    }
+
+    /// Whether the crypt directory structure exists.
+    #[napi]
+    pub fn is_initialized(&self) -> bool {
+        self.inner.is_initialized()
+    }
+
+    /// Path to the `<git-dir>/crypt` directory.
+    #[napi]
+    pub fn git_crypt_dir(&self) -> String {
+        self.inner.git_crypt_dir().to_string_lossy().into_owned()
     }
 
     /// Path of the default key file.
     #[napi]
     pub fn default_key_path(&self) -> String {
         self.inner.default_key_path().to_string_lossy().into_owned()
+    }
+}
+
+/// Standalone lock state inspection for diagnostics.
+#[napi]
+pub fn lock_state_info(vault_path: String) -> Option<String> {
+    lock_state(Path::new(&vault_path)).map(|state| match state {
+        LockState::HeldBy(pid) => format!("held_by:{pid}"),
+        LockState::Unparseable => "unparseable".to_string(),
+    })
+}
+
+/// PID of a live process holding the vault lock, if any.
+#[napi]
+pub fn live_lock_holder_pid(vault_path: String) -> Option<u32> {
+    live_lock_holder(Path::new(&vault_path))
+}
+
+/// Whether tsafe can open a vault declaring this schema.
+#[napi]
+pub fn check_is_supported_schema(schema: String) -> bool {
+    is_supported_schema(&schema)
+}
+
+/// Whether a vault declaring this schema binds its ciphertexts to their key names and carries a structure MAC.
+#[napi]
+pub fn check_schema_is_bound(schema: String) -> bool {
+    schema_is_bound(&schema)
+}
+
+#[cfg(all(feature = "crypto", feature = "ssh"))]
+#[napi(js_name = "IdentityManager")]
+pub struct IdentityManagerHandle;
+
+#[cfg(all(feature = "crypto", feature = "ssh"))]
+#[napi]
+impl IdentityManagerHandle {
+    /// Encrypt a repo's symmetric key for an SSH recipient.
+    #[napi]
+    pub fn encrypt_key_for_ssh_recipient(
+        key: Buffer,
+        recipient: String,
+    ) -> napi::Result<Buffer> {
+        let sym_key = crate::crypto::SymmetricCryptoKey::from_bytes(key.as_ref())?;
+        let encrypted = IdentityManager::encrypt_key_for_ssh_recipient(&sym_key, &recipient)?;
+        Ok(Buffer::from(encrypted))
+    }
+
+    /// Decrypt a key envelope using an SSH identity.
+    #[napi]
+    pub fn decrypt_key_with_ssh_identity(
+        encrypted: Buffer,
+        identity_content: String,
+        passphrase: Option<String>,
+    ) -> napi::Result<Buffer> {
+        let sym_key = IdentityManager::decrypt_key_with_ssh_identity(
+            encrypted.as_ref(),
+            &identity_content,
+            passphrase.as_deref(),
+        )?;
+        Ok(Buffer::from(sym_key.as_bytes().to_vec()))
     }
 }
 
