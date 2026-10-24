@@ -136,44 +136,44 @@ describe("Vault", () => {
   test("isTeamVault is false for a local vault", () => {
     const p = tmpVaultPath();
     createdPaths.push(p);
-    new Vault(p, pw());
+    const v = new Vault(p, pw());
     expect(Vault.isTeamVault(p)).toBe(false);
+    v.close();
   });
 
   test("openWithKey rejects a non-32-byte key", () => {
     const p = tmpVaultPath();
     createdPaths.push(p);
-    new Vault(p, pw());
+    const v = new Vault(p, pw());
     expect(() => Vault.openWithKey(p, Buffer.alloc(16))).toThrow();
+    v.close();
   });
 
   test("rotate changes the master password", () => {
     const p = tmpVaultPath();
     createdPaths.push(p);
-    {
-      const v = new Vault(p, pw());
-      v.set("k", "value");
-      v.rotate(Buffer.from("new-password"));
-    }
-    // Release the first handle so its lock is freed before reopening.
-    globalThis.gc?.();
+    const v = new Vault(p, pw());
+    v.set("k", "value");
+    v.rotate(Buffer.from("new-password"));
+    v.close();
+
     // The on-disk vault is now encrypted under the new password.
     expect(() => Vault.open(p, pw())).toThrow();
     const reopened = Vault.open(p, Buffer.from("new-password"));
     expect(reopened.get("k")).toBe("value");
+    reopened.close();
   });
 
   test("reopen reads persisted data from disk", () => {
     const p = tmpVaultPath();
     createdPaths.push(p);
-    {
-      const v = new Vault(p, pw());
-      v.set("k", "v1");
-      v.save();
-    }
-    // Allow the first handle's lock to be released.
-    globalThis.gc?.();
-    const v = Vault.open(p, pw());
-    expect(v.get("k")).toBe("v1");
+    const v = new Vault(p, pw());
+    v.set("k", "v1");
+    v.save();
+    v.close();
+
+    const reopened = Vault.open(p, pw());
+    expect(reopened.get("k")).toBe("v1");
+    reopened.close();
   });
 });

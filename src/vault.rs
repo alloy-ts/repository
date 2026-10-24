@@ -2712,6 +2712,14 @@ impl VaultHandle {
     pub fn parse_rotation_days(policy: String) -> Option<i64> {
         parse_rotation_days(&policy)
     }
+
+    /// Explicitly close the vault handle and release its advisory lock.
+    #[napi]
+    pub fn close(&self) -> napi::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner._lock = None;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "crypto")]
@@ -2767,6 +2775,26 @@ impl KeyManagerHandle {
     #[napi]
     pub fn default_key_path(&self) -> String {
         self.inner.default_key_path().to_string_lossy().into_owned()
+    }
+
+    /// Create the crypt directories.
+    #[napi]
+    pub fn init_dirs(&self) -> napi::Result<()> {
+        self.inner.init_dirs()?;
+        Ok(())
+    }
+
+    /// Whether the repository has been initialized for crypt.
+    #[napi]
+    pub fn is_initialized(&self) -> bool {
+        self.inner.is_initialized()
+    }
+
+    /// Export the default key to output_path.
+    #[napi]
+    pub fn export_key(&self, output_path: String) -> napi::Result<()> {
+        self.inner.export_key(Path::new(&output_path))?;
+        Ok(())
     }
 }
 
