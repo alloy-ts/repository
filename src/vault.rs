@@ -2712,6 +2712,55 @@ impl VaultHandle {
     pub fn parse_rotation_days(policy: String) -> Option<i64> {
         parse_rotation_days(&policy)
     }
+
+    /// Create a new vault with an explicit access profile.
+    #[napi]
+    pub fn create_with_access_profile(
+        path: String,
+        password: Buffer,
+        access_profile: VaultAccessProfile,
+    ) -> napi::Result<Self> {
+        let profile = match access_profile {
+            VaultAccessProfile::ReadWrite => RbacProfile::ReadWrite,
+            VaultAccessProfile::ReadOnly => RbacProfile::ReadOnly,
+        };
+        let vault =
+            Vault::create_with_access_profile(Path::new(&path), password.as_ref(), profile)?;
+        Ok(Self {
+            inner: Mutex::new(vault),
+        })
+    }
+
+    /// PID of a live process holding the vault lock, if any.
+    #[napi]
+    pub fn live_lock_holder(path: String) -> Option<u32> {
+        live_lock_holder(Path::new(&path))
+    }
+
+    /// Lock state of the vault at `path`, if locked or unparseable.
+    #[napi]
+    pub fn lock_state(path: String) -> Option<VaultLockStateInfo> {
+        lock_state(Path::new(&path)).map(Into::into)
+    }
+
+    /// Validate a secret key name according to vault rules.
+    #[napi]
+    pub fn validate_secret_key(key: String) -> napi::Result<()> {
+        validate_secret_key(&key)?;
+        Ok(())
+    }
+
+    /// Whether tsafe can open a vault declaring `schema`.
+    #[napi]
+    pub fn is_supported_schema(schema: String) -> bool {
+        is_supported_schema(&schema)
+    }
+
+    /// Whether `schema` implies bound ciphertexts and structural MAC.
+    #[napi]
+    pub fn schema_is_bound(schema: String) -> bool {
+        schema_is_bound(&schema)
+    }
 }
 
 #[cfg(feature = "crypto")]
@@ -2768,6 +2817,67 @@ impl KeyManagerHandle {
     pub fn default_key_path(&self) -> String {
         self.inner.default_key_path().to_string_lossy().into_owned()
     }
+
+    /// Path to the `<git-dir>/crypt` directory.
+    #[napi]
+    pub fn git_crypt_dir(&self) -> String {
+        self.inner.git_crypt_dir().to_string_lossy().into_owned()
+    }
+
+    /// Initialize the `crypt` + `crypt/keys` directories.
+    #[napi]
+    pub fn init_dirs(&self) -> napi::Result<()> {
+        self.inner
+            .init_dirs()
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+    }
+
+    /// Whether the repository has been initialized for crypt.
+    #[napi]
+    pub fn is_initialized(&self) -> bool {
+        self.inner.is_initialized()
+    }
+
+    /// Export the default key to `output_path`.
+    #[napi]
+    pub fn export_key(&self, output_path: String) -> napi::Result<()> {
+        self.inner
+            .export_key(Path::new(&output_path))
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+    }
+}
+
+#[cfg(all(feature = "crypto", feature = "ssh"))]
+#[napi(js_name = "IdentityManager")]
+pub struct IdentityManagerHandle;
+
+#[cfg(all(feature = "crypto", feature = "ssh"))]
+#[napi]
+impl IdentityManagerHandle {
+    /// Encrypt a key for an SSH recipient.
+    #[napi]
+    pub fn encrypt_key_for_ssh_recipient(key: Buffer, recipient: String) -> napi::Result<Buffer> {
+        let crypto_key = crate::crypto::SymmetricCryptoKey::from_bytes(key.as_ref())?;
+        let enc = IdentityManager::encrypt_key_for_ssh_recipient(&crypto_key, &recipient)
+            .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+        Ok(Buffer::from(enc))
+    }
+
+    /// Decrypt an envelope using an SSH private key identity.
+    #[napi]
+    pub fn decrypt_key_with_ssh_identity(
+        encrypted: Buffer,
+        identity_content: String,
+        passphrase: Option<String>,
+    ) -> napi::Result<Buffer> {
+        let key = IdentityManager::decrypt_key_with_ssh_identity(
+            encrypted.as_ref(),
+            &identity_content,
+            passphrase.as_deref(),
+        )
+        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+        Ok(Buffer::from(key.as_bytes().to_vec()))
+    }
 }
 
 // ── NAPI result types for the Vault bindings ────────────────────────────────────
@@ -2797,6 +2907,30 @@ pub struct VaultHistoryEntry {
     pub version: u32,
     /// RFC3339 timestamp of when this version was written.
     pub timestamp: String,
+}
+
+/// Detailed information about the vault lock state.
+#[napi(object)]
+pub struct VaultLockStateInfo {
+    /// State description ("HeldBy" or "Unparseable").
+    pub state: String,
+    /// PID holding the lock if state is "HeldBy".
+    pub pid: Option<u32>,
+}
+
+impl From<LockState> for VaultLockStateInfo {
+    fn from(ls: LockState) -> Self {
+        match ls {
+            LockState::HeldBy(pid) => Self {
+                state: "HeldBy".to_string(),
+                pid: Some(pid),
+            },
+            LockState::Unparseable => Self {
+                state: "Unparseable".to_string(),
+                pid: None,
+            },
+        }
+    }
 }
 
 /// A secret whose rotation policy is overdue.

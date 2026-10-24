@@ -176,4 +176,39 @@ describe("Vault", () => {
     const v = Vault.open(p, pw());
     expect(v.get("k")).toBe("v1");
   });
+
+  test("createWithAccessProfile creates a read-only vault", () => {
+    const p = tmpVaultPath();
+    createdPaths.push(p);
+    const v = Vault.createWithAccessProfile(p, pw(), "ReadOnly");
+    expect(v.accessProfile()).toBe("ReadOnly");
+    expect(() => v.set("k", "v")).toThrow();
+  });
+
+  test("liveLockHolder and lockState report advisory lock details", () => {
+    const p = tmpVaultPath();
+    createdPaths.push(p);
+    const v = new Vault(p, pw());
+    expect(Vault.liveLockHolder(p)).toBe(process.pid);
+    const state = Vault.lockState(p);
+    expect(state).not.toBeNull();
+    expect(state?.state).toBe("HeldBy");
+    expect(state?.pid).toBe(process.pid);
+  });
+
+  test("validateSecretKey validates key names", () => {
+    expect(() => Vault.validateSecretKey("VALID_KEY")).not.toThrow();
+    expect(() => Vault.validateSecretKey("app/DB_PASS")).not.toThrow();
+    expect(() => Vault.validateSecretKey("")).toThrow();
+    expect(() => Vault.validateSecretKey("café")).toThrow();
+  });
+
+  test("isSupportedSchema and schemaIsBound check vault formats", () => {
+    expect(Vault.isSupportedSchema("tsafe/vault/v3")).toBe(true);
+    expect(Vault.isSupportedSchema("tsafe/vault/v1")).toBe(true);
+    expect(Vault.isSupportedSchema("invalid/schema")).toBe(false);
+
+    expect(Vault.schemaIsBound("tsafe/vault/v3")).toBe(true);
+    expect(Vault.schemaIsBound("tsafe/vault/v1")).toBe(false);
+  });
 });
