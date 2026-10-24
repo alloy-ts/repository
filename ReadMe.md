@@ -32,3 +32,14 @@ npm run start
 ```bash
 npm run test
 ```
+
+## Secret Vault & Key-Value Storage
+
+`@alloy-ts/repository` includes native secret vault and key-value storage capabilities via `VaultHandle` and `KvVaultHandle`.
+
+### Vault Features
+- **AEAD & Structural Integrity**: Secrets encrypted with XChaCha20Poly1305 / AES-256-GCM and bound with canonical structure MACs (schema v3).
+- **Version History & Revert**: Secret history entries with versioning, revert, and pruning support.
+- **Key-Value Partition (`KvVaultHandle`)**: Embedded synchronous key-value storage powered by `fjall`.
+
+See [`docs/api/vault.md`](docs/api/vault.md) for full API documentation.
