@@ -2,11 +2,11 @@
 
 Git-based Source Code Management (SCM) system `Repository` Node-API (N-API)
 bindings for the Rust [`gitoxide`](https://github.com/GitoxideLabs/gitoxide)
-(`gix`) crate.
+(`gix`) crate, encrypted file-backed `Vault`, and embedded `KvVault` storage.
 
 `@alloy-ts/repository` exposes `gix::Repository` capabilities to
 JavaScript/TypeScript, providing safe, high-speed Git operations with modern
-async support and full type definitions.
+async support, encrypted secret vault management (`Vault`), local embedded key-value storage (`KvVault`), and full type definitions.
 
 ## Getting Started
 
