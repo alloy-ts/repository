@@ -34,7 +34,7 @@ pub(crate) fn lossy(b: &[u8]) -> String {
 
 /// Locate the system `git` binary by probing well-known absolute paths, falling back to a
 /// `PATH` lookup. Returns `None` only if git cannot be found anywhere.
-fn find_git() -> Option<std::path::PathBuf> {
+pub(crate) fn find_git() -> Option<std::path::PathBuf> {
     const CANDIDATES: &[&str] = &[
         "/usr/bin/git",
         "/bin/git",

@@ -36,5 +36,6 @@ mod repository;
 mod revision;
 mod submodule;
 mod tag;
+mod task;
 mod tree;
 mod worktree;

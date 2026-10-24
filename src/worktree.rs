@@ -2,14 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use napi::Result;
-use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
-use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 use crate::commit::Commit;
-use crate::error::{err, err_str, parse_oid, thread_local};
+use crate::error::{err, err_str, thread_local};
 use crate::repository::Repository;
+pub use crate::task::{AddWorktreeTask, RemoveWorktreeTask, StreamRawTask, StreamTask};
 
 /// A secondary worktree descriptor.
 #[derive(Clone)]
@@ -59,6 +58,7 @@ pub struct WorktreeInfo {
 }
 
 /// How to treat an existing local branch when adding a worktree.
+#[derive(Clone, Copy)]
 #[napi]
 pub enum WorktreeHeadKind {
     /// Check out an existing local branch.
@@ -68,6 +68,7 @@ pub enum WorktreeHeadKind {
 }
 
 /// The amount of validation to bypass when removing a linked worktree.
+#[derive(Clone, Copy)]
 #[napi]
 pub enum WorktreeRemoveForce {
     /// Refuse to remove a dirty worktree or one containing initialized submodules.
@@ -102,150 +103,6 @@ pub struct StreamEntry {
     pub id: String,
     /// The entry size in bytes, or `null` when unknown before reading.
     pub size: Option<f64>,
-}
-
-/// Worktree materialisation task running on the libuv thread pool.
-pub struct StreamTask {
-    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
-    tree_id: String,
-}
-
-impl Task for StreamTask {
-    type Output = Vec<StreamEntry>;
-    type JsValue = Vec<StreamEntry>;
-
-    fn compute(&mut self) -> Result<Vec<StreamEntry>> {
-        let r = thread_local(&self.repo);
-        let id = parse_oid(&self.tree_id)?;
-        let (mut stream, _index) = r
-            .worktree_stream(id)
-            .map_err(|e| err("worktree_stream", e))?;
-        let mut out = Vec::new();
-        while let Some(mut entry) = stream.next_entry().map_err(|e| err("stream_entry", e))? {
-            // Capture the metadata first, then drain the entry: gix panics on the
-            // next `next_entry()` call if an entry is dropped before exhaustion.
-            let path = String::from_utf8_lossy(entry.relative_path().as_ref()).into_owned();
-            let mode = format!("{:?}", entry.mode);
-            let id = entry.id.to_string();
-            let size = entry.bytes_remaining().map(|n| n as f64);
-            std::io::copy(&mut entry, &mut std::io::sink())
-                .map_err(|e| err("stream_entry_read", e))?;
-            out.push(StreamEntry {
-                path,
-                mode,
-                id,
-                size,
-            });
-        }
-        Ok(out)
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Vec<StreamEntry>) -> Result<Vec<StreamEntry>> {
-        Ok(output)
-    }
-}
-
-/// Worktree-stream raw-bytes task running on the libuv thread pool.
-pub struct StreamRawTask {
-    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
-    tree_id: String,
-}
-
-impl Task for StreamRawTask {
-    type Output = Vec<u8>;
-    type JsValue = Buffer;
-
-    fn compute(&mut self) -> Result<Vec<u8>> {
-        let r = thread_local(&self.repo);
-        let id = parse_oid(&self.tree_id)?;
-        let (stream, _index) = r
-            .worktree_stream(id)
-            .map_err(|e| err("worktree_stream", e))?;
-        let mut read = stream.into_read();
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut read, &mut bytes).map_err(|e| err("stream_encode", e))?;
-        Ok(bytes)
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Vec<u8>) -> Result<Buffer> {
-        Ok(Buffer::from(output))
-    }
-}
-
-/// Worktree addition task running on the libuv thread pool.
-pub struct AddWorktreeTask {
-    repo: Arc<gix::ThreadSafeRepository>,
-    destination: String,
-    head_kind: WorktreeHeadKind,
-    head_name: String,
-}
-
-impl Task for AddWorktreeTask {
-    type Output = Repository;
-    type JsValue = Repository;
-
-    fn compute(&mut self) -> Result<Repository> {
-        let r = thread_local(&self.repo);
-        let head = match self.head_kind {
-            WorktreeHeadKind::Detached => {
-                gix::worktree::add::Head::Detached(parse_oid(&self.head_name)?)
-            }
-            WorktreeHeadKind::Attached => {
-                let full = if self.head_name.starts_with("refs/") {
-                    self.head_name.clone()
-                } else {
-                    format!("refs/heads/{}", self.head_name)
-                };
-                let name =
-                    gix::refs::FullName::try_from(full.as_str()).map_err(|e| err("ref_name", e))?;
-                gix::worktree::add::Head::Attached(name)
-            }
-        };
-        let (repo, _outcome) = r
-            .add_worktree(
-                self.destination.as_str(),
-                head,
-                gix::progress::Discard,
-                &AtomicBool::new(false),
-            )
-            .map_err(|e| err("add_worktree", e))?;
-        // The checkout outcome summary is not representable next to the returned
-        // repository handle (napi AsyncTask values cannot be tuples), so only
-        // the opened worktree repository is surfaced.
-        Ok(Repository {
-            inner: Arc::new(repo.into()),
-        })
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Repository) -> Result<Repository> {
-        Ok(output)
-    }
-}
-
-/// Worktree removal task running on the libuv thread pool.
-pub struct RemoveWorktreeTask {
-    repo: Arc<gix::ThreadSafeRepository>,
-    target: String,
-    force: gix::worktree::remove::Force,
-}
-
-impl Task for RemoveWorktreeTask {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> Result<()> {
-        let r = thread_local(&self.repo);
-        r.remove_worktree(
-            std::path::Path::new(&self.target),
-            self.force,
-            gix::progress::Discard,
-        )
-        .map_err(|e| err("remove_worktree", e))
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: ()) -> Result<()> {
-        Ok(output)
-    }
 }
 
 /// Resolve the repository handle implied by `repo`, or by the environment
@@ -457,11 +314,11 @@ impl Worktree {
         &self,
         force: Option<WorktreeRemoveForce>,
     ) -> Result<AsyncTask<RemoveWorktreeTask>> {
-        Ok(AsyncTask::new(RemoveWorktreeTask {
-            repo: Arc::clone(&self.repo),
-            target: self.path.clone(),
-            force: to_remove_force(force),
-        }))
+        Ok(AsyncTask::new(RemoveWorktreeTask::new(
+            Arc::clone(&self.repo),
+            self.path.clone(),
+            to_remove_force(force),
+        )))
     }
 
     /// Remove stale administrative files for worktrees whose working trees are
@@ -554,20 +411,20 @@ impl Worktree {
     /// The whole stream is drained on the thread pool.
     #[napi]
     pub fn stream(&self, tree_id: String) -> Result<AsyncTask<StreamTask>> {
-        Ok(AsyncTask::new(StreamTask {
-            repo: Arc::clone(&self.repo),
+        Ok(AsyncTask::new(StreamTask::new(
+            Arc::clone(&self.repo),
             tree_id,
-        }))
+        )))
     }
 
     /// Encode the worktree stream of the tree at `tree_id` into its raw,
     /// unspecified transport bytes.
     #[napi]
     pub fn stream_raw(&self, tree_id: String) -> Result<AsyncTask<StreamRawTask>> {
-        Ok(AsyncTask::new(StreamRawTask {
-            repo: Arc::clone(&self.repo),
+        Ok(AsyncTask::new(StreamRawTask::new(
+            Arc::clone(&self.repo),
             tree_id,
-        }))
+        )))
     }
 
     fn locked_path(&self) -> std::path::PathBuf {
@@ -653,12 +510,12 @@ impl Repository {
         head_kind: WorktreeHeadKind,
         head_name: String,
     ) -> Result<AsyncTask<AddWorktreeTask>> {
-        Ok(AsyncTask::new(AddWorktreeTask {
-            repo: self.inner.clone(),
+        Ok(AsyncTask::new(AddWorktreeTask::new(
+            self.inner.clone(),
             destination,
             head_kind,
             head_name,
-        }))
+        )))
     }
 
     /// Resolve `target` (an absolute or relative worktree path, or a unique
@@ -674,11 +531,11 @@ impl Repository {
         target: String,
         force: Option<WorktreeRemoveForce>,
     ) -> Result<AsyncTask<RemoveWorktreeTask>> {
-        Ok(AsyncTask::new(RemoveWorktreeTask {
-            repo: self.inner.clone(),
+        Ok(AsyncTask::new(RemoveWorktreeTask::new(
+            self.inner.clone(),
             target,
-            force: to_remove_force(force),
-        }))
+            to_remove_force(force),
+        )))
     }
 
     /// Materialize the worktree stream of the tree at `tree_id` into an array of
@@ -687,10 +544,10 @@ impl Repository {
     /// is drained on the thread pool.
     #[napi]
     pub fn worktree_stream(&self, tree_id: String) -> Result<AsyncTask<StreamTask>> {
-        Ok(AsyncTask::new(StreamTask {
-            repo: self.inner.clone(),
+        Ok(AsyncTask::new(StreamTask::new(
+            self.inner.clone(),
             tree_id,
-        }))
+        )))
     }
 
     /// Encode the worktree stream of the tree at `tree_id` into its raw,
@@ -704,9 +561,9 @@ impl Repository {
     /// materialized variant, the whole stream is produced on the thread pool.
     #[napi]
     pub fn worktree_stream_raw(&self, tree_id: String) -> Result<AsyncTask<StreamRawTask>> {
-        Ok(AsyncTask::new(StreamRawTask {
-            repo: self.inner.clone(),
+        Ok(AsyncTask::new(StreamRawTask::new(
+            self.inner.clone(),
             tree_id,
-        }))
+        )))
     }
 }
