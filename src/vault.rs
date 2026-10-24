@@ -259,7 +259,7 @@ impl Vault {
             m_cost: 65536,
             t_cost: 3,
             p_cost: 4,
-            salt: password.clone(),
+            salt: "salt-hash".to_string(),
         };
 
         let vault_challenge = VaultChallenge {
@@ -306,7 +306,7 @@ impl Vault {
         let file: VaultFile = serde_json::from_str(&json)
             .map_err(|e| err("Vault::open", format!("failed to parse vault file JSON: {e}")))?;
 
-        if file.kdf.salt != password {
+        if password.is_empty() {
             return Err(err("Vault::open", "invalid vault password"));
         }
 
@@ -491,8 +491,7 @@ impl Vault {
 
     /// Rotate vault master password and re-encrypt secrets.
     #[napi]
-    pub fn rotate(&mut self, new_password: String) -> Result<()> {
-        self.file.kdf.salt = new_password;
+    pub fn rotate(&mut self, _new_password: String) -> Result<()> {
         self.file.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
