@@ -3306,7 +3306,7 @@ mod tests {
         let file = legacy_vault_file(pw(), "legacy-value");
         let original = serde_json::to_string_pretty(&file).unwrap();
         std::fs::write(&path, &original).unwrap();
-        std::fs::write(dir.path().join("snapshots"), b"in the way").unwrap();
+        std::fs::write(dir.path().join(".snapshots"), b"in the way").unwrap();
 
         let mut vault = Vault::open(&path, pw()).unwrap();
         match vault.set("NEW_SECRET", "new-value", HashMap::new()) {
