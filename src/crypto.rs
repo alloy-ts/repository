@@ -4391,15 +4391,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn deterministic_key(byte: u8) -> CryptoKey {
-        CryptoKey::from_bytes(&vec![byte; KEY_SIZE]).unwrap()
+    fn deterministic_key(byte: u8) -> SymmetricCryptoKey {
+        SymmetricCryptoKey::from_bytes(&vec![byte; KEY_SIZE]).unwrap()
     }
 
-    // ---- CryptoKey ----
+    // ---- SymmetricCryptoKey ----
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let key = CryptoKey::generate();
+        let key = SymmetricCryptoKey::generate_random();
         let plaintext = b"Hello, World!";
         let ciphertext = key.encrypt(plaintext).unwrap();
         assert_ne!(plaintext.as_slice(), &ciphertext[..]);
@@ -4409,18 +4409,18 @@ mod tests {
 
     #[test]
     fn encrypt_is_randomized_and_detected() {
-        let key = CryptoKey::generate();
+        let key = SymmetricCryptoKey::generate_random();
         let c1 = key.encrypt(b"same").unwrap();
         let c2 = key.encrypt(b"same").unwrap();
         assert_ne!(c1, c2, "fresh nonce per call");
-        assert!(CryptoKey::is_encrypted(&c1));
-        assert!(!CryptoKey::is_encrypted(b"plain"));
+        assert!(SymmetricCryptoKey::is_encrypted(&c1));
+        assert!(!SymmetricCryptoKey::is_encrypted(b"plain"));
     }
 
     #[test]
     fn wrong_key_fails_and_tamper_detected() {
-        let key1 = CryptoKey::generate();
-        let key2 = CryptoKey::generate();
+        let key1 = SymmetricCryptoKey::generate_random();
+        let key2 = SymmetricCryptoKey::generate_random();
         let ct = key1.encrypt(b"secret").unwrap();
         assert!(key2.decrypt(&ct).is_err());
 
@@ -4432,11 +4432,11 @@ mod tests {
 
     #[test]
     fn empty_and_invalid_format() {
-        let key = CryptoKey::generate();
+        let key = SymmetricCryptoKey::generate_random();
         let ct = key.encrypt(b"").unwrap();
         assert_eq!(key.decrypt(&ct).unwrap(), b"".to_vec());
         assert!(key.decrypt(&[1, 2, 3]).is_err());
-        assert!(CryptoKey::from_bytes(&[0u8; KEY_SIZE - 1]).is_err());
+        assert!(SymmetricCryptoKey::from_bytes(&[0u8; KEY_SIZE - 1]).is_err());
     }
 
     // ---- KeyManager ----
@@ -4455,9 +4455,7 @@ mod tests {
         let loaded = km.load_key().unwrap();
         assert_eq!(key.as_bytes(), loaded.as_bytes());
         assert_eq!(
-            km.
-            
-            (),
+            km.default_key_path(),
             temp.path().join("crypt").join("keys").join("default")
         );
     }
