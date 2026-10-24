@@ -1360,7 +1360,7 @@ fn ed25519_pub_from_ssh_private(privkey: &ssh_key::PrivateKey) -> CryptoResult<[
 }
 
 #[cfg(feature = "ssh")]
-fn ssh_ed25519_seed(identity_content: &str, passphrase: Option<&str>) -> CryptoResult<[u8; 32]> {
+pub(crate) fn ssh_ed25519_seed(identity_content: &str, passphrase: Option<&str>) -> CryptoResult<[u8; 32]> {
     use ssh_key::private::KeypairData;
     let privkey = if let Some(pw) = passphrase {
         ssh_key::PrivateKey::from_openssh(identity_content.trim())
@@ -1383,7 +1383,7 @@ fn ssh_ed25519_seed(identity_content: &str, passphrase: Option<&str>) -> CryptoR
 
 /// Convert an ed25519 public point into an X25519 public key (Edwards -> Montgomery).
 #[cfg(feature = "ssh")]
-fn ed25519_to_x25519_public(edwards: &[u8; 32]) -> CryptoResult<X25519PublicKey> {
+pub(crate) fn ed25519_to_x25519_public(edwards: &[u8; 32]) -> CryptoResult<X25519PublicKey> {
     use curve25519_dalek::edwards::CompressedEdwardsY;
     use curve25519_dalek::montgomery::MontgomeryPoint;
     let compressed = CompressedEdwardsY::from_slice(edwards)
@@ -1397,7 +1397,7 @@ fn ed25519_to_x25519_public(edwards: &[u8; 32]) -> CryptoResult<X25519PublicKey>
 
 /// Derive the X25519 scalar from an ed25519 seed (SHA-512, then clamp).
 #[cfg(feature = "ssh")]
-fn ed25519_seed_to_x25519_scalar(seed: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn ed25519_seed_to_x25519_scalar(seed: &[u8; 32]) -> [u8; 32] {
     use sha2::{Digest, Sha512};
     let hash = Sha512::digest(seed);
     let mut scalar = [0u8; 32];
@@ -1411,7 +1411,7 @@ fn ed25519_seed_to_x25519_scalar(seed: &[u8; 32]) -> [u8; 32] {
 
 /// Derive the AEAD key from an X25519 shared secret via HKDF-SHA256.
 #[cfg(feature = "ssh")]
-fn derive_aead_key(shared: &[u8]) -> CryptoResult<[u8; 32]> {
+pub(crate) fn derive_aead_key(shared: &[u8]) -> CryptoResult<[u8; 32]> {
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"gitcrypt-ssh-v1");
     let prk = salt.extract(shared);
     let okm = prk
@@ -1424,7 +1424,7 @@ fn derive_aead_key(shared: &[u8]) -> CryptoResult<[u8; 32]> {
 }
 
 #[cfg(feature = "ssh")]
-fn aead_seal(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
+pub(crate) fn aead_seal(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
     let unbound = UnboundKey::new(&AES_256_GCM, key)
         .map_err(|_| CryptoError::Ssh("invalid aead key".into()))?;
     let key = LessSafeKey::new(unbound);
@@ -1437,7 +1437,7 @@ fn aead_seal(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> Cryp
 }
 
 #[cfg(feature = "ssh")]
-fn aead_open(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
+pub(crate) fn aead_open(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
     let unbound = UnboundKey::new(&AES_256_GCM, key)
         .map_err(|_| CryptoError::Ssh("invalid aead key".into()))?;
     let key = LessSafeKey::new(unbound);
@@ -1672,7 +1672,10 @@ fn ed25519_public_openssh_text(public: &[u8; 32]) -> CryptoResult<String> {
 
 /// Derive the ed25519 public key from a 32-byte seed.
 #[cfg(feature = "ssh")]
-fn derive_ed25519_public(seed: &[u8; 32]) -> CryptoResult<[u8; 32]> {
+pub(crate) fn derive_aead_key(shared: &[u8]) -> CryptoResult<[u8; 32]> {
+pub(crate) fn ed25519_to_x25519_public(edwards: &[u8; 32]) -> CryptoResult<X25519PublicKey> {
+pub(crate) fn ed25519_seed_to_x25519_scalar(seed: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn ssh_ed25519_seed(identity_content: &str, passphrase: Option<&str>) -> CryptoResult<[u8; 32]> {
     use ring::signature::KeyPair as _;
     let kp = signature::Ed25519KeyPair::from_seed_unchecked(seed)
         .map_err(|_| CryptoError::Ssh("invalid ed25519 seed".into()))?;
@@ -2523,7 +2526,7 @@ fn spki_decode(der: &[u8]) -> Result<PKey<Public>> {
     }
 }
 
-fn aead_seal(cipher: Cipher, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn aead_seal(cipher: Cipher, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let mut c = Crypter::new(cipher, Mode::Encrypt, key, Some(iv))?;
     c.pad(false);
     if !aad.is_empty() {
@@ -2539,7 +2542,7 @@ fn aead_seal(cipher: Cipher, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8]) -> 
     Ok(out)
 }
 
-fn aead_open(cipher: Cipher, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn aead_open(cipher: Cipher, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 16 {
         return Err(bad("ciphertext too short to contain an authentication tag"));
     }

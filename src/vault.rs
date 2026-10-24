@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use fjall::{Config, Keyspace, PartitionHandle};
 use napi::bindgen_prelude::Buffer;
 use napi::Result;
 use napi_derive::napi;
@@ -282,6 +283,31 @@ const VAULT_KDF_P_COST: u32 = 4;
 
 pub const DEFAULT_HISTORY_KEEP: usize = 5;
 
+#[napi(string_enum)]
+pub enum VaultStructureBinding {
+    Legacy,
+    Bound,
+}
+
+#[napi(string_enum)]
+pub enum VaultAccessProfile {
+    ReadWrite,
+    ReadOnly,
+}
+
+#[napi(object)]
+pub struct VaultHistoryEntry {
+    pub version: u32,
+    pub timestamp: String,
+}
+
+#[napi(object)]
+pub struct VaultRotationDue {
+    pub key: String,
+    pub overdue_days: i64,
+    pub policy: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructureBinding {
     Legacy,
@@ -305,6 +331,24 @@ impl StructureBinding {
         match self {
             Self::Legacy => Vec::new(),
             Self::Bound => secret_aad(key, slot),
+        }
+    }
+}
+
+impl From<StructureBinding> for VaultStructureBinding {
+    fn from(b: StructureBinding) -> Self {
+        match b {
+            StructureBinding::Legacy => VaultStructureBinding::Legacy,
+            StructureBinding::Bound => VaultStructureBinding::Bound,
+        }
+    }
+}
+
+impl From<RbacProfile> for VaultAccessProfile {
+    fn from(p: RbacProfile) -> Self {
+        match p {
+            RbacProfile::ReadWrite => VaultAccessProfile::ReadWrite,
+            RbacProfile::ReadOnly => VaultAccessProfile::ReadOnly,
         }
     }
 }
@@ -446,7 +490,7 @@ impl LockFileContents {
     fn new() -> Self {
         Self {
             version: 1,
-            id: "vault-lock-id".to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
             pid: std::process::id(),
             created_at: Utc::now(),
         }
@@ -764,6 +808,54 @@ impl Vault {
         })
     }
 
+    pub fn open_with_key(path: &Path, key: VaultKey) -> CryptoResult<Self> {
+        let lock = acquire_lock(path)?;
+        if !path.exists() {
+            return Err(CryptoError::Crypto(format!(
+                "vault not found at path: {}",
+                path.display()
+            )));
+        }
+        let json = std::fs::read_to_string(path)?;
+        let file: VaultFile = serde_json::from_str(&json)
+            .map_err(|e| CryptoError::Crypto(format!("vault JSON parse error: {e}")))?;
+        let binding = StructureBinding::for_schema(&file.schema).ok_or_else(|| {
+            CryptoError::Crypto(format!("unknown schema: {}", file.schema))
+        })?;
+        let cipher = crypto::parse_cipher_kind(&file.cipher)?;
+        let ch_nonce = crypto::decode_b64(&file.vault_challenge.nonce)?;
+        let ch_ct = crypto::decode_b64(&file.vault_challenge.ciphertext)?;
+        let key_schedule = crypto::detect_key_schedule(
+            &key,
+            KeyPurpose::VaultChallenge,
+            cipher,
+            &ch_nonce,
+            &ch_ct,
+            VAULT_CHALLENGE_PLAINTEXT,
+        )?;
+        Self::verify_integrity(&file, &key, binding)?;
+        let rollback_suspected = detect_rollback(path, &file);
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            key,
+            cipher,
+            key_schedule,
+            binding,
+            rollback_suspected,
+            access_profile: RbacProfile::ReadWrite,
+            _lock: Some(lock),
+        })
+    }
+
+    pub fn is_team_vault(path: &Path) -> bool {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<VaultFile>(&json).ok())
+            .map(|f| !f.age_recipients.is_empty() && f.wrapped_dek.is_some())
+            .unwrap_or(false)
+    }
+
     pub fn save(&mut self) -> CryptoResult<()> {
         self.ensure_write_allowed()?;
         if let Some(parent) = self.path.parent() {
@@ -949,6 +1041,351 @@ impl Vault {
     pub fn ensure_write_allowed(&self) -> CryptoResult<()> {
         self.access_profile.ensure_write_allowed()
     }
+
+    pub fn get_version(&self, key: &str, version: usize) -> CryptoResult<String> {
+        if version == 0 {
+            return self.get_secret(key);
+        }
+        let entry = self.file.secrets.get(key).ok_or_else(|| {
+            CryptoError::Crypto(format!("secret key not found: {key}"))
+        })?;
+        let hist_idx = entry
+            .history
+            .len()
+            .checked_sub(version)
+            .ok_or_else(|| {
+                CryptoError::Crypto(format!(
+                    "version {version} does not exist for '{key}' (max {})",
+                    entry.history.len()
+                ))
+            })?;
+        let h = &entry.history[hist_idx];
+        let nonce = crypto::decode_b64(&h.nonce)?;
+        let ct = crypto::decode_b64(&h.ciphertext)?;
+        let pt = crypto::decrypt_with_key_schedule_aad(
+            &self.key,
+            self.key_schedule,
+            KeyPurpose::SecretData,
+            self.cipher,
+            &nonce,
+            &ct,
+            &self.aad_for(key, SecretSlot::History(&h.updated_at)),
+        )?;
+        String::from_utf8(pt)
+            .map_err(|_| CryptoError::Crypto("secret is not valid UTF-8".into()))
+    }
+
+    pub fn get_secret(&self, key: &str) -> CryptoResult<String> {
+        let entry = self.file.secrets.get(key).ok_or_else(|| {
+            CryptoError::Crypto(format!("secret key not found: {key}"))
+        })?;
+        let nonce = crypto::decode_b64(&entry.nonce)?;
+        let ct = crypto::decode_b64(&entry.ciphertext)?;
+        let pt = crypto::decrypt_with_key_schedule_aad(
+            &self.key,
+            self.key_schedule,
+            KeyPurpose::SecretData,
+            self.cipher,
+            &nonce,
+            &ct,
+            &self.aad_for(key, SecretSlot::Live),
+        )?;
+        String::from_utf8(pt)
+            .map_err(|_| CryptoError::Crypto("secret is not valid UTF-8".into()))
+    }
+
+    pub fn history(&self, key: &str) -> CryptoResult<Vec<VaultHistoryEntry>> {
+        let entry = self.file.secrets.get(key).ok_or_else(|| {
+            CryptoError::Crypto(format!("secret key not found: {key}"))
+        })?;
+        let mut versions = vec![VaultHistoryEntry {
+            version: 0,
+            timestamp: entry.updated_at.to_rfc3339(),
+        }];
+        for (i, h) in entry.history.iter().rev().enumerate() {
+            versions.push(VaultHistoryEntry {
+                version: (i + 1) as u32,
+                timestamp: h.updated_at.to_rfc3339(),
+            });
+        }
+        Ok(versions)
+    }
+
+    pub fn revert_to_version(&mut self, key: &str, version: usize) -> CryptoResult<()> {
+        self.ensure_write_allowed()?;
+        if version == 0 {
+            return Ok(());
+        }
+        let target_value = self.get_version(key, version)?;
+        let now = Utc::now();
+        let demoted = {
+            let entry = self.file.secrets.get(key).ok_or_else(|| {
+                CryptoError::Crypto(format!("secret key not found: {key}"))
+            })?;
+            if self.binding == StructureBinding::Legacy {
+                HistoryEntry {
+                    nonce: entry.nonce.clone(),
+                    ciphertext: entry.ciphertext.clone(),
+                    updated_at: entry.updated_at,
+                }
+            } else {
+                let pt = crypto::decrypt_with_key_schedule_aad(
+                    &self.key,
+                    self.key_schedule,
+                    KeyPurpose::SecretData,
+                    self.cipher,
+                    &crypto::decode_b64(&entry.nonce)?,
+                    &crypto::decode_b64(&entry.ciphertext)?,
+                    &secret_aad(key, SecretSlot::Live),
+                )?;
+                let (nonce, ct) = crypto::encrypt_with_key_schedule_aad(
+                    &self.key,
+                    self.key_schedule,
+                    KeyPurpose::SecretData,
+                    self.cipher,
+                    &pt,
+                    &secret_aad(key, SecretSlot::History(&entry.updated_at)),
+                )?;
+                HistoryEntry {
+                    nonce: crypto::encode_b64(&nonce),
+                    ciphertext: crypto::encode_b64(&ct),
+                    updated_at: entry.updated_at,
+                }
+            }
+        };
+        let entry = self.file.secrets.get_mut(key).unwrap();
+        entry.history.push(demoted);
+        if entry.history.len() > DEFAULT_HISTORY_KEEP {
+            entry
+                .history
+                .drain(..entry.history.len() - DEFAULT_HISTORY_KEEP);
+        }
+
+        let (nonce, ct) = crypto::encrypt_with_key_schedule_aad(
+            &self.key,
+            self.key_schedule,
+            KeyPurpose::SecretData,
+            self.cipher,
+            target_value.as_bytes(),
+            &self.aad_for(key, SecretSlot::Live),
+        )?;
+        let entry = self.file.secrets.get_mut(key).unwrap();
+        entry.nonce = crypto::encode_b64(&nonce);
+        entry.ciphertext = crypto::encode_b64(&ct);
+        entry.updated_at = now;
+        self.file.updated_at = now;
+        self.save()
+    }
+
+    pub fn prune_history(&mut self, key: &str, keep_n: usize) -> CryptoResult<()> {
+        self.ensure_write_allowed()?;
+        let entry = self.file.secrets.get_mut(key).ok_or_else(|| {
+            CryptoError::Crypto(format!("secret key not found: {key}"))
+        })?;
+        if entry.history.len() > keep_n {
+            entry.history.drain(..entry.history.len() - keep_n);
+        }
+        self.file.updated_at = Utc::now();
+        self.save()
+    }
+
+    pub fn export_all(&self) -> CryptoResult<HashMap<String, String>> {
+        let mut map = HashMap::new();
+        for key in self.file.secrets.keys() {
+            let val = self.get_secret(key)?;
+            map.insert(key.clone(), val);
+        }
+        Ok(map)
+    }
+
+    pub fn rotate(&mut self, new_password: &[u8]) -> CryptoResult<()> {
+        self.ensure_write_allowed()?;
+        let all = self.export_all()?;
+        let meta: HashMap<String, _> = self
+            .file
+            .secrets
+            .iter()
+            .map(|(k, e)| (k.clone(), (e.tags.clone(), e.created_at, e.history.clone())))
+            .collect();
+
+        let mut history_plaintext: HashMap<String, Vec<(String, DateTime<Utc>)>> = HashMap::new();
+        for (key, entry) in &self.file.secrets {
+            let mut pts = Vec::new();
+            for h in &entry.history {
+                let nonce = crypto::decode_b64(&h.nonce)?;
+                let ct = crypto::decode_b64(&h.ciphertext)?;
+                let pt = crypto::decrypt_with_key_schedule_aad(
+                    &self.key,
+                    self.key_schedule,
+                    KeyPurpose::SecretData,
+                    self.cipher,
+                    &nonce,
+                    &ct,
+                    &self.aad_for(key, SecretSlot::History(&h.updated_at)),
+                )?;
+                let s = String::from_utf8(pt)
+                    .map_err(|_| CryptoError::Crypto("history entry is not valid UTF-8".into()))?;
+                pts.push((s, h.updated_at));
+            }
+            history_plaintext.insert(key.clone(), pts);
+        }
+
+        let new_salt = crypto::random_salt();
+        let new_key = crypto::derive_key(
+            new_password,
+            &new_salt,
+            VAULT_KDF_M_COST,
+            VAULT_KDF_T_COST,
+            VAULT_KDF_P_COST,
+        )?;
+        let new_cipher = crypto::default_vault_cipher();
+        let new_key_schedule = KeySchedule::HkdfSha256V1;
+
+        let now = Utc::now();
+        let mut new_secrets = HashMap::with_capacity(all.len());
+        for (key, value) in &all {
+            let (nonce, ct) = crypto::encrypt_with_key_schedule_aad(
+                &new_key,
+                new_key_schedule,
+                KeyPurpose::SecretData,
+                new_cipher,
+                value.as_bytes(),
+                &secret_aad(key, SecretSlot::Live),
+            )?;
+            let (ref tags, created_at, _) = meta[key];
+
+            let mut new_history = Vec::new();
+            if let Some(pts) = history_plaintext.get(key) {
+                for (pt, updated_at) in pts {
+                    let (hn, hct) = crypto::encrypt_with_key_schedule_aad(
+                        &new_key,
+                        new_key_schedule,
+                        KeyPurpose::SecretData,
+                        new_cipher,
+                        pt.as_bytes(),
+                        &secret_aad(key, SecretSlot::History(updated_at)),
+                    )?;
+                    new_history.push(HistoryEntry {
+                        nonce: crypto::encode_b64(&hn),
+                        ciphertext: crypto::encode_b64(&hct),
+                        updated_at: *updated_at,
+                    });
+                }
+            }
+
+            new_secrets.insert(
+                key.clone(),
+                SecretEntry {
+                    nonce: crypto::encode_b64(&nonce),
+                    ciphertext: crypto::encode_b64(&ct),
+                    created_at,
+                    updated_at: now,
+                    tags: tags.clone(),
+                    history: new_history,
+                },
+            );
+        }
+
+        let (ch_nonce, ch_ct) = crypto::encrypt_with_key_schedule(
+            &new_key,
+            new_key_schedule,
+            KeyPurpose::VaultChallenge,
+            new_cipher,
+            VAULT_CHALLENGE_PLAINTEXT,
+        )?;
+        self.file.kdf = KdfParams {
+            algorithm: "argon2id".to_string(),
+            m_cost: VAULT_KDF_M_COST,
+            t_cost: VAULT_KDF_T_COST,
+            p_cost: VAULT_KDF_P_COST,
+            salt: crypto::encode_b64(&new_salt),
+        };
+        self.file.vault_challenge = VaultChallenge {
+            nonce: crypto::encode_b64(&ch_nonce),
+            ciphertext: crypto::encode_b64(&ch_ct),
+        };
+        self.file.cipher = new_cipher.as_str().to_string();
+        self.file.secrets = new_secrets;
+        self.file.updated_at = now;
+        self.key = new_key;
+        self.cipher = new_cipher;
+        self.key_schedule = new_key_schedule;
+        self.binding = StructureBinding::Bound;
+        self.save()
+    }
+
+    pub fn rename_key(&mut self, old_key: &str, new_key: &str, overwrite: bool) -> CryptoResult<()> {
+        self.ensure_write_allowed()?;
+        validate_secret_key(new_key)?;
+        if !self.file.secrets.contains_key(old_key) {
+            return Err(CryptoError::Crypto(format!("secret key not found: {old_key}")));
+        }
+        if !overwrite && self.file.secrets.contains_key(new_key) {
+            return Err(CryptoError::Crypto(format!(
+                "secret key already exists: {new_key}"
+            )));
+        }
+        let entry = self.file.secrets.remove(old_key).unwrap();
+        let rebound = if self.binding == StructureBinding::Legacy {
+            entry
+        } else {
+            let live_pt = crypto::decrypt_with_key_schedule_aad(
+                &self.key,
+                self.key_schedule,
+                KeyPurpose::SecretData,
+                self.cipher,
+                &crypto::decode_b64(&entry.nonce)?,
+                &crypto::decode_b64(&entry.ciphertext)?,
+                &secret_aad(old_key, SecretSlot::Live),
+            )?;
+            let (nonce, ct) = crypto::encrypt_with_key_schedule_aad(
+                &self.key,
+                self.key_schedule,
+                KeyPurpose::SecretData,
+                self.cipher,
+                &live_pt,
+                &secret_aad(new_key, SecretSlot::Live),
+            )?;
+
+            let mut history = Vec::with_capacity(entry.history.len());
+            for h in &entry.history {
+                let pt = crypto::decrypt_with_key_schedule_aad(
+                    &self.key,
+                    self.key_schedule,
+                    KeyPurpose::SecretData,
+                    self.cipher,
+                    &crypto::decode_b64(&h.nonce)?,
+                    &crypto::decode_b64(&h.ciphertext)?,
+                    &secret_aad(old_key, SecretSlot::History(&h.updated_at)),
+                )?;
+                let (hn, hct) = crypto::encrypt_with_key_schedule_aad(
+                    &self.key,
+                    self.key_schedule,
+                    KeyPurpose::SecretData,
+                    self.cipher,
+                    &pt,
+                    &secret_aad(new_key, SecretSlot::History(&h.updated_at)),
+                )?;
+                history.push(HistoryEntry {
+                    nonce: crypto::encode_b64(&hn),
+                    ciphertext: crypto::encode_b64(&hct),
+                    updated_at: h.updated_at,
+                });
+            }
+
+            SecretEntry {
+                nonce: crypto::encode_b64(&nonce),
+                ciphertext: crypto::encode_b64(&ct),
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+                tags: entry.tags.clone(),
+                history,
+            }
+        };
+        self.file.secrets.insert(new_key.to_string(), rebound);
+        self.file.updated_at = Utc::now();
+        self.save()
+    }
 }
 
 #[napi]
@@ -961,6 +1398,26 @@ impl Vault {
     #[napi(factory)]
     pub fn open_vault(path: String, password: Buffer) -> Result<Self> {
         Self::open(Path::new(&path), password.as_ref()).map_err(|e| err_str("Vault.open", e))
+    }
+
+    #[napi(factory)]
+    pub fn open_vault_with_key(path: String, key: Buffer) -> Result<Self> {
+        let key_bytes: [u8; 32] = key
+            .as_ref()
+            .try_into()
+            .map_err(|_| err_str("Vault.openWithKey", "vault key must be 32 bytes"))?;
+        Self::open_with_key(Path::new(&path), key_bytes)
+            .map_err(|e| err_str("Vault.openWithKey", e))
+    }
+
+    #[napi(factory)]
+    pub fn is_team_vault(path: String) -> bool {
+        Self::is_team_vault(Path::new(&path))
+    }
+
+    #[napi]
+    pub fn save(&mut self) -> Result<()> {
+        self.save().map_err(|e| err_str("Vault.save", e))
     }
 
     #[napi]
@@ -984,7 +1441,46 @@ impl Vault {
 
         let now = Utc::now();
         let (created_at, history, tags) = match self.file.secrets.get(&key) {
-            Some(existing) => (existing.created_at, existing.history.clone(), existing.tags.clone()),
+            Some(existing) => {
+                let mut h = existing.history.clone();
+                let demoted = if self.binding == StructureBinding::Legacy {
+                    HistoryEntry {
+                        nonce: existing.nonce.clone(),
+                        ciphertext: existing.ciphertext.clone(),
+                        updated_at: existing.updated_at,
+                    }
+                } else {
+                    let pt = crypto::decrypt_with_key_schedule_aad(
+                        &self.key,
+                        self.key_schedule,
+                        KeyPurpose::SecretData,
+                        self.cipher,
+                        &crypto::decode_b64(&existing.nonce).map_err(|e| err_str("Vault.set", e))?,
+                        &crypto::decode_b64(&existing.ciphertext).map_err(|e| err_str("Vault.set", e))?,
+                        &secret_aad(&key, SecretSlot::Live),
+                    )
+                    .map_err(|e| err_str("Vault.set", e))?;
+                    let (nonce, ct) = crypto::encrypt_with_key_schedule_aad(
+                        &self.key,
+                        self.key_schedule,
+                        KeyPurpose::SecretData,
+                        self.cipher,
+                        &pt,
+                        &secret_aad(&key, SecretSlot::History(&existing.updated_at)),
+                    )
+                    .map_err(|e| err_str("Vault.set", e))?;
+                    HistoryEntry {
+                        nonce: crypto::encode_b64(&nonce),
+                        ciphertext: crypto::encode_b64(&ct),
+                        updated_at: existing.updated_at,
+                    }
+                };
+                h.push(demoted);
+                if h.len() > DEFAULT_HISTORY_KEEP {
+                    h.drain(..h.len() - DEFAULT_HISTORY_KEEP);
+                }
+                (existing.created_at, h, existing.tags.clone())
+            }
             None => (now, Vec::new(), HashMap::new()),
         };
 
@@ -1005,26 +1501,31 @@ impl Vault {
 
     #[napi]
     pub fn get(&self, key: String) -> Result<String> {
-        let entry = self
-            .file
-            .secrets
-            .get(&key)
-            .ok_or_else(|| err_str("Vault.get", format!("secret key not found: {key}")))?;
-        let nonce = crypto::decode_b64(&entry.nonce).map_err(|e| err_str("Vault.get", e))?;
-        let ct = crypto::decode_b64(&entry.ciphertext).map_err(|e| err_str("Vault.get", e))?;
-        let pt = crypto::decrypt_with_key_schedule_aad(
-            &self.key,
-            self.key_schedule,
-            KeyPurpose::SecretData,
-            self.cipher,
-            &nonce,
-            &ct,
-            &self.aad_for(&key, SecretSlot::Live),
-        )
-        .map_err(|e| err_str("Vault.get", e))?;
+        self.get_secret(&key).map_err(|e| err_str("Vault.get", e))
+    }
 
-        String::from_utf8(pt)
-            .map_err(|_| err_str("Vault.get", "secret is not valid UTF-8"))
+    #[napi]
+    pub fn get_version(&self, key: String, version: u32) -> Result<String> {
+        self.get_version(&key, version as usize)
+            .map_err(|e| err_str("Vault.getVersion", e))
+    }
+
+    #[napi]
+    pub fn history(&self, key: String) -> Result<Vec<VaultHistoryEntry>> {
+        self.history(&key)
+            .map_err(|e| err_str("Vault.history", e))
+    }
+
+    #[napi]
+    pub fn revert_to_version(&mut self, key: String, version: u32) -> Result<()> {
+        self.revert_to_version(&key, version as usize)
+            .map_err(|e| err_str("Vault.revertToVersion", e))
+    }
+
+    #[napi]
+    pub fn prune_history(&mut self, key: String, keep_n: u32) -> Result<()> {
+        self.prune_history(&key, keep_n as usize)
+            .map_err(|e| err_str("Vault.pruneHistory", e))
     }
 
     #[napi]
@@ -1040,10 +1541,146 @@ impl Vault {
     }
 
     #[napi]
+    pub fn rename_key(&mut self, old_key: String, new_key: String, overwrite: bool) -> Result<()> {
+        self.rename_key(&old_key, &new_key, overwrite)
+            .map_err(|e| err_str("Vault.renameKey", e))
+    }
+
+    #[napi]
+    pub fn rotate(&mut self, new_password: Buffer) -> Result<()> {
+        self.rotate(new_password.as_ref())
+            .map_err(|e| err_str("Vault.rotate", e))
+    }
+
+    #[napi]
     pub fn list(&self) -> Vec<String> {
         let mut keys: Vec<String> = self.file.secrets.keys().cloned().collect();
         keys.sort();
         keys
+    }
+
+    #[napi]
+    pub fn export_all(&self) -> Result<HashMap<String, String>> {
+        self.export_all()
+            .map_err(|e| err_str("Vault.exportAll", e))
+    }
+
+    #[napi]
+    pub fn path(&self) -> String {
+        self.path.to_string_lossy().to_string()
+    }
+
+    #[napi]
+    pub fn access_profile(&self) -> VaultAccessProfile {
+        self.access_profile.into()
+    }
+
+    #[napi]
+    pub fn structure_binding(&self) -> VaultStructureBinding {
+        self.binding.into()
+    }
+
+    #[napi]
+    pub fn rollback_suspected(&self) -> bool {
+        self.rollback_suspected
+    }
+
+    #[napi]
+    pub fn rotation_due(&self) -> Vec<VaultRotationDue> {
+        let now = Utc::now();
+        let mut due = Vec::new();
+        for (key, entry) in &self.file.secrets {
+            if let Some(policy) = entry.tags.get("rotate_policy") {
+                let s = policy.trim();
+                if let Some(days) = s
+                    .strip_suffix('d')
+                    .and_then(|prefix| prefix.parse::<i64>().ok())
+                    .filter(|&d| d > 0)
+                {
+                    let age = (now - entry.updated_at).num_days();
+                    if age >= days {
+                        due.push(VaultRotationDue {
+                            key: key.clone(),
+                            overdue_days: age - days,
+                            policy: policy.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        due.sort_by(|a, b| a.key.cmp(&b.key));
+        due
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KvVault NAPI Struct & Implementation
+// ---------------------------------------------------------------------------
+
+#[napi]
+pub struct KvVault {
+    _keyspace: Keyspace,
+    partition: PartitionHandle,
+}
+
+#[napi]
+impl KvVault {
+    #[napi(factory)]
+    pub fn open(path: String) -> Result<Self> {
+        let keyspace = Config::new(Path::new(&path))
+            .open()
+            .map_err(|e| err_str("KvVault.open", e))?;
+        let partition = keyspace
+            .open_partition("default", Default::default())
+            .map_err(|e| err_str("KvVault.open", e))?;
+        Ok(Self {
+            _keyspace: keyspace,
+            partition,
+        })
+    }
+
+    #[napi]
+    pub fn put(&self, key: String, value: String) -> Result<()> {
+        self.partition
+            .insert(key.as_bytes(), value.as_bytes())
+            .map_err(|e| err_str("KvVault.put", e))
+    }
+
+    #[napi]
+    pub fn get(&self, key: String) -> Result<Option<String>> {
+        let res = self
+            .partition
+            .get(key.as_bytes())
+            .map_err(|e| err_str("KvVault.get", e))?;
+        match res {
+            Some(slice) => {
+                let s = String::from_utf8(slice.to_vec())
+                    .map_err(|_| err_str("KvVault.get", "stored value is not valid UTF-8"))?;
+                Ok(Some(s))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[napi]
+    pub fn delete(&self, key: String) -> Result<()> {
+        self.partition
+            .remove(key.as_bytes())
+            .map_err(|e| err_str("KvVault.delete", e))
+    }
+
+    #[napi]
+    pub fn list(&self, prefix: String) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        let range = self.partition.prefix(prefix.as_bytes());
+        for item in range {
+            let (k, _) = item.map_err(|e| err_str("KvVault.list", e))?;
+            let key_str = String::from_utf8(k.to_vec())
+                .map_err(|_| err_str("KvVault.list", "stored key is not valid UTF-8"))?;
+            keys.push(key_str);
+        }
+        keys.sort();
+        Ok(keys)
     }
 }
 
@@ -1112,5 +1749,17 @@ mod tests {
         let loaded = Vault::open(&vault_path, password).unwrap();
         assert_eq!(loaded.get("SECRET_KEY".to_string()).unwrap(), "secret_val");
         assert_eq!(loaded.list(), vec!["SECRET_KEY".to_string()]);
+    }
+
+    #[test]
+    fn kv_vault_put_get_list_delete() {
+        let temp = TempDir::new().unwrap();
+        let kv = KvVault::open(temp.path().to_str().unwrap().to_string()).unwrap();
+        kv.put("app/db".to_string(), "pass1".to_string()).unwrap();
+        kv.put("app/api".to_string(), "pass2".to_string()).unwrap();
+        assert_eq!(kv.get("app/db".to_string()).unwrap(), Some("pass1".to_string()));
+        assert_eq!(kv.list("app/".to_string()).unwrap(), vec!["app/api".to_string(), "app/db".to_string()]);
+        kv.delete("app/db".to_string()).unwrap();
+        assert_eq!(kv.get("app/db".to_string()).unwrap(), None);
     }
 }
