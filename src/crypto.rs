@@ -163,136 +163,7 @@ impl SymmetricCryptoKey {
 // KeyManager (on-disk key storage under <git-dir>/crypt)
 // ---------------------------------------------------------------------------
 
-/// Stores and manages the repository's crypt key on disk.
-pub struct KeyManager {
-    git_dir: PathBuf,
-}
-
-impl KeyManager {
-    /// Create a manager rooted at `git_dir` (the `.git` directory).
-    pub fn new(git_dir: impl AsRef<Path>) -> Self {
-        Self {
-            git_dir: git_dir.as_ref().to_path_buf(),
-        }
-    }
-
-    /// Path to the `<git-dir>/crypt` directory.
-    pub fn git_crypt_dir(&self) -> PathBuf {
-        self.git_dir.join("crypt")
-    }
-
-    /// Path to the default symmetric key file.
-    ///
-    /// Honors `gpg.ssh.defaultKeyPath` from git config when set; otherwise
-    /// falls back to `<git-dir>/crypt/keys/default`.
-    pub fn default_key_path(&self) -> PathBuf {
-        if let Some(configured) = self.config_default_key_path() {
-            return configured;
-        }
-        self.git_crypt_dir().join("keys").join("default")
-    }
-
-    /// Read `gpg.ssh.defaultKeyPath` from git config, resolving a relative
-    /// value against the git directory. Returns `None` when the config is
-    /// unset or unreadable.
-    fn config_default_key_path(&self) -> Option<PathBuf> {
-        let repo = gix::open(&self.git_dir).ok()?;
-        let raw = repo.config_snapshot().string("gpg.ssh.defaultKeyPath")?;
-        let raw = String::from_utf8_lossy(&raw);
-        if raw.is_empty() {
-            return None;
-        }
-        let path = PathBuf::from(raw.into_owned());
-        Some(if path.is_absolute() {
-            path
-        } else {
-            self.git_dir.join(path)
-        })
-    }
-
-    /// Create the `crypt` + `crypt/keys` directories. Fails if already initialized.
-    pub fn init_dirs(&self) -> CryptoResult<()> {
-        let crypt_dir = self.git_crypt_dir();
-        if crypt_dir.exists() {
-            return Err(CryptoError::AlreadyInitialized);
-        }
-        std::fs::create_dir_all(&crypt_dir)?;
-        std::fs::create_dir(crypt_dir.join("keys"))?;
-        Ok(())
-    }
-
-    /// Whether the repository has been initialized for crypt.
-    pub fn is_initialized(&self) -> bool {
-        self.git_crypt_dir().exists()
-    }
-
-    /// Generate a new random key and persist it.
-    pub fn generate_key(&self) -> CryptoResult<SymmetricCryptoKey> {
-        let key = SymmetricCryptoKey::generate_random();
-        self.save_key(&key)?;
-        Ok(key)
-    }
-
-    /// Persist `key` to the default path with `0600` permissions on Unix.
-    pub fn save_key(&self, key: &SymmetricCryptoKey) -> CryptoResult<()> {
-        let key_path = self.default_key_path();
-        if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let mut file = std::fs::File::create(&key_path)?;
-        file.write_all(key.as_bytes())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&key_path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&key_path, perms)?;
-        }
-
-        Ok(())
-    }
-
-    /// Load the default key from disk.
-    pub fn load_key(&self) -> CryptoResult<SymmetricCryptoKey> {
-        let key_path = self.default_key_path();
-        if !key_path.exists() {
-            return Err(CryptoError::KeyNotFound("default".into()));
-        }
-        let mut file = std::fs::File::open(&key_path)?;
-        let mut key_bytes = Vec::new();
-        file.read_to_end(&mut key_bytes)?;
-        SymmetricCryptoKey::from_bytes(&key_bytes)
-    }
-
-    /// Export the default key to `output_path` (with `0600` on Unix).
-    pub fn export_key(&self, output_path: &Path) -> CryptoResult<()> {
-        let key = self.load_key()?;
-        let mut file = std::fs::File::create(output_path)?;
-        file.write_all(key.as_bytes())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(output_path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(output_path, perms)?;
-        }
-
-        Ok(())
-    }
-
-    /// Import a key from `input_path` and save it as the default key.
-    pub fn import_key(&self, input_path: &Path) -> CryptoResult<()> {
-        let mut file = std::fs::File::open(input_path)?;
-        let mut key_bytes = Vec::new();
-        file.read_to_end(&mut key_bytes)?;
-        let key = SymmetricCryptoKey::from_bytes(&key_bytes)?;
-        self.save_key(&key)?;
-        Ok(())
-    }
-}
+pub use crate::vault::KeyManager;
 
 /// Lowercase hex encoding, without pulling in an extra dependency.
 fn hex_lower(bytes: &[u8]) -> String {
@@ -1395,266 +1266,8 @@ pub fn diff_filter() -> CryptoResult<()> {
 // SSH / age recipient support (feature = "ssh")
 // ---------------------------------------------------------------------------
 
-/// Derive a filesystem-safe recipient name from an SSH public key, preferring the comment
-/// field, then the file stem, then a truncated SHA-256 fingerprint.
 #[cfg(feature = "ssh")]
-fn derive_recipient_name(ssh_key: &str, ssh_key_path: &Path) -> String {
-    ssh_key
-        .split_whitespace()
-        .nth(2)
-        .map(sanitize_label)
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            ssh_key_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(sanitize_label)
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| fallback_fingerprint(ssh_key))
-}
-
-/// Keep only filesystem-safe characters.
-#[cfg(feature = "ssh")]
-fn sanitize_label(input: &str) -> String {
-    input
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        .collect()
-}
-
-/// Deterministic `ssh-<hex>` fallback name.
-#[cfg(feature = "ssh")]
-fn fallback_fingerprint(data: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data.as_bytes());
-    let digest = hasher.finalize();
-    format!("ssh-{}", hex::encode(&digest[..8]))
-}
-
-#[cfg(feature = "ssh")]
-pub struct IdentityManager;
-
-#[cfg(feature = "ssh")]
-impl IdentityManager {
-    /// Magic header for the encrypted-recipient-key envelope.
-    const MAGIC: &[u8; 8] = b"RINGSSH1";
-
-    /// Encrypt the repo's symmetric key so only the holder of the matching ed25519 SSH
-    /// private key can recover it. `recipient` is the contents of an `ssh-ed25519` public
-    /// (or private) key file.
-    pub fn encrypt_key_for_ssh_recipient(key: &SymmetricCryptoKey, recipient: &str) -> CryptoResult<Vec<u8>> {
-        let recipient_pk = ssh_ed25519_public_bytes(recipient)?;
-        let x25519_pk = ed25519_to_x25519_public(&recipient_pk)?;
-
-        // Ephemeral X25519 keypair (random).
-        let mut ephemeral = [0u8; 32];
-        SystemRandom::new()
-            .fill(&mut ephemeral)
-            .map_err(|_| CryptoError::Ssh("RNG failure".into()))?;
-        let esk = X25519Secret::from(ephemeral);
-        let epk = X25519PublicKey::from(&esk);
-
-        let shared = esk.diffie_hellman(&x25519_pk);
-        let aead_key = derive_aead_key(shared.as_bytes())?;
-
-        let mut nonce = [0u8; NONCE_SIZE];
-        SystemRandom::new()
-            .fill(&mut nonce)
-            .map_err(|_| CryptoError::Ssh("RNG failure".into()))?;
-
-        let ciphertext = aead_seal(&aead_key, &nonce, key.as_bytes())?;
-
-        let mut out = Vec::with_capacity(8 + 32 + NONCE_SIZE + ciphertext.len());
-        out.extend_from_slice(Self::MAGIC);
-        out.extend_from_slice(epk.as_bytes());
-        out.extend_from_slice(&nonce);
-        out.extend_from_slice(&ciphertext);
-        Ok(out)
-    }
-
-    /// Decrypt a `IdentityManager` envelope using an OpenSSH ed25519 private key. When the
-    /// private key is passphrase-protected, `passphrase` must be supplied.
-    pub fn decrypt_key_with_ssh_identity(
-        encrypted: &[u8],
-        identity_content: &str,
-        passphrase: Option<&str>,
-    ) -> CryptoResult<SymmetricCryptoKey> {
-        if encrypted.len() < 8 + 32 + NONCE_SIZE {
-            return Err(CryptoError::Ssh("envelope too short".into()));
-        }
-        if &encrypted[..8] != Self::MAGIC {
-            return Err(CryptoError::Ssh("invalid envelope magic".into()));
-        }
-        let (_, rest) = encrypted.split_at(8);
-        let (epk_bytes, rest) = rest.split_at(32);
-        let (nonce_bytes, ct) = rest.split_at(NONCE_SIZE);
-
-        let mut epk_arr = [0u8; 32];
-        epk_arr.copy_from_slice(epk_bytes);
-        let epk = X25519PublicKey::from(epk_arr);
-
-        let seed = ssh_ed25519_seed(identity_content, passphrase)?;
-        let scalar = ed25519_seed_to_x25519_scalar(&seed);
-        let sk = X25519Secret::from(scalar);
-        let shared = sk.diffie_hellman(&epk);
-        let aead_key = derive_aead_key(shared.as_bytes())?;
-
-        let mut nonce_arr = [0u8; NONCE_SIZE];
-        nonce_arr.copy_from_slice(nonce_bytes);
-
-        let key_bytes = aead_open(&aead_key, &nonce_arr, ct)?;
-        SymmetricCryptoKey::from_bytes(&key_bytes)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SSH key parsing / conversion helpers (feature = "ssh")
-// ---------------------------------------------------------------------------
-
-/// Parse an `ssh-ed25519` public key (or a private key, extracting its public) into the
-/// 32-byte Edwards-point encoding.
-#[cfg(feature = "ssh")]
-fn ssh_ed25519_public_bytes(recipient: &str) -> CryptoResult<[u8; 32]> {
-    if let Ok(pubkey) = ssh_key::PublicKey::from_openssh(recipient.trim()) {
-        if let Ok(bytes) = ed25519_pub_from_ssh_public(&pubkey) {
-            return Ok(bytes);
-        }
-    }
-    let privkey = ssh_key::PrivateKey::from_openssh(recipient.trim())
-        .map_err(|e| CryptoError::Ssh(format!("invalid SSH key: {e}")))?;
-    ed25519_pub_from_ssh_private(&privkey)
-}
-
-#[cfg(feature = "ssh")]
-fn ed25519_pub_from_ssh_public(pubkey: &ssh_key::PublicKey) -> CryptoResult<[u8; 32]> {
-    use ssh_key::public::KeyData;
-    match pubkey.key_data() {
-        KeyData::Ed25519(p) => {
-            let b: &[u8] = p.as_ref();
-            if b.len() != 32 {
-                return Err(CryptoError::Ssh("bad ed25519 public key".into()));
-            }
-            let mut a = [0u8; 32];
-            a.copy_from_slice(b);
-            Ok(a)
-        }
-        _ => Err(CryptoError::Ssh(
-            "only ed25519 SSH keys are supported".into(),
-        )),
-    }
-}
-
-#[cfg(feature = "ssh")]
-fn ed25519_pub_from_ssh_private(privkey: &ssh_key::PrivateKey) -> CryptoResult<[u8; 32]> {
-    use ssh_key::private::KeypairData;
-    match privkey.key_data() {
-        KeypairData::Ed25519(kp) => {
-            let b: &[u8] = kp.public.as_ref();
-            if b.len() != 32 {
-                return Err(CryptoError::Ssh("bad ed25519 public key".into()));
-            }
-            let mut a = [0u8; 32];
-            a.copy_from_slice(b);
-            Ok(a)
-        }
-        _ => Err(CryptoError::Ssh(
-            "only ed25519 SSH keys are supported".into(),
-        )),
-    }
-}
-
-#[cfg(feature = "ssh")]
-fn ssh_ed25519_seed(identity_content: &str, passphrase: Option<&str>) -> CryptoResult<[u8; 32]> {
-    use ssh_key::private::KeypairData;
-    let privkey = if let Some(pw) = passphrase {
-        ssh_key::PrivateKey::from_openssh(identity_content.trim())
-            .and_then(|k| k.decrypt(pw))
-            .map_err(|e| CryptoError::Ssh(format!("failed to decrypt SSH identity: {e}")))
-    } else {
-        ssh_key::PrivateKey::from_openssh(identity_content.trim()).map_err(|e| {
-            CryptoError::Ssh(format!(
-                "invalid/unencrypted SSH identity (passphrase needed?): {e}"
-            ))
-        })
-    }?;
-    match privkey.key_data() {
-        KeypairData::Ed25519(kp) => Ok(kp.private.to_bytes()),
-        _ => Err(CryptoError::Ssh(
-            "only ed25519 SSH keys are supported".into(),
-        )),
-    }
-}
-
-/// Convert an ed25519 public point into an X25519 public key (Edwards -> Montgomery).
-#[cfg(feature = "ssh")]
-fn ed25519_to_x25519_public(edwards: &[u8; 32]) -> CryptoResult<X25519PublicKey> {
-    use curve25519_dalek::edwards::CompressedEdwardsY;
-    use curve25519_dalek::montgomery::MontgomeryPoint;
-    let compressed = CompressedEdwardsY::from_slice(edwards)
-        .map_err(|_| CryptoError::Ssh("invalid ed25519 public point".into()))?;
-    let point = compressed
-        .decompress()
-        .ok_or_else(|| CryptoError::Ssh("invalid ed25519 public point".into()))?;
-    let mont: MontgomeryPoint = point.to_montgomery();
-    Ok(X25519PublicKey::from(mont.to_bytes()))
-}
-
-/// Derive the X25519 scalar from an ed25519 seed (SHA-512, then clamp).
-#[cfg(feature = "ssh")]
-fn ed25519_seed_to_x25519_scalar(seed: &[u8; 32]) -> [u8; 32] {
-    use sha2::{Digest, Sha512};
-    let hash = Sha512::digest(seed);
-    let mut scalar = [0u8; 32];
-    scalar.copy_from_slice(&hash[..32]);
-    // Ed25519/X25519 clamp (idempotent — dalek re-clamps on use).
-    scalar[0] &= 248;
-    scalar[31] &= 127;
-    scalar[31] |= 64;
-    scalar
-}
-
-/// Derive the AEAD key from an X25519 shared secret via HKDF-SHA256.
-#[cfg(feature = "ssh")]
-fn derive_aead_key(shared: &[u8]) -> CryptoResult<[u8; 32]> {
-    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"gitcrypt-ssh-v1");
-    let prk = salt.extract(shared);
-    let okm = prk
-        .expand(&[b"ssh-recipient-key"], hkdf::HKDF_SHA256)
-        .map_err(|_| CryptoError::Ssh("hkdf expand failed".into()))?;
-    let mut key = [0u8; 32];
-    okm.fill(&mut key)
-        .map_err(|_| CryptoError::Ssh("hkdf fill failed".into()))?;
-    Ok(key)
-}
-
-#[cfg(feature = "ssh")]
-fn aead_seal(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
-    let unbound = UnboundKey::new(&AES_256_GCM, key)
-        .map_err(|_| CryptoError::Ssh("invalid aead key".into()))?;
-    let key = LessSafeKey::new(unbound);
-    let nonce = Nonce::try_assume_unique_for_key(nonce)
-        .map_err(|_| CryptoError::Ssh("invalid nonce".into()))?;
-    let mut in_out = plaintext.to_vec();
-    key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
-        .map_err(|_| CryptoError::Ssh("encryption failed".into()))?;
-    Ok(in_out)
-}
-
-#[cfg(feature = "ssh")]
-fn aead_open(key: &[u8; 32], nonce: &[u8; NONCE_SIZE], ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
-    let unbound = UnboundKey::new(&AES_256_GCM, key)
-        .map_err(|_| CryptoError::Ssh("invalid aead key".into()))?;
-    let key = LessSafeKey::new(unbound);
-    let nonce = Nonce::try_assume_unique_for_key(nonce)
-        .map_err(|_| CryptoError::Ssh("invalid nonce".into()))?;
-    let mut in_out = ciphertext.to_vec();
-    let plain = key
-        .open_in_place(nonce, Aad::empty(), &mut in_out)
-        .map_err(|_| CryptoError::Ssh("decryption failed (wrong key or tampered)".into()))?;
-    Ok(plain.to_vec())
-}
+pub use crate::vault::{derive_recipient_name, sanitize_label, fallback_fingerprint, IdentityManager};
 
 // ---------------------------------------------------------------------------
 // Ref-backed key vault (feature = "ssh")
@@ -2257,7 +1870,7 @@ pub struct CryptoKeyAlgorithm {
     /// RSA modulus length in bits.
     pub modulus_length: Option<u32>,
     /// RSA public exponent as bytes (65537 -> `010001`).
-    pub public_exponent: Option<Uint8Array>,
+    pub public_exponent: Option<Buffer>,
 }
 
 /// Parameters of a crypto operation (`encrypt`, `decrypt`, `sign`, `verify`,
@@ -2303,6 +1916,7 @@ enum KeyMaterial {
 
 /// A Web Crypto `CryptoKey`.
 #[napi]
+#[derive(Clone)]
 pub struct CryptoKey {
     material: KeyMaterial,
     algorithm: CryptoKeyAlgorithm,
@@ -2891,7 +2505,7 @@ fn fill_derived(alg: &mut CryptoKeyAlgorithm, material: &KeyMaterial) {
                 }
             } else if let Some(rsa) = p.rsa() {
                 alg.modulus_length = Some(p.bits());
-                alg.public_exponent = Some(Uint8Array::new(rsa.e().to_vec()));
+                alg.public_exponent = Some(Buffer::from(rsa.e().to_vec()));
             }
             if alg.hash.is_none()
                 && matches!(
@@ -3712,14 +3326,14 @@ impl CryptoKey {
 
     /// The public half of an asymmetric key pair, else `undefined`.
     #[napi(getter, js_name = "publicKey")]
-    pub fn get_public_key_prop(&self) -> Option<&CryptoKey> {
-        self.public_key.as_deref()
+    pub fn get_public_key_prop(&self) -> Option<CryptoKey> {
+        self.public_key.as_deref().cloned()
     }
 
     /// The private half of an asymmetric key pair, else `undefined`.
     #[napi(getter, js_name = "privateKey")]
-    pub fn get_private_key_prop(&self) -> Option<&CryptoKey> {
-        self.private_key.as_deref()
+    pub fn get_private_key_prop(&self) -> Option<CryptoKey> {
+        self.private_key.as_deref().cloned()
     }
 
     fn check_usage(&self, usage: &str) -> Result<()> {
@@ -3739,7 +3353,7 @@ impl CryptoKey {
     #[napi]
     pub fn import_key(
         format: String,
-        key_data: Either<Uint8Array, serde_json::Value>,
+        key_data: Either<Uint8Array, String>,
         algorithm: Either<String, CryptoKeyAlgorithm>,
         extractable: bool,
         usages: Vec<String>,
@@ -3800,8 +3414,12 @@ impl CryptoKey {
                 (KeyMaterial::Public(spki_decode(&bytes)?), "public")
             }
             "jwk" => match &key_data {
-                Either::B(v) => return jwk_decode(v, alg, extractable, usages),
-                Either::A(_) => return Err(bad("jwk key material must be a JWK object")),
+                Either::B(s) => {
+                    let v: serde_json::Value =
+                        serde_json::from_str(s).map_err(|e| bad(e.to_string()))?;
+                    return jwk_decode(&v, alg, extractable, usages);
+                }
+                Either::A(_) => return Err(bad("jwk key material must be a JWK string")),
             },
             other => return Err(bad(format!("unsupported key format: {other}"))),
         };
@@ -4565,15 +4183,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn deterministic_key(byte: u8) -> CryptoKey {
-        CryptoKey::from_bytes(&vec![byte; KEY_SIZE]).unwrap()
+    fn deterministic_key(byte: u8) -> SymmetricCryptoKey {
+        SymmetricCryptoKey::from_bytes(&vec![byte; KEY_SIZE]).unwrap()
     }
 
-    // ---- CryptoKey ----
+    // ---- SymmetricCryptoKey ----
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let key = CryptoKey::generate();
+        let key = SymmetricCryptoKey::generate_random();
         let plaintext = b"Hello, World!";
         let ciphertext = key.encrypt(plaintext).unwrap();
         assert_ne!(plaintext.as_slice(), &ciphertext[..]);
@@ -4583,18 +4201,18 @@ mod tests {
 
     #[test]
     fn encrypt_is_randomized_and_detected() {
-        let key = CryptoKey::generate();
+        let key = SymmetricCryptoKey::generate_random();
         let c1 = key.encrypt(b"same").unwrap();
         let c2 = key.encrypt(b"same").unwrap();
         assert_ne!(c1, c2, "fresh nonce per call");
-        assert!(CryptoKey::is_encrypted(&c1));
-        assert!(!CryptoKey::is_encrypted(b"plain"));
+        assert!(SymmetricCryptoKey::is_encrypted(&c1));
+        assert!(!SymmetricCryptoKey::is_encrypted(b"plain"));
     }
 
     #[test]
     fn wrong_key_fails_and_tamper_detected() {
-        let key1 = CryptoKey::generate();
-        let key2 = CryptoKey::generate();
+        let key1 = SymmetricCryptoKey::generate_random();
+        let key2 = SymmetricCryptoKey::generate_random();
         let ct = key1.encrypt(b"secret").unwrap();
         assert!(key2.decrypt(&ct).is_err());
 
@@ -4606,11 +4224,11 @@ mod tests {
 
     #[test]
     fn empty_and_invalid_format() {
-        let key = CryptoKey::generate();
+        let key = SymmetricCryptoKey::generate_random();
         let ct = key.encrypt(b"").unwrap();
         assert_eq!(key.decrypt(&ct).unwrap(), b"".to_vec());
         assert!(key.decrypt(&[1, 2, 3]).is_err());
-        assert!(CryptoKey::from_bytes(&[0u8; KEY_SIZE - 1]).is_err());
+        assert!(SymmetricCryptoKey::from_bytes(&[0u8; KEY_SIZE - 1]).is_err());
     }
 
     // ---- KeyManager ----
@@ -4629,9 +4247,7 @@ mod tests {
         let loaded = km.load_key().unwrap();
         assert_eq!(key.as_bytes(), loaded.as_bytes());
         assert_eq!(
-            km.
-            
-            (),
+            km.default_key_path(),
             temp.path().join("crypt").join("keys").join("default")
         );
     }
@@ -4668,9 +4284,7 @@ mod tests {
         let km = KeyManager::new(temp.path());
         km.init_dirs().unwrap();
         km.generate_key().unwrap();
-        let mode = std::fs::metadata(km.
-            
-            ())
+        let mode = std::fs::metadata(km.default_key_path())
             .unwrap()
             .permissions()
             .mode();
@@ -4715,24 +4329,19 @@ mod tests {
     #[cfg(feature = "ssh")]
     #[test]
     fn ring_manager_ssh_roundtrip() {
-        use ring::signature::{Ed25519KeyPair, KeyPair as _};
-
-        // Generate a valid ed25519 keypair from a random seed.
         let mut seed = [0u8; 32];
-        SystemRandom::new().fill(&mut seed).unwrap();
-        let kp = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
-        let public: [u8; 32] = kp.public_key().as_ref().try_into().unwrap();
+        rand::rng().fill_bytes(&mut seed);
+        let kp = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public = kp.verifying_key().to_bytes();
 
-        // Build the ssh-ed25519 public-key string.
         let mut pubblob = Vec::new();
         ssh_string(&mut pubblob, b"ssh-ed25519");
         ssh_string(&mut pubblob, &public);
         let pub_string = format!("ssh-ed25519 {}", b64_encode(&pubblob));
 
-        // Build an unencrypted OpenSSH private-key PEM for the same keypair.
         let pem = build_openssh_ed25519_pem(&seed, &public);
 
-        let repo_key = CryptoKey::generate();
+        let repo_key = SymmetricCryptoKey::generate_random();
         let enc = IdentityManager::encrypt_key_for_ssh_recipient(&repo_key, &pub_string).unwrap();
         let dec = IdentityManager::decrypt_key_with_ssh_identity(&enc, &pem, None).unwrap();
         assert_eq!(dec.as_bytes(), repo_key.as_bytes());
@@ -4741,17 +4350,14 @@ mod tests {
     #[cfg(feature = "ssh")]
     #[test]
     fn ssh_identity_sign_verify() {
-        use ring::signature::{Ed25519KeyPair, KeyPair as _};
         let mut seed = [0u8; 32];
-        SystemRandom::new().fill(&mut seed).unwrap();
-        let kp = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
-        let public: [u8; 32] = kp.public_key().as_ref().try_into().unwrap();
+        rand::rng().fill_bytes(&mut seed);
+        let kp = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public = kp.verifying_key().to_bytes();
         let pem = build_openssh_ed25519_pem(&seed, &public);
 
         let id = SshIdentity::from_private_key(pem, None).unwrap();
         let data = b"sign me".to_vec();
-        // Sign twice: Ed25519 signatures are deterministic for a given key+message, so both
-        // signatures are identical and each `verify` call can take ownership of its own.
         let sig = id.sign(Buffer::from(data.clone())).unwrap();
         assert!(id.verify(Buffer::from(data.clone()), sig).unwrap());
         let sig2 = id.sign(Buffer::from(data.clone())).unwrap();

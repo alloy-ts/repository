@@ -5,8 +5,8 @@ mod branch;
 mod commit;
 mod commit_graph;
 mod config;
-#[cfg(feature = "crypto")]
-mod crypto;
+pub mod crypto;
+pub mod vault;
 mod diff;
 mod dirwalk;
 mod entry;
