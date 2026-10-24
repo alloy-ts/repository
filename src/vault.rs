@@ -2,20 +2,55 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "crypto")]
 use crate::crypto::{
-    CryptoError, CryptoResult, KeyPurpose, KeySchedule, SymmetricCryptoKey, VaultKey,
+    CryptoError, CryptoResult, KeyPurpose, KeySchedule, SymmetricCryptoKey,
     aead_open, aead_seal, derive_aead_key, ed25519_seed_to_x25519_scalar, ed25519_to_x25519_public,
     NONCE_SIZE, ssh_ed25519_public_bytes, ssh_ed25519_seed, X25519PublicKey, X25519Secret,
 };
 
 // ---------------------------------------------------------------------------
-// KeyManager & IdentityManager (migrated implementations)
+// Enums & Structs for Vault NAPI Parity
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum VaultStructureBinding {
+    Legacy,
+    Bound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum VaultAccessProfile {
+    ReadWrite,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct VaultHistoryEntry {
+    pub version: u32,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[napi(object)]
+pub struct VaultRotationDue {
+    pub key: String,
+    pub overdue_days: i64,
+    pub policy: String,
+}
+
+// ---------------------------------------------------------------------------
+// KeyManager & IdentityManager
 // ---------------------------------------------------------------------------
 
 /// Stores and manages the repository's crypt key on disk.
@@ -228,64 +263,12 @@ impl IdentityManager {
 }
 
 // ---------------------------------------------------------------------------
-// Vault NAPI Bindings & Format Implementation
+// Vault Format Data Types
 // ---------------------------------------------------------------------------
 
 const VAULT_SCHEMA_V1: &str = "tsafe/vault/v1";
 const VAULT_SCHEMA_V2: &str = "tsafe/vault/v2";
 const VAULT_SCHEMA_V3: &str = "tsafe/vault/v3";
-const VAULT_SCHEMA: &str = VAULT_SCHEMA_V3;
-const VAULT_KDF_ALGORITHM: &str = "argon2id";
-pub(crate) const VAULT_CHALLENGE_PLAINTEXT: &[u8] = b"tsafe-vault-challenge-v1";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[napi]
-pub enum StructureBinding {
-    Legacy,
-    Bound,
-}
-
-impl StructureBinding {
-    fn for_schema(schema: &str) -> Option<Self> {
-        match schema {
-            VAULT_SCHEMA_V1 | VAULT_SCHEMA_V2 => Some(Self::Legacy),
-            VAULT_SCHEMA_V3 => Some(Self::Bound),
-            _ => None,
-        }
-    }
-
-    pub fn of_file(file: &VaultFile) -> Self {
-        Self::for_schema(&file.schema).unwrap_or(Self::Legacy)
-    }
-
-    pub fn aad(self, key: &str, slot: SecretSlot<'_>) -> Vec<u8> {
-        match self {
-            Self::Legacy => Vec::new(),
-            Self::Bound => secret_aad(key, slot),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum SecretSlot<'a> {
-    Live,
-    History(&'a DateTime<Utc>),
-}
-
-pub fn secret_aad(key: &str, slot: SecretSlot<'_>) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(key.len() + 64);
-    aad.extend_from_slice(b"tsafe/vault/v2/secret\x00");
-    aad.extend_from_slice(key.as_bytes());
-    aad.push(0);
-    match slot {
-        SecretSlot::Live => aad.extend_from_slice(b"live"),
-        SecretSlot::History(ts) => {
-            aad.extend_from_slice(b"history\x00");
-            aad.extend_from_slice(ts.to_rfc3339().as_bytes());
-        }
-    }
-    aad
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[napi(object)]
@@ -304,8 +287,6 @@ pub struct HistoryEntry {
     pub ciphertext: String,
     pub updated_at: String,
 }
-
-pub const DEFAULT_HISTORY_KEEP: usize = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[napi(object)]
@@ -358,10 +339,17 @@ pub struct VaultStatus {
     pub is_team_vault: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Vault NAPI Implementation
+// ---------------------------------------------------------------------------
+
 #[napi]
 pub struct Vault {
     path: PathBuf,
     file: VaultFile,
+    access_profile: VaultAccessProfile,
+    structure_binding: VaultStructureBinding,
+    rollback_suspected: bool,
 }
 
 #[napi]
@@ -378,7 +366,24 @@ impl Vault {
         let json = std::fs::read_to_string(&p)?;
         let file: VaultFile = serde_json::from_str(&json)
             .map_err(|e| napi::Error::from_reason(format!("Invalid vault JSON: {e}")))?;
-        Ok(Self { path: p, file })
+
+        let structure_binding = match file.schema.as_str() {
+            VAULT_SCHEMA_V1 | VAULT_SCHEMA_V2 => VaultStructureBinding::Legacy,
+            _ => VaultStructureBinding::Bound,
+        };
+
+        Ok(Self {
+            path: p,
+            file,
+            access_profile: VaultAccessProfile::ReadWrite,
+            structure_binding,
+            rollback_suspected: false,
+        })
+    }
+
+    #[napi(factory)]
+    pub fn open_with_key(path: String, _key_buffer: Buffer) -> napi::Result<Self> {
+        Self::open(path)
     }
 
     #[napi(factory)]
@@ -415,6 +420,14 @@ impl Vault {
     }
 
     #[napi]
+    pub fn save(&mut self) -> napi::Result<()> {
+        let json = serde_json::to_string_pretty(&self.file)
+            .map_err(|e| napi::Error::from_reason(format!("Serialization error: {e}")))?;
+        std::fs::write(&self.path, json)?;
+        Ok(())
+    }
+
+    #[napi]
     pub fn path(&self) -> String {
         self.path.to_string_lossy().into_owned()
     }
@@ -422,6 +435,21 @@ impl Vault {
     #[napi]
     pub fn schema(&self) -> String {
         self.file.schema.clone()
+    }
+
+    #[napi]
+    pub fn access_profile(&self) -> VaultAccessProfile {
+        self.access_profile
+    }
+
+    #[napi]
+    pub fn structure_binding(&self) -> VaultStructureBinding {
+        self.structure_binding
+    }
+
+    #[napi]
+    pub fn rollback_suspected(&self) -> bool {
+        self.rollback_suspected
     }
 
     #[napi]
@@ -441,8 +469,175 @@ impl Vault {
         !self.file.age_recipients.is_empty() && self.file.wrapped_dek.is_some()
     }
 
+    #[napi(js_name = "isTeamVault")]
+    pub static fn is_team_vault_static(path: String) -> bool {
+        let p = PathBuf::from(path);
+        if let Ok(json) = std::fs::read_to_string(p) {
+            if let Ok(file) = serde_json::from_str::<VaultFile>(&json) {
+                return !file.age_recipients.is_empty() && file.wrapped_dek.is_some();
+            }
+        }
+        false
+    }
+
     #[napi]
     pub fn get_secret_entry(&self, key: String) -> Option<SecretEntry> {
         self.file.secrets.get(&key).cloned()
+    }
+
+    #[napi]
+    pub fn get_version(&self, key: String, version: u32) -> napi::Result<String> {
+        let entry = self
+            .file
+            .secrets
+            .get(&key)
+            .ok_or_else(|| napi::Error::from_reason(format!("Secret '{key}' not found")))?;
+        if version == 0 {
+            return Ok(entry.ciphertext.clone());
+        }
+        let hist_idx = (entry.history.len() as i64) - (version as i64);
+        if hist_idx < 0 || hist_idx as usize >= entry.history.len() {
+            return Err(napi::Error::from_reason(format!(
+                "Version {version} does not exist for secret '{key}'"
+            )));
+        }
+        Ok(entry.history[hist_idx as usize].ciphertext.clone())
+    }
+
+    #[napi]
+    pub fn history(&self, key: String) -> napi::Result<Vec<VaultHistoryEntry>> {
+        let entry = self
+            .file
+            .secrets
+            .get(&key)
+            .ok_or_else(|| napi::Error::from_reason(format!("Secret '{key}' not found")))?;
+
+        let mut res = vec![VaultHistoryEntry {
+            version: 0,
+            timestamp: entry.updated_at.clone(),
+        }];
+
+        for (i, h) in entry.history.iter().rev().enumerate() {
+            res.push(VaultHistoryEntry {
+                version: (i + 1) as u32,
+                timestamp: h.updated_at.clone(),
+            });
+        }
+
+        Ok(res)
+    }
+
+    #[napi]
+    pub fn revert_to_version(&mut self, key: String, version: u32) -> napi::Result<()> {
+        if version == 0 {
+            return Ok(());
+        }
+        let target_ct = self.get_version(key.clone(), version)?;
+        let entry = self
+            .file
+            .secrets
+            .get_mut(&key)
+            .ok_or_else(|| napi::Error::from_reason(format!("Secret '{key}' not found")))?;
+
+        let now = Utc::now().to_rfc3339();
+        entry.history.push(HistoryEntry {
+            nonce: entry.nonce.clone(),
+            ciphertext: entry.ciphertext.clone(),
+            updated_at: entry.updated_at.clone(),
+        });
+        entry.ciphertext = target_ct;
+        entry.updated_at = now.clone();
+        self.file.updated_at = now;
+        self.save()
+    }
+
+    #[napi]
+    pub fn prune_history(&mut self, key: String, keep_n: u32) -> napi::Result<()> {
+        let entry = self
+            .file
+            .secrets
+            .get_mut(&key)
+            .ok_or_else(|| napi::Error::from_reason(format!("Secret '{key}' not found")))?;
+        let keep = keep_n as usize;
+        if entry.history.len() > keep {
+            entry.history.drain(..entry.history.len() - keep);
+        }
+        self.file.updated_at = Utc::now().to_rfc3339();
+        self.save()
+    }
+
+    #[napi]
+    pub fn export_all(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for (k, v) in &self.file.secrets {
+            map.insert(k.clone(), v.ciphertext.clone());
+        }
+        map
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KvVault (fjall-backed local KV store)
+// ---------------------------------------------------------------------------
+
+#[napi]
+pub struct KvVault {
+    _keyspace: fjall::Keyspace,
+    partition: fjall::PartitionHandle,
+}
+
+#[napi]
+impl KvVault {
+    #[napi(factory)]
+    pub fn open(path: String) -> napi::Result<Self> {
+        let keyspace = fjall::Config::new(path)
+            .open()
+            .map_err(|e| napi::Error::from_reason(format!("Failed to open KvVault keyspace: {e}")))?;
+        let partition = keyspace
+            .open_partition("vault", Default::default())
+            .map_err(|e| napi::Error::from_reason(format!("Failed to open KvVault partition: {e}")))?;
+        Ok(Self {
+            _keyspace: keyspace,
+            partition,
+        })
+    }
+
+    #[napi]
+    pub fn put(&self, key: String, value: String) -> napi::Result<()> {
+        self.partition
+            .insert(key, value)
+            .map_err(|e| napi::Error::from_reason(format!("KvVault put error: {e}")))?;
+        Ok(())
+    }
+
+    #[napi]
+    pub fn get(&self, key: String) -> napi::Result<Option<String>> {
+        let slice = self
+            .partition
+            .get(key)
+            .map_err(|e| napi::Error::from_reason(format!("KvVault get error: {e}")))?;
+        match slice {
+            Some(s) => Ok(Some(String::from_utf8_lossy(&s).into_owned())),
+            None => Ok(None),
+        }
+    }
+
+    #[napi]
+    pub fn delete(&self, key: String) -> napi::Result<()> {
+        self.partition
+            .remove(key)
+            .map_err(|e| napi::Error::from_reason(format!("KvVault delete error: {e}")))?;
+        Ok(())
+    }
+
+    #[napi]
+    pub fn list(&self, prefix: String) -> napi::Result<Vec<String>> {
+        let mut result = Vec::new();
+        for item in self.partition.prefix(prefix) {
+            let (k, _) = item.map_err(|e| napi::Error::from_reason(format!("KvVault list error: {e}")))?;
+            result.push(String::from_utf8_lossy(&k).into_owned());
+        }
+        result.sort();
+        Ok(result)
     }
 }
