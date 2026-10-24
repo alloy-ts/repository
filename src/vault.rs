@@ -75,6 +75,36 @@ impl RbacProfile {
     }
 }
 
+#[napi(string_enum)]
+pub enum VaultAccessProfile {
+    ReadWrite,
+    ReadOnly,
+}
+
+impl From<RbacProfile> for VaultAccessProfile {
+    fn from(p: RbacProfile) -> Self {
+        match p {
+            RbacProfile::ReadWrite => VaultAccessProfile::ReadWrite,
+            RbacProfile::ReadOnly => VaultAccessProfile::ReadOnly,
+        }
+    }
+}
+
+#[napi(string_enum)]
+pub enum VaultStructureBinding {
+    Legacy,
+    Bound,
+}
+
+impl From<StructureBinding> for VaultStructureBinding {
+    fn from(b: StructureBinding) -> Self {
+        match b {
+            StructureBinding::Legacy => VaultStructureBinding::Legacy,
+            StructureBinding::Bound => VaultStructureBinding::Bound,
+        }
+    }
+}
+
 // ── crypto submodule (self-contained) ─────────────────────────────────────────
 
 mod crypto {
@@ -2473,6 +2503,13 @@ pub struct VaultHistoryItem {
     pub updated_at: String,
 }
 
+#[napi(object)]
+pub struct VaultRotationDueItem {
+    pub key: String,
+    pub overdue_days: i64,
+    pub policy: String,
+}
+
 /// JS-facing handle to an open [`Vault`]. All methods lock internally so the
 /// JS object can be shared.
 #[napi(js_name = "Vault")]
@@ -2628,6 +2665,40 @@ impl VaultHandle {
         Ok(self.inner.lock().unwrap().path().to_string_lossy().into_owned())
     }
 
+    /// Access profile attached to this vault handle.
+    #[napi(getter)]
+    pub fn access_profile(&self) -> napi::Result<VaultAccessProfile> {
+        Ok(self.inner.lock().unwrap().access_profile().into())
+    }
+
+    /// Structure binding status of this vault.
+    #[napi(getter)]
+    pub fn structure_binding(&self) -> napi::Result<VaultStructureBinding> {
+        Ok(self.inner.lock().unwrap().structure_binding().into())
+    }
+
+    /// Explicitly save the vault to disk.
+    #[napi]
+    pub fn save(&self) -> napi::Result<()> {
+        self.inner.lock().unwrap().save()?;
+        Ok(())
+    }
+
+    /// List secrets overdue for rotation.
+    #[napi]
+    pub fn rotation_due(&self) -> napi::Result<Vec<VaultRotationDueItem>> {
+        let guard = self.inner.lock().unwrap();
+        let items = rotation_due(guard.file());
+        Ok(items
+            .into_iter()
+            .map(|(key, overdue_days, policy)| VaultRotationDueItem {
+                key,
+                overdue_days,
+                policy,
+            })
+            .collect())
+    }
+
     /// Rename a secret.
     #[napi]
     pub fn rename_key(
@@ -2654,6 +2725,110 @@ impl VaultHandle {
     #[napi]
     pub fn secret_count(&self) -> napi::Result<u32> {
         Ok(self.inner.lock().unwrap().secret_count() as u32)
+    }
+}
+
+// ── KvVault (fjall-backed key-value store) ───────────────────────────────────
+
+/// Synchronous local key-value store backed by fjall.
+pub struct KvVaultInner {
+    _keyspace: fjall::Keyspace,
+    partition: fjall::PartitionHandle,
+}
+
+impl KvVaultInner {
+    pub fn open(path: impl AsRef<Path>) -> SafeResult<Self> {
+        let keyspace = fjall::Config::new(path.as_ref())
+            .open()
+            .map_err(|e| SafeError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        let partition = keyspace
+            .open_partition("default", fjall::PartitionCreateOptions::default())
+            .map_err(|e| SafeError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        Ok(Self {
+            _keyspace: keyspace,
+            partition,
+        })
+    }
+
+    pub fn put(&self, key: &str, value: &str) -> SafeResult<()> {
+        self.partition
+            .insert(key, value)
+            .map_err(|e| SafeError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        Ok(())
+    }
+
+    pub fn get(&self, key: &str) -> SafeResult<Option<String>> {
+        let bytes = self
+            .partition
+            .get(key)
+            .map_err(|e| SafeError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        match bytes {
+            Some(slice) => {
+                let s = String::from_utf8(slice.to_vec()).map_err(|e| SafeError::InvalidVault {
+                    reason: format!("invalid UTF-8 in KvVault: {e}"),
+                })?;
+                Ok(Some(s))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn delete(&self, key: &str) -> SafeResult<()> {
+        self.partition
+            .remove(key)
+            .map_err(|e| SafeError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        Ok(())
+    }
+
+    pub fn list(&self, prefix: &str) -> SafeResult<Vec<String>> {
+        let mut keys = Vec::new();
+        let prefix_bytes = prefix.as_bytes();
+        for item in self.partition.prefix(prefix_bytes) {
+            let (k, _) = item.map_err(|e| SafeError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+            if let Ok(s) = String::from_utf8(k.to_vec()) {
+                keys.push(s);
+            }
+        }
+        keys.sort_unstable();
+        Ok(keys)
+    }
+}
+
+/// JS-facing handle for `KvVault`.
+#[napi(js_name = "KvVault")]
+pub struct KvVaultHandle {
+    inner: KvVaultInner,
+}
+
+#[napi]
+impl KvVaultHandle {
+    #[napi(factory)]
+    pub fn open(path: String) -> napi::Result<Self> {
+        let inner = KvVaultInner::open(&path)?;
+        Ok(Self { inner })
+    }
+
+    #[napi]
+    pub fn put(&self, key: String, value: String) -> napi::Result<()> {
+        self.inner.put(&key, &value)?;
+        Ok(())
+    }
+
+    #[napi]
+    pub fn get(&self, key: String) -> napi::Result<Option<String>> {
+        Ok(self.inner.get(&key)?)
+    }
+
+    #[napi]
+    pub fn delete(&self, key: String) -> napi::Result<()> {
+        self.inner.delete(&key)?;
+        Ok(())
+    }
+
+    #[napi]
+    pub fn list(&self, prefix: Option<String>) -> napi::Result<Vec<String>> {
+        let p = prefix.unwrap_or_default();
+        Ok(self.inner.list(&p)?)
     }
 }
 
