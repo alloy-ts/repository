@@ -32,3 +32,8 @@ npm run start
 ```bash
 npm run test
 ```
+
+## Documentation
+
+- [API Reference Index](docs/api/index.md)
+- [Vault & Secret Management](docs/api/vault.md)
