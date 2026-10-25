@@ -54,6 +54,7 @@ base64 = "0.22"
 hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
+gpgme = "0.11.0"
 
 [build-dependencies]
 napi-build = "2.6.0"
