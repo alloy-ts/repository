@@ -127,13 +127,15 @@ use std::process::{Command, Stdio};
 use std::io::Write as _;
 
 pub fn gpg_get_executable() -> String {
-    let mut cmd = Command::new("git");
-    cmd.args(["config", "gpg.program"]);
-    if let Ok(output) = cmd.output() {
-        if output.status.success() {
-            let prog = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !prog.is_empty() {
-                return prog;
+    gpg_get_executable_with_repo(None)
+}
+
+pub fn gpg_get_executable_with_repo(repo: Option<&gix::Repository>) -> String {
+    if let Some(r) = repo {
+        if let Ok(config) = r.config_snapshot().string("gpg.program") {
+            let prog = config.to_string();
+            if !prog.trim().is_empty() {
+                return prog.trim().to_string();
             }
         }
     }

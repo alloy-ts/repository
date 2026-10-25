@@ -1300,84 +1300,6 @@ pub fn escape_shell_arg(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
-pub fn configure_git_filters_named(key_name: Option<&str>) -> CryptoResult<()> {
-    let exe = escape_shell_arg(&our_exe_path());
-    let filter_section = match key_name {
-        Some(name) => format!("filter.git-crypt-{name}"),
-        None => "filter.git-crypt".to_string(),
-    };
-    let diff_section = match key_name {
-        Some(name) => format!("diff.git-crypt-{name}"),
-        None => "diff.git-crypt".to_string(),
-    };
-    let key_arg = key_name.map(|n| format!(" --key-name={n}")).unwrap_or_default();
-
-    let output = std::process::Command::new("git")
-        .args(["config", &format!("{filter_section}.smudge"), &format!("{exe} smudge{key_arg}")])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("Failed to set filter smudge config".into()));
-    }
-
-    std::process::Command::new("git")
-        .args(["config", &format!("{filter_section}.clean"), &format!("{exe} clean{key_arg}")])
-        .output()?;
-    std::process::Command::new("git")
-        .args(["config", &format!("{filter_section}.required"), "true"])
-        .output()?;
-    std::process::Command::new("git")
-        .args(["config", &format!("{diff_section}.textconv"), &format!("{exe} diff{key_arg}")])
-        .output()?;
-
-    Ok(())
-}
-
-pub fn deconfigure_git_filters_named(key_name: Option<&str>) -> CryptoResult<()> {
-    let attr_name = match key_name {
-        Some(name) => format!("git-crypt-{name}"),
-        None => "git-crypt".to_string(),
-    };
-
-    let _ = std::process::Command::new("git")
-        .args(["config", "--unset-all", &format!("filter.{attr_name}.smudge")])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["config", "--unset-all", &format!("filter.{attr_name}.clean")])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["config", "--unset-all", &format!("filter.{attr_name}.required")])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["config", "--unset-all", &format!("diff.{attr_name}.textconv")])
-        .output();
-
-    Ok(())
-}
-
-pub const GIT_CHECKOUT_BATCH_SIZE: usize = 100;
-
-pub fn git_checkout_batch(paths: &[String]) -> CryptoResult<bool> {
-    if paths.is_empty() {
-        return Ok(true);
-    }
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("checkout").arg("--");
-    for path in paths {
-        cmd.arg(path);
-    }
-    let output = cmd.output()?;
-    Ok(output.status.success())
-}
-
-pub fn git_checkout(paths: &[String]) -> CryptoResult<bool> {
-    for chunk in paths.chunks(GIT_CHECKOUT_BATCH_SIZE) {
-        if !git_checkout_batch(chunk)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 pub fn same_key_name(a: Option<&str>, b: Option<&str>) -> bool {
     a == b
 }
@@ -1391,130 +1313,23 @@ pub fn validate_key_name(key_name: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn get_internal_state_path() -> CryptoResult<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git rev-parse --git-dir' failed - is this a Git repository?".into()));
-    }
-    let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(format!("{git_dir}/git-crypt"))
+pub fn get_repo_state_path_from_repo(r: &gix::Repository) -> CryptoResult<PathBuf> {
+    let top = r
+        .work_dir()
+        .ok_or_else(|| CryptoError::Git("Bare repository has no workdir".into()))?;
+    let repo_state_dir = r
+        .config_snapshot()
+        .string("git-crypt.repoStateDir")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ".git-crypt".to_string());
+    Ok(top.join(repo_state_dir))
 }
 
-pub fn get_internal_keys_path() -> CryptoResult<String> {
-    let state_path = get_internal_state_path()?;
-    Ok(format!("{state_path}/keys"))
-}
-
-pub fn get_internal_key_path(key_name: Option<&str>) -> CryptoResult<String> {
-    let keys_path = get_internal_keys_path()?;
-    let name = key_name.unwrap_or("default");
-    Ok(format!("{keys_path}/{name}"))
-}
-
-pub fn get_git_config(name: &str) -> CryptoResult<String> {
-    let output = std::process::Command::new("git")
-        .args(["config", "--get", name])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git(format!("'git config' missing value for key '{name}'")));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-pub fn get_repo_state_path() -> CryptoResult<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git rev-parse --show-toplevel' failed - is this a Git repository?".into()));
-    }
-    let mut top = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if top.is_empty() {
-        return Err(CryptoError::Git("Could not determine Git working tree - is this a non-bare repo?".into()));
-    }
-    if let Ok(repo_state_dir) = get_git_config("git-crypt.repoStateDir") {
-        top.push('/');
-        top.push_str(&repo_state_dir);
-    } else {
-        top.push_str("/.git-crypt");
-    }
-    Ok(top)
-}
-
-pub fn get_repo_keys_path() -> CryptoResult<String> {
-    let repo_state = get_repo_state_path()?;
-    Ok(format!("{repo_state}/keys"))
-}
-
-pub fn get_path_to_top() -> CryptoResult<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-cdup"])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git rev-parse --show-cdup' failed - is this a Git repository?".into()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-pub fn get_file_attributes(filename: &str) -> CryptoResult<(String, String)> {
-    let output = std::process::Command::new("git")
-        .args(["check-attr", "filter", "diff", "--", filename])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git check-attr' failed - is this a Git repository?".into()));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut filter_attr = String::new();
-    let mut diff_attr = String::new();
-
-    for line in stdout.lines() {
-        if let Some(val_pos) = line.rfind(": ") {
-            let attr_val = &line[val_pos + 2..];
-            if let Some(name_pos) = line[..val_pos].rfind(": ") {
-                let attr_name = &line[name_pos + 2..val_pos];
-                if attr_val != "unspecified" && attr_val != "unset" && attr_val != "set" {
-                    if attr_name == "filter" {
-                        filter_attr = attr_val.to_string();
-                    } else if attr_name == "diff" {
-                        diff_attr = attr_val.to_string();
-                    }
-                }
-            }
-        }
-    }
-
-    Ok((filter_attr, diff_attr))
-}
-
-pub fn check_if_blob_is_encrypted(object_id: &str) -> CryptoResult<bool> {
-    let output = std::process::Command::new("git")
-        .args(["cat-file", "blob", object_id])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git cat-file' failed - is this a Git repository?".into()));
-    }
-    Ok(SymmetricCryptoKey::is_encrypted(&output.stdout))
-}
-
-pub fn check_if_file_is_encrypted(filename: &str) -> CryptoResult<bool> {
-    let output = std::process::Command::new("git")
-        .args(["ls-files", "-sz", "--", filename])
-        .output()?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git ls-files' failed - is this a Git repository?".into()));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim().is_empty() {
-        return Ok(false);
-    }
-    let parts: Vec<&str> = stdout.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let object_id = parts[1];
-        return check_if_blob_is_encrypted(object_id);
-    }
-    Ok(false)
+pub fn check_if_blob_is_encrypted_id(r: &gix::Repository, id: gix::ObjectId) -> CryptoResult<bool> {
+    let blob = r
+        .find_blob(id)
+        .map_err(|e| CryptoError::Git(format!("find_blob: {e}")))?;
+    Ok(SymmetricCryptoKey::is_encrypted(&blob.data))
 }
 
 // ---------------------------------------------------------------------------
