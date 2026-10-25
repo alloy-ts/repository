@@ -13,10 +13,7 @@ use crate::repository::Repository;
 pub struct AttributeEntry {
     /// The attribute name, e.g. `text`, `eol`, `merge`.
     pub name: String,
-    /// The resolved state, rendered with `Debug`: `Set`, `Unspecified`, or `Value("…")`.
-    ///
-    /// Note: this is the raw git `State` representation. Use it as a tri-state rather than
-    /// assuming a particular string format.
+    /// The resolved state: `Set`, `Unset`, `Unspecified`, or string value e.g. `git-crypt`.
     pub value: String,
 }
 
@@ -98,7 +95,12 @@ fn resolve_attributes(platform: &gix::worktree::stack::Platform<'_>) -> Vec<Attr
         .iter()
         .map(|m| AttributeEntry {
             name: m.assignment.name.as_str().to_string(),
-            value: format!("{:?}", m.assignment.state),
+            value: match m.assignment.state {
+                gix::attrs::StateRef::Set => "Set".to_string(),
+                gix::attrs::StateRef::Unset => "Unset".to_string(),
+                gix::attrs::StateRef::Unspecified => "Unspecified".to_string(),
+                gix::attrs::StateRef::Value(v) => v.as_bstr().to_string(),
+            },
         })
         .collect()
 }
