@@ -7,6 +7,7 @@ mod commit_graph;
 mod config;
 #[cfg(feature = "crypto")]
 mod crypto;
+pub mod gpg;
 #[cfg(feature = "gpg")]
 mod pgp;
 #[cfg(feature = "gpg")]
@@ -42,5 +43,6 @@ mod repository;
 mod revision;
 mod submodule;
 mod tag;
+mod task;
 mod tree;
 mod worktree;
