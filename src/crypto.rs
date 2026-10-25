@@ -2055,30 +2055,35 @@ impl SshIdentity {
 
 /// rpgp-backed GPG recipient helpers.
 #[cfg(feature = "gpg")]
+#[napi(js_name = "GpgManager")]
 pub struct GpgManager;
 
 #[cfg(feature = "gpg")]
+#[napi]
 impl GpgManager {
     /// Encrypt a key for a GPG recipient using `crate::gpg`.
-    pub fn encrypt_key_for_recipient(key: &SymmetricCryptoKey, recipient: &str) -> CryptoResult<Vec<u8>> {
-        let fingerprints = crate::gpg::gpg_lookup_key(recipient);
+    #[napi]
+    pub fn encrypt_key_for_recipient(key: &SymmetricCryptoKey, recipient: String) -> Result<Buffer> {
+        let raw_key = key;
+        let fingerprints = crate::gpg::gpg_lookup_key(&recipient);
         if let Some(fpr) = fingerprints.first() {
             let temp_dir = std::env::temp_dir();
             let temp_file = temp_dir.join(format!("git_crypt_gpg_{}.tmp", uuid::Uuid::new_v4()));
             let temp_path = temp_file.to_string_lossy();
-            crate::gpg::gpg_encrypt_to_file(&temp_path, fpr, true, key.as_bytes())
-                .map_err(|e| CryptoError::Gpg(e))?;
+            crate::gpg::gpg_encrypt_to_file(&temp_path, fpr, true, raw_key.as_bytes())
+                .map_err(|e| napi::Error::from_reason(e))?;
             let encrypted = std::fs::read(&temp_file)?;
             let _ = std::fs::remove_file(temp_file);
-            Ok(encrypted)
+            Ok(Buffer::from(encrypted))
         } else {
             let ctx = crate::gpg::Context::new(crate::gpg::Protocol::OpenPGP);
-            let data = crate::gpg::Data::Bytes(key.as_bytes().to_vec());
+            let data = crate::gpg::Data::Bytes(raw_key.as_bytes().to_vec());
             if let Ok(recipient_key) = crate::gpg::Key::from_public_bytes(recipient.as_bytes()) {
-                ctx.encrypt(&data, &[recipient_key])
-                    .map_err(|e| CryptoError::Gpg(e))
+                let out = ctx.encrypt(&data, &[recipient_key])
+                    .map_err(|e| napi::Error::from_reason(e))?;
+                Ok(Buffer::from(out))
             } else {
-                Err(CryptoError::Gpg(
+                Err(napi::Error::from_reason(
                     format!("Failed to parse recipient key or lookup key for '{recipient}'")
                 ))
             }
