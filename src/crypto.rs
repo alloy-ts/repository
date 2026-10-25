@@ -2015,15 +2015,27 @@ pub struct GpgManager;
 impl GpgManager {
     /// Encrypt a key for a GPG recipient using `crate::gpg`.
     pub fn encrypt_key_for_recipient(key: &SymmetricCryptoKey, recipient: &str) -> CryptoResult<Vec<u8>> {
-        let ctx = crate::gpg::Context::new(crate::gpg::Protocol::OpenPGP);
-        let data = crate::gpg::Data::Bytes(key.as_bytes().to_vec());
-        if let Ok(recipient_key) = crate::gpg::Key::from_public_bytes(recipient.as_bytes()) {
-            ctx.encrypt(&data, &[recipient_key])
-                .map_err(|e| CryptoError::Gpg(e))
+        let fingerprints = crate::gpg::gpg_lookup_key(recipient);
+        if let Some(fpr) = fingerprints.first() {
+            let temp_dir = std::env::temp_dir();
+            let temp_file = temp_dir.join(format!("git_crypt_gpg_{}.tmp", uuid::Uuid::new_v4()));
+            let temp_path = temp_file.to_string_lossy();
+            crate::gpg::gpg_encrypt_to_file(&temp_path, fpr, true, key.as_bytes())
+                .map_err(|e| CryptoError::Gpg(e))?;
+            let encrypted = std::fs::read(&temp_file)?;
+            let _ = std::fs::remove_file(temp_file);
+            Ok(encrypted)
         } else {
-            Err(CryptoError::Gpg(
-                format!("Failed to parse recipient key or lookup key for '{recipient}'")
-            ))
+            let ctx = crate::gpg::Context::new(crate::gpg::Protocol::OpenPGP);
+            let data = crate::gpg::Data::Bytes(key.as_bytes().to_vec());
+            if let Ok(recipient_key) = crate::gpg::Key::from_public_bytes(recipient.as_bytes()) {
+                ctx.encrypt(&data, &[recipient_key])
+                    .map_err(|e| CryptoError::Gpg(e))
+            } else {
+                Err(CryptoError::Gpg(
+                    format!("Failed to parse recipient key or lookup key for '{recipient}'")
+                ))
+            }
         }
     }
 }
