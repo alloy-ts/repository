@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -53,7 +53,6 @@ pub enum CryptoError {
     #[error("ssh key error: {0}")]
     Ssh(String),
 
-    #[cfg(feature = "gpg")]
     #[error("gpg error: {0}")]
     Gpg(String),
 
@@ -107,8 +106,9 @@ impl SymmetricCryptoKey {
     /// Generate a new random key from the OS CSPRNG.
     #[napi(factory)]
     pub fn generate_random() -> Self {
+        use rand::RngCore as _;
         let mut key = [0u8; KEY_SIZE];
-        rand::rng().fill_bytes(&mut key);
+        rand::thread_rng().fill_bytes(&mut key);
         Self { key }
     }
 
@@ -130,8 +130,9 @@ impl SymmetricCryptoKey {
 
     /// Encrypt `plaintext` into `MAGIC_HEADER || nonce || ciphertext+tag` (ChaCha20-Poly1305).
     pub fn encrypt(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
+        use rand::RngCore as _;
         let mut nonce_bytes = [0u8; NONCE_SIZE];
-        rand::rng().fill_bytes(&mut nonce_bytes);
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
         let cipher = ChaCha20Poly1305::new(Key::<ChaCha20Poly1305>::from_slice(&self.key));
         let ciphertext = cipher
@@ -624,6 +625,7 @@ impl Signature {
             .map(|encoded| encoded.to_string())
             .map_err(|e| napi::Error::from_reason(format!("build multisig: {e}")))
     }
+}
 }
 
 /// A crypt handle bound to an open repository. Obtain via `Repository::crypt()`.
@@ -2021,6 +2023,10 @@ impl GpgManager {
         ))
     }
 }
+
+#[cfg(feature = "openssl")]
+mod legacy_webcrypto_key {
+    use super::*;
 
 // `CryptoKey` is a *stateful* class rather than a plain data object: it holds
 // either raw symmetric key material or an OpenSSL key handle, and it backs the
@@ -4383,7 +4389,6 @@ impl SignatureValue {
     }
 }
 // ---------------------------------------------------------------------------
-
 }
 
 #[cfg(all(test, feature = "openssl"))]
@@ -4654,3 +4659,337 @@ mod tests {
         format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{b64}\n-----END OPENSSH PRIVATE KEY-----")
     }
 }
+
+// ---------------------------------------------------------------------------
+// Git filter and path configuration functions
+// ---------------------------------------------------------------------------
+
+pub fn configure_git_filters(key_name: Option<&str>) -> CryptoResult<()> {
+    let exe_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "git-crypt".to_string());
+    let escaped_path = format!("\"{exe_path}\"");
+
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    let config_path = repo.git_dir().join("config");
+    let mut config = if config_path.exists() {
+        gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
+            .map_err(|e| CryptoError::Git(e.to_string()))?
+    } else {
+        gix::config::File::new(gix::config::file::Metadata::from(gix::config::Source::Local))
+    };
+
+    let attr_name = attribute_name(key_name);
+
+    let smudge_cmd = match key_name {
+        Some(k) => format!("{escaped_path} smudge --key-name={k}"),
+        None => format!("{escaped_path} smudge"),
+    };
+    let clean_cmd = match key_name {
+        Some(k) => format!("{escaped_path} clean --key-name={k}"),
+        None => format!("{escaped_path} clean"),
+    };
+    let diff_cmd = match key_name {
+        Some(k) => format!("{escaped_path} diff --key-name={k}"),
+        None => format!("{escaped_path} diff"),
+    };
+
+    config
+        .set_raw_value(&format!("filter.{attr_name}.smudge"), &smudge_cmd)
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    config
+        .set_raw_value(&format!("filter.{attr_name}.clean"), &clean_cmd)
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    config
+        .set_raw_value(&format!("filter.{attr_name}.required"), "true")
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    config
+        .set_raw_value(&format!("diff.{attr_name}.textconv"), &diff_cmd)
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+
+    let mut file = std::fs::File::create(&config_path)?;
+    config.write_to(&mut file)?;
+    Ok(())
+}
+
+pub fn deconfigure_git_filters(key_name: Option<&str>) -> CryptoResult<()> {
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    let config_path = repo.git_dir().join("config");
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let mut config = gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+
+    let attr_name = attribute_name(key_name);
+
+    let _ = config.remove_section("filter", Some(attr_name.as_str().into()));
+    let _ = config.remove_section("diff", Some(attr_name.as_str().into()));
+
+    let mut file = std::fs::File::create(&config_path)?;
+    config.write_to(&mut file)?;
+    Ok(())
+}
+
+pub fn git_checkout_batch(paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return true;
+    }
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("checkout").arg("--");
+    for path in paths {
+        cmd.arg(path);
+    }
+    match cmd.status() {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+pub fn git_checkout(paths: &[String]) -> bool {
+    for chunk in paths.chunks(GIT_CHECKOUT_BATCH_SIZE) {
+        if !git_checkout_batch(chunk) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn validate_key_name(key_name: Option<&str>) -> std::result::Result<(), String> {
+    if let Some(name) = key_name {
+        if name.is_empty() {
+            return Err("Key name cannot be empty".to_string());
+        }
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+            return Err("Key name contains invalid characters".to_string());
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_key_name_or_throw(key_name: Option<&str>) -> CryptoResult<()> {
+    validate_key_name(key_name).map_err(CryptoError::Crypto)
+}
+
+pub fn get_git_config(name: &str) -> CryptoResult<String> {
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    let val = repo
+        .config_snapshot()
+        .string(name)
+        .ok_or_else(|| CryptoError::Git(format!("'git config' missing value for key '{name}'")))?;
+    Ok(val.to_string())
+}
+
+pub fn get_internal_state_path() -> CryptoResult<PathBuf> {
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    Ok(repo.git_dir().join("git-crypt"))
+}
+
+pub fn get_internal_keys_path() -> CryptoResult<PathBuf> {
+    Ok(get_internal_state_path()?.join("keys"))
+}
+
+pub fn get_internal_key_path(key_name: Option<&str>) -> CryptoResult<PathBuf> {
+    let keys_dir = get_internal_keys_path()?;
+    let name = key_name.unwrap_or("default");
+    Ok(keys_dir.join(name))
+}
+
+pub fn get_repo_state_path() -> CryptoResult<PathBuf> {
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    let top = repo
+        .workdir()
+        .ok_or_else(|| CryptoError::Git("Could not determine Git working tree".to_string()))?;
+
+    if let Ok(rel) = get_git_config("git-crypt.repoStateDir") {
+        Ok(top.join(rel))
+    } else {
+        Ok(top.join(".git-crypt"))
+    }
+}
+
+pub fn get_repo_keys_path() -> CryptoResult<PathBuf> {
+    Ok(get_repo_state_path()?.join("keys"))
+}
+
+pub fn get_path_to_top() -> CryptoResult<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-cdup"])
+        .output()
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    if !output.status.success() {
+        return Err(CryptoError::Git("'git rev-parse --show-cdup' failed".to_string()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn get_git_status() -> CryptoResult<String> {
+    let output = std::process::Command::new("git")
+        .args(["status", "-uno", "--porcelain"])
+        .output()
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    if !output.status.success() {
+        return Err(CryptoError::Git("'git status' failed".to_string()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+pub fn get_file_attributes(filename: &str) -> CryptoResult<(String, String)> {
+    let output = std::process::Command::new("git")
+        .args(["check-attr", "filter", "diff", "--", filename])
+        .output()
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    if !output.status.success() {
+        return Err(CryptoError::Git("'git check-attr' failed".to_string()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut filter_attr = String::new();
+    let mut diff_attr = String::new();
+
+    for line in stdout.lines() {
+        if let Some(value_pos) = line.rfind(": ") {
+            if value_pos == 0 {
+                continue;
+            }
+            if let Some(name_pos) = line[..value_pos].rfind(": ") {
+                let attr_name = &line[name_pos + 2..value_pos];
+                let attr_value = &line[value_pos + 2..];
+                if attr_value != "unspecified" && attr_value != "unset" && attr_value != "set" {
+                    if attr_name == "filter" {
+                        filter_attr = attr_value.to_string();
+                    } else if attr_name == "diff" {
+                        diff_attr = attr_value.to_string();
+                    }
+                }
+            }
+        }
+    }
+    Ok((filter_attr, diff_attr))
+}
+
+pub fn check_if_blob_is_encrypted(object_id: &str) -> CryptoResult<bool> {
+    let output = std::process::Command::new("git")
+        .args(["cat-file", "blob", object_id])
+        .output()
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    if !output.status.success() {
+        return Err(CryptoError::Git("'git cat-file' failed".to_string()));
+    }
+    Ok(SymmetricCryptoKey::is_encrypted(&output.stdout))
+}
+
+pub fn check_if_file_is_encrypted(filename: &str) -> CryptoResult<bool> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "-sz", "--", filename])
+        .output()
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    if !output.status.success() {
+        return Err(CryptoError::Git("'git ls-files' failed".to_string()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    if parts.len() >= 2 {
+        let object_id = parts[1];
+        return check_if_blob_is_encrypted(object_id);
+    }
+    Ok(false)
+}
+
+pub fn attribute_name(key_name: Option<&str>) -> String {
+    match key_name {
+        Some(k) => format!("git-crypt-{k}"),
+        None => "git-crypt".to_string(),
+    }
+}
+
+pub fn get_encrypted_files(files: &mut Vec<String>, key_name: Option<&str>) -> CryptoResult<()> {
+    let target_attr = attribute_name(key_name);
+    let path_to_top = get_path_to_top().unwrap_or_default();
+    let mut args = vec!["ls-files", "-csz", "--"];
+    if !path_to_top.is_empty() {
+        args.push(&path_to_top);
+    }
+    let output = std::process::Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    if !output.status.success() {
+        return Err(CryptoError::Git("'git ls-files' failed".to_string()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for entry in stdout.split('\0') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = entry.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let filename = parts[3];
+            if let Ok((filter_attr, _)) = get_file_attributes(filename) {
+                if filter_attr == target_attr {
+                    files.push(filename.to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn decrypt_repo_key(
+    key_name: Option<&str>,
+    key_version: u32,
+    secret_keys: &[String],
+    keys_path: &Path,
+) -> CryptoResult<Vec<u8>> {
+    let key_dir_name = key_name.unwrap_or("default");
+    for seckey in secret_keys {
+        let file_path = keys_path.join(key_dir_name).join(key_version.to_string()).join(format!("{seckey}.gpg"));
+        if file_path.exists() {
+            if let Ok(decrypted) = crate::gpg::gpg_decrypt_from_file(file_path.to_string_lossy().into_owned()) {
+                return Ok(decrypted.to_vec());
+            }
+        }
+    }
+    Err(CryptoError::Gpg("Failed to decrypt repo key with GPG".to_string()))
+}
+
+pub fn encrypt_repo_key(
+    key_name: Option<&str>,
+    key_bytes: &[u8],
+    collab_keys: &[(String, bool)],
+    keys_path: &Path,
+    key_version: u32,
+) -> CryptoResult<Vec<String>> {
+    let mut new_files = Vec::new();
+    let key_dir_name = key_name.unwrap_or("default");
+
+    for (fingerprint, key_is_trusted) in collab_keys {
+        let file_path = keys_path
+            .join(key_dir_name)
+            .join(key_version.to_string())
+            .join(format!("{fingerprint}.gpg"));
+
+        if file_path.exists() {
+            continue;
+        }
+
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        crate::gpg::gpg_encrypt_to_file(
+            file_path.to_string_lossy().into_owned(),
+            fingerprint.clone(),
+            *key_is_trusted,
+            Buffer::from(key_bytes.to_vec()),
+        )
+        .map_err(|e| CryptoError::Gpg(e.to_string()))?;
+
+        new_files.push(file_path.to_string_lossy().into_owned());
+    }
+
+    Ok(new_files)
+}
+
+pub const GIT_CHECKOUT_BATCH_SIZE: usize = 500;

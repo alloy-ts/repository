@@ -7,6 +7,7 @@ mod commit_graph;
 mod config;
 #[cfg(feature = "crypto")]
 mod crypto;
+pub mod gpg;
 #[cfg(feature = "gpg")]
 mod pgp;
 #[cfg(feature = "gpg")]
