@@ -680,8 +680,8 @@ pub fn decrypt_repo_key(
     for seckey in secret_keys {
         let file_path = keys_path.join(key_dir_name).join(key_version.to_string()).join(format!("{seckey}.gpg"));
         if file_path.exists() {
-            if let Ok(decrypted) = crate::gpg::gpg_decrypt_from_file(&file_path.to_string_lossy()) {
-                return Ok(decrypted);
+            if let Ok(decrypted) = crate::gpg::gpg_decrypt_from_file(file_path.to_string_lossy().into_owned()) {
+                return Ok(decrypted.to_vec());
             }
         }
     }
@@ -713,12 +713,12 @@ pub fn encrypt_repo_key(
         }
 
         crate::gpg::gpg_encrypt_to_file(
-            &file_path.to_string_lossy(),
-            fingerprint,
+            file_path.to_string_lossy().into_owned(),
+            fingerprint.clone(),
             *key_is_trusted,
-            key_bytes,
+            Buffer::from(key_bytes.to_vec()),
         )
-        .map_err(CryptoError::Gpg)?;
+        .map_err(|e| CryptoError::Gpg(e.to_string()))?;
 
         new_files.push(file_path.to_string_lossy().into_owned());
     }

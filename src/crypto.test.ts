@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vite-plus/test";
 import { webcrypto } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   CryptoKey,
   Signature,
@@ -9,9 +12,103 @@ import {
   SignatureScheme,
   keyFormats,
   allKeyFormats,
+  SymmetricCryptoKey,
+  Repository,
+  Protocol,
+  GpgData,
+  GpgContext,
+  gpgGetExecutable,
+  gpgNthColumn,
 } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
+
+describe("SymmetricCryptoKey", () => {
+  test("generates random key and performs encrypt/decrypt", () => {
+    const key = SymmetricCryptoKey.generateRandom();
+    expect(key.asBytes().length).toBe(32);
+
+    const plaintext = Buffer.from("secret repository payload");
+    const ciphertext = key.encrypt(plaintext);
+    expect(SymmetricCryptoKey.isEncrypted(ciphertext)).toBe(true);
+    expect(SymmetricCryptoKey.isEncrypted(plaintext)).toBe(false);
+
+    const decrypted = key.decrypt(ciphertext);
+    expect(decrypted).toEqual(plaintext);
+  });
+
+  test("builds from raw bytes and validates length", () => {
+    const raw = Buffer.alloc(32, 5);
+    const key = SymmetricCryptoKey.fromBytes(raw);
+    expect(key.asBytes()).toEqual(raw);
+
+    expect(() => SymmetricCryptoKey.fromBytes(Buffer.alloc(16))).toThrow();
+  });
+});
+
+describe("Crypto (repository-bound crypt handle)", () => {
+  test("repository.crypt() exposes crypt handle and manages state", () => {
+    const base = mkdtempSync(join(tmpdir(), "crypt-repo-"));
+    try {
+      const repo = Repository.init(base, false);
+      const crypt = repo.crypt();
+
+      expect(crypt.isInitialized()).toBe(false);
+      crypt.init();
+      expect(crypt.isInitialized()).toBe(true);
+      expect(typeof crypt.keyDir()).toBe("string");
+
+      const payload = Buffer.from("classified git content");
+      const enc = crypt.encrypt(payload);
+      expect(crypt.isEncrypted(enc)).toBe(true);
+
+      const dec = crypt.decrypt(enc);
+      expect(dec).toEqual(payload);
+
+      const exportPath = join(base, "key.backup");
+      crypt.exportKey(exportPath);
+
+      crypt.lock();
+      crypt.unlock(exportPath);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("GPG / OpenPGP (rPGP NAPI bindings)", () => {
+  test("Protocol enum exposes protocol names", () => {
+    expect(Protocol.OpenPgp).toBe(0);
+    expect(Protocol.Cms).toBe(1);
+  });
+
+  test("GpgData wraps raw and armored data", () => {
+    const raw = GpgData.fromBytes(Buffer.from("hello gpg"));
+    expect(raw.bytes()).toEqual(Buffer.from("hello gpg"));
+    expect(raw.isArmored).toBe(false);
+
+    const armoredStr = "-----BEGIN PGP MESSAGE-----\n\nhello\n-----END PGP MESSAGE-----";
+    const armored = GpgData.fromArmoredString(armoredStr);
+    expect(armored.isArmored).toBe(true);
+    expect(armored.intoBytes().toString()).toBe(armoredStr);
+  });
+
+  test("GpgContext initializes with default and custom protocols", () => {
+    const ctx = new GpgContext(Protocol.OpenPgp);
+    expect(ctx.protocol).toBe(Protocol.OpenPgp);
+    ctx.setArmor(true);
+  });
+
+  test("GPG CLI helper utilities", () => {
+    const exe = gpgGetExecutable();
+    expect(typeof exe).toBe("string");
+    expect(exe.length).toBeGreaterThan(0);
+
+    const line = "uid:u::::1395975462::AB97D6E3E5D8789988CA55E5F77D9E7397D05229::John Smith <jsmith@example.com>:";
+    const col = gpgNthColumn(line, 9);
+    expect(col).toBe("John Smith <jsmith@example.com>");
+  });
+});
 
 describe("SignatureBytes", () => {
   test("wraps raw bytes and exposes accessors", () => {
