@@ -2004,21 +2004,27 @@ impl SshIdentity {
 }
 
 // ---------------------------------------------------------------------------
-// GPG recipient support (feature = "gpg") — keyring lookup is a stub.
+// GPG recipient support (feature = "gpg")
 // ---------------------------------------------------------------------------
 
-/// rpgp-backed GPG recipient helpers. Keyring lookup is not yet implemented.
+/// rpgp-backed GPG recipient helpers.
 #[cfg(feature = "gpg")]
 pub struct GpgManager;
 
 #[cfg(feature = "gpg")]
 impl GpgManager {
-    /// Encrypt a key for a GPG recipient. Currently a stub: certificate/keyring lookup is
-    /// not implemented, so this returns an actionable error instead of panicking.
-    pub fn encrypt_key_for_recipient(_key: &SymmetricCryptoKey, _recipient: &str) -> CryptoResult<Vec<u8>> {
-        Err(CryptoError::Gpg(
-            "GPG recipient encryption is not yet implemented (keyring lookup pending)".into(),
-        ))
+    /// Encrypt a key for a GPG recipient using `crate::gpg`.
+    pub fn encrypt_key_for_recipient(key: &SymmetricCryptoKey, recipient: &str) -> CryptoResult<Vec<u8>> {
+        let ctx = crate::gpg::Context::new(crate::gpg::Protocol::OpenPGP);
+        let data = crate::gpg::Data::Bytes(key.as_bytes().to_vec());
+        if let Ok(recipient_key) = crate::gpg::Key::from_public_bytes(recipient.as_bytes()) {
+            ctx.encrypt(&data, &[recipient_key])
+                .map_err(|e| CryptoError::Gpg(e))
+        } else {
+            Err(CryptoError::Gpg(
+                format!("Failed to parse recipient key or lookup key for '{recipient}'")
+            ))
+        }
     }
 }
 
