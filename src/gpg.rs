@@ -132,7 +132,7 @@ pub fn gpg_get_executable() -> String {
 
 pub fn gpg_get_executable_with_repo(repo: Option<&gix::Repository>) -> String {
     if let Some(r) = repo {
-        if let Ok(config) = r.config_snapshot().string("gpg.program") {
+        if let Some(config) = r.config_snapshot().string("gpg.program") {
             let prog = config.to_string();
             if !prog.trim().is_empty() {
                 return prog.trim().to_string();

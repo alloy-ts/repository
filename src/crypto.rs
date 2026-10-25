@@ -2050,6 +2050,87 @@ impl SshIdentity {
 }
 
 // ---------------------------------------------------------------------------
+// Entire-repository encryption (git-remote-gcrypt compatibility mode)
+// ---------------------------------------------------------------------------
+
+/// Manifest data structure representing the encrypted state of an entire repository.
+#[napi(object)]
+pub struct GcryptManifest {
+    pub repo_id: String,
+    pub refs: Vec<String>,
+    pub pack_keys: Vec<String>,
+    pub keep_list: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
+/// Handle for whole-repository encryption (`git-remote-gcrypt` specification).
+#[napi(js_name = "Gcrypt")]
+pub struct Gcrypt;
+
+#[napi]
+impl Gcrypt {
+    /// Create a new anonymous commit OID tree payload for gitception stacking.
+    #[napi]
+    pub fn format_manifest(
+        repo_id: String,
+        refs: Vec<String>,
+        pack_keys: Vec<String>,
+    ) -> String {
+        let mut lines = Vec::new();
+        for r in refs {
+            lines.push(r);
+        }
+        for p in pack_keys {
+            lines.push(format!("pack {p}"));
+        }
+        lines.push(format!("repo {repo_id}"));
+        lines.push("extn comment".to_string());
+        lines.join("\n")
+    }
+
+    /// Parse an unencrypted manifest text block into a [`GcryptManifest`].
+    #[napi]
+    pub fn parse_manifest(content: String) -> GcryptManifest {
+        let mut repo_id = String::new();
+        let mut refs = Vec::new();
+        let mut pack_keys = Vec::new();
+        let mut keep_list = Vec::new();
+        let mut extensions = Vec::new();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("repo ") {
+                repo_id = line["repo ".len()..].trim().to_string();
+            } else if line.starts_with("pack ") {
+                pack_keys.push(line["pack ".len()..].trim().to_string());
+            } else if line.starts_with("keep ") {
+                keep_list.push(line["keep ".len()..].trim().to_string());
+            } else if line.starts_with("extn ") {
+                extensions.push(line["extn ".len()..].trim().to_string());
+            } else if !line.is_empty() {
+                refs.push(line.to_string());
+            }
+        }
+
+        GcryptManifest {
+            repo_id,
+            refs,
+            pack_keys,
+            keep_list,
+            extensions,
+        }
+    }
+
+    /// Generate random packfile encryption key material (63 bytes / 504 bits).
+    #[napi]
+    pub fn generate_pack_key() -> Buffer {
+        let mut bytes = [0u8; 63];
+        rand::rng().fill_bytes(&mut bytes);
+        Buffer::from(bytes.to_vec())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GPG recipient support (feature = "gpg")
 // ---------------------------------------------------------------------------
 

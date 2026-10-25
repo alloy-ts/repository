@@ -3,6 +3,7 @@ import { webcrypto } from "node:crypto";
 import {
   Repository,
   SymmetricCryptoKey,
+  Gcrypt,
   CryptoKey,
   Signature,
   MultiSignature,
@@ -540,5 +541,30 @@ describe("SymmetricCryptoKey & Crypto NAPI bindings", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Gcrypt whole-repository encryption", () => {
+  test("formatManifest and parseManifest roundtrip", () => {
+    const repoId = ":id:abcdef1234567890";
+    const refs = ["4b825dc642cb6eb9a060e54bf8d69288fbee4904 refs/heads/master"];
+    const packKeys = [":SHA256:pack123 key456"];
+
+    const formatted = Gcrypt.formatManifest(repoId, refs, packKeys);
+    expect(formatted).toContain("repo :id:abcdef1234567890");
+    expect(formatted).toContain("pack :SHA256:pack123 key456");
+
+    const parsed = Gcrypt.parseManifest(formatted);
+    expect(parsed.repoId).toBe(repoId);
+    expect(parsed.refs).toEqual(refs);
+    expect(parsed.packKeys).toEqual(packKeys);
+  });
+
+  test("generatePackKey generates 63 random bytes", () => {
+    const k1 = Gcrypt.generatePackKey();
+    const k2 = Gcrypt.generatePackKey();
+    expect(k1.length).toBe(63);
+    expect(k2.length).toBe(63);
+    expect(k1.equals(k2)).toBe(false);
   });
 });

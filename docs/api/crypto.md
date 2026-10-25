@@ -33,3 +33,11 @@ Backed by `rPGP` (`pgp` crate), the GPG subsystem exposes standard OpenPGP struc
 - **`SymmetricCryptoKey`**: ChaCha20-Poly1305 256-bit symmetric encryption/decryption (`encrypt`, `decrypt`, `is_encrypted`).
 - **`GpgManager`**: Encrypts symmetric repository keys for GPG recipients.
 - **Git Filter Helpers**: Configuration and management of `git-crypt` filters (`configure_git_filters_named`, `deconfigure_git_filters_named`, `git_checkout`, `check_if_file_is_encrypted`).
+
+## Whole-Repository Encryption (`Gcrypt`)
+
+Full-repository encryption mode compatible with `git-remote-gcrypt`:
+
+- **`Gcrypt.formatManifest(repoId, refs, packKeys)`**: Formats a raw manifest text block containing encrypted ref mapping and packfile key entries.
+- **`Gcrypt.parseManifest(content)`**: Parses raw manifest text into a `GcryptManifest` object (`repoId`, `refs`, `packKeys`, `keepList`, `extensions`).
+- **`Gcrypt.generatePackKey()`**: Generates random 63-byte packfile key material.
