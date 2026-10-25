@@ -10,7 +10,6 @@ use napi_derive::napi;
 use crate::commit::Commit;
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::Repository;
-pub use crate::task::{AddWorktreeTask, RemoveWorktreeTask, StreamRawTask, StreamTask};
 
 /// A secondary worktree descriptor.
 #[derive(Clone)]
@@ -107,6 +106,187 @@ pub struct StreamEntry {
     pub size: Option<f64>,
 }
 
+/// Worktree materialisation task running on the libuv thread pool.
+pub struct StreamTask {
+    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
+    tree_id: String,
+}
+
+impl StreamTask {
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>, tree_id: String) -> Self {
+        Self { repo, tree_id }
+    }
+}
+
+impl Task for StreamTask {
+    type Output = Vec<StreamEntry>;
+    type JsValue = Vec<StreamEntry>;
+
+    fn compute(&mut self) -> Result<Vec<StreamEntry>> {
+        let r = thread_local(&self.repo);
+        let id = parse_oid(&self.tree_id)?;
+        let (mut stream, _index) = r
+            .worktree_stream(id)
+            .map_err(|e| err("worktree_stream", e))?;
+        let mut out = Vec::new();
+        while let Some(mut entry) = stream.next_entry().map_err(|e| err("stream_entry", e))? {
+            // Capture the metadata first, then drain the entry: gix panics on the
+            // next `next_entry()` call if an entry is dropped before exhaustion.
+            let path = String::from_utf8_lossy(entry.relative_path().as_ref()).into_owned();
+            let mode = format!("{:?}", entry.mode);
+            let id = entry.id.to_string();
+            let size = entry.bytes_remaining().map(|n| n as f64);
+            std::io::copy(&mut entry, &mut std::io::sink())
+                .map_err(|e| err("stream_entry_read", e))?;
+            out.push(StreamEntry {
+                path,
+                mode,
+                id,
+                size,
+            });
+        }
+        Ok(out)
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Vec<StreamEntry>) -> Result<Vec<StreamEntry>> {
+        Ok(output)
+    }
+}
+
+/// Worktree-stream raw-bytes task running on the libuv thread pool.
+pub struct StreamRawTask {
+    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
+    tree_id: String,
+}
+
+impl StreamRawTask {
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>, tree_id: String) -> Self {
+        Self { repo, tree_id }
+    }
+}
+
+impl Task for StreamRawTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Vec<u8>> {
+        let r = thread_local(&self.repo);
+        let id = parse_oid(&self.tree_id)?;
+        let (stream, _index) = r
+            .worktree_stream(id)
+            .map_err(|e| err("worktree_stream", e))?;
+        let mut read = stream.into_read();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut read, &mut bytes).map_err(|e| err("stream_encode", e))?;
+        Ok(bytes)
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Vec<u8>) -> Result<Buffer> {
+        Ok(Buffer::from(output))
+    }
+}
+
+/// Worktree addition task running on the libuv thread pool.
+pub struct AddWorktreeTask {
+    repo: Arc<gix::ThreadSafeRepository>,
+    destination: String,
+    head_kind: WorktreeHeadKind,
+    head_name: String,
+}
+
+impl AddWorktreeTask {
+    pub fn new(
+        repo: Arc<gix::ThreadSafeRepository>,
+        destination: String,
+        head_kind: WorktreeHeadKind,
+        head_name: String,
+    ) -> Self {
+        Self {
+            repo,
+            destination,
+            head_kind,
+            head_name,
+        }
+    }
+}
+
+impl Task for AddWorktreeTask {
+    type Output = Repository;
+    type JsValue = Repository;
+
+    fn compute(&mut self) -> Result<Repository> {
+        let r = thread_local(&self.repo);
+        let head = match self.head_kind {
+            WorktreeHeadKind::Detached => {
+                gix::worktree::add::Head::Detached(parse_oid(&self.head_name)?)
+            }
+            WorktreeHeadKind::Attached => {
+                let full = if self.head_name.starts_with("refs/") {
+                    self.head_name.clone()
+                } else {
+                    format!("refs/heads/{}", self.head_name)
+                };
+                let name =
+                    gix::refs::FullName::try_from(full.as_str()).map_err(|e| err("ref_name", e))?;
+                gix::worktree::add::Head::Attached(name)
+            }
+        };
+        let (repo, _outcome) = r
+            .add_worktree(
+                self.destination.as_str(),
+                head,
+                gix::progress::Discard,
+                &AtomicBool::new(false),
+            )
+            .map_err(|e| err("add_worktree", e))?;
+        // The checkout outcome summary is not representable next to the returned
+        // repository handle (napi AsyncTask values cannot be tuples), so only
+        // the opened worktree repository is surfaced.
+        Ok(Repository {
+            inner: Arc::new(repo.into()),
+        })
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Repository) -> Result<Repository> {
+        Ok(output)
+    }
+}
+
+/// Worktree removal task running on the libuv thread pool.
+pub struct RemoveWorktreeTask {
+    repo: Arc<gix::ThreadSafeRepository>,
+    target: String,
+    force: gix::worktree::remove::Force,
+}
+
+impl RemoveWorktreeTask {
+    pub fn new(
+        repo: Arc<gix::ThreadSafeRepository>,
+        target: String,
+        force: gix::worktree::remove::Force,
+    ) -> Self {
+        Self { repo, target, force }
+    }
+}
+
+impl Task for RemoveWorktreeTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<()> {
+        let r = thread_local(&self.repo);
+        r.remove_worktree(
+            std::path::Path::new(&self.target),
+            self.force,
+            gix::progress::Discard,
+        )
+        .map_err(|e| err("remove_worktree", e))
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: ()) -> Result<()> {
+        Ok(output)
+    }
+}
 
 /// Resolve the repository handle implied by `repo`, or by the environment
 /// (`GIT_DIR` / `REPO_DIR` / current directory) when it is omitted.
