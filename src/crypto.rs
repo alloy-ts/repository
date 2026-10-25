@@ -1287,6 +1287,52 @@ pub fn diff_filter() -> CryptoResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Git filter and repository state helpers
+// ---------------------------------------------------------------------------
+
+pub fn our_exe_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "git-crypt".to_string())
+}
+
+pub fn escape_shell_arg(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+pub fn same_key_name(a: Option<&str>, b: Option<&str>) -> bool {
+    a == b
+}
+
+pub fn validate_key_name(key_name: Option<&str>) -> Result<(), String> {
+    if let Some(name) = key_name {
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("Invalid key name: '{name}'"));
+        }
+    }
+    Ok(())
+}
+
+pub fn get_repo_state_path_from_repo(r: &gix::Repository) -> CryptoResult<PathBuf> {
+    let top = r
+        .work_dir()
+        .ok_or_else(|| CryptoError::Git("Bare repository has no workdir".into()))?;
+    let repo_state_dir = r
+        .config_snapshot()
+        .string("git-crypt.repoStateDir")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ".git-crypt".to_string());
+    Ok(top.join(repo_state_dir))
+}
+
+pub fn check_if_blob_is_encrypted_id(r: &gix::Repository, id: gix::ObjectId) -> CryptoResult<bool> {
+    let blob = r
+        .find_blob(id)
+        .map_err(|e| CryptoError::Git(format!("find_blob: {e}")))?;
+    Ok(SymmetricCryptoKey::is_encrypted(&blob.data))
+}
+
+// ---------------------------------------------------------------------------
 // SSH / age recipient support (feature = "ssh")
 // ---------------------------------------------------------------------------
 
@@ -2004,21 +2050,44 @@ impl SshIdentity {
 }
 
 // ---------------------------------------------------------------------------
-// GPG recipient support (feature = "gpg") — keyring lookup is a stub.
+// GPG recipient support (feature = "gpg")
 // ---------------------------------------------------------------------------
 
-/// rpgp-backed GPG recipient helpers. Keyring lookup is not yet implemented.
+/// rpgp-backed GPG recipient helpers.
 #[cfg(feature = "gpg")]
+#[napi(js_name = "GpgManager")]
 pub struct GpgManager;
 
 #[cfg(feature = "gpg")]
+#[napi]
 impl GpgManager {
-    /// Encrypt a key for a GPG recipient. Currently a stub: certificate/keyring lookup is
-    /// not implemented, so this returns an actionable error instead of panicking.
-    pub fn encrypt_key_for_recipient(_key: &SymmetricCryptoKey, _recipient: &str) -> CryptoResult<Vec<u8>> {
-        Err(CryptoError::Gpg(
-            "GPG recipient encryption is not yet implemented (keyring lookup pending)".into(),
-        ))
+    /// Encrypt a key for a GPG recipient using `crate::gpg`.
+    #[napi]
+    pub fn encrypt_key_for_recipient(key: &SymmetricCryptoKey, recipient: String) -> Result<Buffer> {
+        let raw_key = key;
+        let fingerprints = crate::gpg::gpg_lookup_key(&recipient);
+        if let Some(fpr) = fingerprints.first() {
+            let temp_dir = std::env::temp_dir();
+            let temp_file = temp_dir.join(format!("git_crypt_gpg_{}.tmp", uuid::Uuid::new_v4()));
+            let temp_path = temp_file.to_string_lossy();
+            crate::gpg::gpg_encrypt_to_file(&temp_path, fpr, true, raw_key.as_bytes())
+                .map_err(|e| napi::Error::from_reason(e))?;
+            let encrypted = std::fs::read(&temp_file)?;
+            let _ = std::fs::remove_file(temp_file);
+            Ok(Buffer::from(encrypted))
+        } else {
+            let ctx = crate::gpg::Context::new(crate::gpg::Protocol::OpenPGP);
+            let data = crate::gpg::Data::Bytes(raw_key.as_bytes().to_vec());
+            if let Ok(recipient_key) = crate::gpg::Key::from_public_bytes(recipient.as_bytes()) {
+                let out = ctx.encrypt(&data, &[recipient_key])
+                    .map_err(|e| napi::Error::from_reason(e))?;
+                Ok(Buffer::from(out))
+            } else {
+                Err(napi::Error::from_reason(
+                    format!("Failed to parse recipient key or lookup key for '{recipient}'")
+                ))
+            }
+        }
     }
 }
 

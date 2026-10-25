@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vite-plus/test";
 import { webcrypto } from "node:crypto";
 import {
+  Repository,
+  SymmetricCryptoKey,
   CryptoKey,
   Signature,
   MultiSignature,
@@ -10,6 +12,9 @@ import {
   keyFormats,
   allKeyFormats,
 } from "./main.ts";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 
 const SIG_64 = Buffer.alloc(64, 7);
 
@@ -486,5 +491,54 @@ describe("Signature (format-aware)", () => {
     expect(sig.format).toBe("spki");
     sig.setBytes(SIG_64);
     expect(sig.bytes).toEqual(SIG_64);
+  });
+});
+
+describe("SymmetricCryptoKey & Crypto NAPI bindings", () => {
+  test("SymmetricCryptoKey random generation, encrypt/decrypt", () => {
+    const key = SymmetricCryptoKey.generateRandom();
+    expect(key.asBytes().length).toBe(32);
+
+    const plaintext = Buffer.from("git-crypt test payload");
+    const encrypted = key.encrypt(plaintext);
+    expect(SymmetricCryptoKey.isEncrypted(encrypted)).toBe(true);
+
+    const decrypted = key.decrypt(encrypted);
+    expect(decrypted).toEqual(plaintext);
+  });
+
+  test("Repository.crypt() lifecycle: init, encrypt, decrypt, export/import", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-crypt-test-"));
+    try {
+      const repo = Repository.init(tmpDir, false);
+      const crypt = repo.crypt();
+
+      expect(crypt.isInitialized()).toBe(false);
+      crypt.init();
+      expect(crypt.isInitialized()).toBe(true);
+      expect(typeof crypt.keyDir()).toBe("string");
+
+      const data = Buffer.from("secret file content");
+      const enc = crypt.encrypt(data);
+      expect(crypt.isEncrypted(enc)).toBe(true);
+
+      const dec = crypt.decrypt(enc);
+      expect(dec).toEqual(data);
+
+      const exportPath = path.join(tmpDir, "exported.key");
+      crypt.exportKey(exportPath);
+      expect(fs.existsSync(exportPath)).toBe(true);
+
+      const newKey = crypt.generateKey();
+      expect(newKey.asBytes().length).toBe(32);
+
+      crypt.importKey(exportPath);
+      expect(crypt.decrypt(enc)).toEqual(data);
+
+      crypt.lock();
+      crypt.unlock();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

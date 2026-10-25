@@ -11,6 +11,7 @@ mod crypto;
 mod pgp;
 #[cfg(feature = "gpg")]
 mod gcrypt;
+pub mod gpg;
 mod vault;
 mod diff;
 mod dirwalk;
