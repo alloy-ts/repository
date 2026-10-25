@@ -8,9 +8,7 @@ use napi_derive::napi;
 
 use crate::commit::Commit;
 use crate::error::{err, err_str, parse_oid, thread_local};
-use crate::error::{err, err_str, thread_local};
 use crate::repository::Repository;
-pub use crate::task::{AddWorktreeTask, RemoveWorktreeTask, StreamRawTask, StreamTask};
 
 /// A secondary worktree descriptor.
 #[derive(Clone)]
