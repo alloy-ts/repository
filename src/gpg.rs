@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_context_and_data() {
-        let mut ctx = Context::new(Protocol::OpenPGP);
+        let ctx = Context::new(Protocol::OpenPGP);
         assert_eq!(ctx.protocol(), Protocol::OpenPGP);
 
         let data = Data::Text("hello world".into());
