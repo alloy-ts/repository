@@ -44,7 +44,7 @@ sequoia-openpgp = { version = "1", optional = true, default-features = false, fe
 anyhow = { version = "1", optional = true }
 zeroize = "1.9.1"
 chacha20poly1305 = "0.11"
-rand = "0.10"
+rand = "0.8"
 argon2 = "0.5"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "process", "io-util", "sync"] }
 fjall = "3.1.12"
@@ -54,6 +54,7 @@ base64 = "0.22"
 hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
+pgp = "0.21.0"
 
 [build-dependencies]
 napi-build = "2.6.0"

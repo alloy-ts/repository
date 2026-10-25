@@ -9,9 +9,7 @@ use napi_derive::napi;
 
 use crate::commit::Commit;
 use crate::error::{err, err_str, parse_oid, thread_local};
-use crate::error::{err, err_str, thread_local};
 use crate::repository::Repository;
-pub use crate::task::{AddWorktreeTask, RemoveWorktreeTask, StreamRawTask, StreamTask};
 
 /// A secondary worktree descriptor.
 #[derive(Clone)]
@@ -114,6 +112,12 @@ pub struct StreamTask {
     tree_id: String,
 }
 
+impl StreamTask {
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>, tree_id: String) -> Self {
+        Self { repo, tree_id }
+    }
+}
+
 impl Task for StreamTask {
     type Output = Vec<StreamEntry>;
     type JsValue = Vec<StreamEntry>;
@@ -155,6 +159,12 @@ pub struct StreamRawTask {
     tree_id: String,
 }
 
+impl StreamRawTask {
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>, tree_id: String) -> Self {
+        Self { repo, tree_id }
+    }
+}
+
 impl Task for StreamRawTask {
     type Output = Vec<u8>;
     type JsValue = Buffer;
@@ -182,6 +192,22 @@ pub struct AddWorktreeTask {
     destination: String,
     head_kind: WorktreeHeadKind,
     head_name: String,
+}
+
+impl AddWorktreeTask {
+    pub fn new(
+        repo: Arc<gix::ThreadSafeRepository>,
+        destination: String,
+        head_kind: WorktreeHeadKind,
+        head_name: String,
+    ) -> Self {
+        Self {
+            repo,
+            destination,
+            head_kind,
+            head_name,
+        }
+    }
 }
 
 impl Task for AddWorktreeTask {
@@ -231,6 +257,16 @@ pub struct RemoveWorktreeTask {
     repo: Arc<gix::ThreadSafeRepository>,
     target: String,
     force: gix::worktree::remove::Force,
+}
+
+impl RemoveWorktreeTask {
+    pub fn new(
+        repo: Arc<gix::ThreadSafeRepository>,
+        target: String,
+        force: gix::worktree::remove::Force,
+    ) -> Self {
+        Self { repo, target, force }
+    }
 }
 
 impl Task for RemoveWorktreeTask {
