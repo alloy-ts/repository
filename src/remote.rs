@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::error::RepositoryResult as Result;
 
 use napi::Task;
+use napi::bindgen_prelude::AsyncTask;
 
 use napi_derive::napi;
 
 use crate::error::{err, err_str, thread_local};
-use crate::progress::{ProgressCallback, ProgressEvent};
 use crate::repository::Repository;
 
 use gix::bstr::BString;

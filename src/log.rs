@@ -380,7 +380,7 @@ impl Repository {
     #[napi]
     pub fn log(
         &self,
-        env: napi::Env,
+        _env: napi::Env,
         options: Option<LogOptions>,
     ) -> napi::Result<Vec<CommitInfo>> {
         let opts = options.unwrap_or_default();
@@ -497,7 +497,7 @@ impl Repository {
     #[napi]
     pub fn log_graph(
         &self,
-        env: napi::Env,
+        _env: napi::Env,
         options: Option<LogOptions>,
     ) -> napi::Result<Vec<GraphRow>> {
         let opts = options.unwrap_or_default();

@@ -13,12 +13,7 @@ mod config;
 mod conflict;
 #[cfg(feature = "crypto")]
 mod crypto;
-pub mod gpg;
-#[cfg(feature = "gpg")]
-mod pgp;
-#[cfg(feature = "gpg")]
-mod gcrypt;
-mod vault;
+mod describe;
 mod diff;
 mod dirwalk;
 mod entry;

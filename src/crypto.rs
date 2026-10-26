@@ -4,15 +4,15 @@ use std::sync::Arc;
 
 use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, Key, KeyInit, Nonce};
-#[cfg(feature = "openssl")]
-use multi_sig::DataView as _;
-#[cfg(feature = "openssl")]
+#[cfg(all(feature = "multi-sig", feature = "ssh"))]
 use multi_sig::CodecInfo as _;
-use napi::Result;
+#[cfg(all(feature = "multi-sig", feature = "ssh"))]
+use multi_sig::DataView as _;
 use napi::bindgen_prelude::Buffer;
-use napi::bindgen_prelude::{Either, Either6};
+#[cfg(any(feature = "multi-sig", feature = "btls"))]
+use napi::bindgen_prelude::Either;
 use napi_derive::napi;
-use rand::Rng;
+
 use thiserror::Error;
 
 #[cfg(feature = "ssh")]
@@ -21,7 +21,7 @@ use multi_codec::Codec::Ed25519Pub;
 use multi_codec::Codec::XmssSha220256Msig;
 
 use crate::error::thread_local;
-#[cfg(feature = "openssl")]
+#[cfg(all(feature = "multi-sig", feature = "ssh"))]
 use multi_sig::CodecInfo;
 
 /// Domain errors for the crypt subsystem. Converted into [`napi::Error`] at the NAPI
@@ -78,13 +78,170 @@ impl From<napi::Error> for CryptoError {
     }
 }
 
-
 /// Key size in bytes (256 bits).
 pub const KEY_SIZE: usize = 32;
 /// Nonce size in bytes (96 bits, ChaCha20-Poly1305 standard).
 pub const NONCE_SIZE: usize = 12;
 /// Magic header identifying crypt-encrypted payloads.
 const MAGIC_HEADER: &[u8] = b"GITCRYPT";
+
+/// Repository encryption mode.
+#[napi]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CryptoMode {
+    /// File-level clean/smudge filter encryption (git-crypt partial mode).
+    Filter = 0,
+    /// Entire repository packfile & manifest encryption (git-remote-gcrypt mode).
+    EntireRepo = 1,
+    /// Layered/Hybrid mode: partial file filtering (git-crypt) + entire repository encryption (gcrypt).
+    Hybrid = 2,
+}
+
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManifestRef {
+    pub object_id: String,
+    pub name: String,
+}
+
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManifestPack {
+    pub hash_type: String,
+    pub pack_id: String,
+    pub key: String,
+}
+
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManifestKeep {
+    pub hash_type: String,
+    pub pack_id: String,
+    pub count: u32,
+}
+
+/// Representation of a git-remote-gcrypt compatible repository manifest.
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoManifest {
+    pub refs: Vec<ManifestRef>,
+    pub packs: Vec<ManifestPack>,
+    pub keep: Vec<ManifestKeep>,
+    pub repo_id: String,
+    pub extensions: Vec<String>,
+}
+
+/// Serialize a RepoManifest object into standard gcrypt manifest format.
+#[napi]
+pub fn serialize_manifest(manifest: RepoManifest) -> String {
+    let mut lines = Vec::new();
+
+    // 1. Refs list: <hex40> <ref_name>
+    for r in &manifest.refs {
+        lines.push(format!("{} {}", r.object_id, r.name));
+    }
+
+    // 2. Pack list: pack :<hashtype>:<pack_id> <key>
+    for p in &manifest.packs {
+        let ht = if p.hash_type.is_empty() {
+            "SHA256"
+        } else {
+            &p.hash_type
+        };
+        lines.push(format!("pack :{ht}:{} {}", p.pack_id, p.key));
+    }
+
+    // 3. Keep list: keep :<hashtype>:<pack_id> <count>
+    for k in &manifest.keep {
+        let ht = if k.hash_type.is_empty() {
+            "SHA256"
+        } else {
+            &k.hash_type
+        };
+        lines.push(format!("keep :{ht}:{} {}", k.pack_id, k.count));
+    }
+
+    // 4. Repo ID: repo <repo_id>
+    if !manifest.repo_id.is_empty() {
+        if manifest.repo_id.starts_with("repo ") {
+            lines.push(manifest.repo_id.clone());
+        } else {
+            lines.push(format!("repo {}", manifest.repo_id));
+        }
+    }
+
+    // 5. Extensions: extn <ext>
+    for e in &manifest.extensions {
+        lines.push(format!("extn {e}"));
+    }
+
+    lines.join("\n")
+}
+
+/// Parse a manifest string in standard gcrypt format.
+#[napi]
+pub fn parse_manifest(text: String) -> napi::Result<RepoManifest> {
+    let mut manifest = RepoManifest::default();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        if parts[0] == "pack" && parts.len() >= 3 {
+            let pack_spec = parts[1];
+            let key = parts[2..].join(" ");
+            let sub: Vec<&str> = pack_spec.split(':').collect();
+            if sub.len() >= 3 {
+                manifest.packs.push(ManifestPack {
+                    hash_type: sub[1].to_string(),
+                    pack_id: sub[2].to_string(),
+                    key,
+                });
+            }
+        } else if parts[0] == "keep" && parts.len() >= 3 {
+            let keep_spec = parts[1];
+            let count: u32 = parts[2].parse().unwrap_or(1);
+            let sub: Vec<&str> = keep_spec.split(':').collect();
+            if sub.len() >= 3 {
+                manifest.keep.push(ManifestKeep {
+                    hash_type: sub[1].to_string(),
+                    pack_id: sub[2].to_string(),
+                    count,
+                });
+            }
+        } else if parts[0] == "repo" && parts.len() >= 2 {
+            manifest.repo_id = parts[1..].join(" ");
+        } else if parts[0] == "extn" && parts.len() >= 2 {
+            manifest.extensions.push(parts[1..].join(" "));
+        } else if parts.len() == 2
+            && (parts[0].len() == 40 || parts[0].len() == 64)
+            && parts[0].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            manifest.refs.push(ManifestRef {
+                object_id: parts[0].to_string(),
+                name: parts[1].to_string(),
+            });
+        }
+    }
+
+    Ok(manifest)
+}
+
+/// Result of encrypting a packfile for full repo mode.
+#[napi(object)]
+pub struct EncryptedPackResult {
+    pub pack_id: String,
+    pub hash_type: String,
+    pub pack_key: String,
+    pub encrypted_bytes: Buffer,
+}
 
 /// A symmetric ChaCha20-Poly1305 key. Exposed to JS as the `SymmetricCryptoKey` class.
 #[napi(js_name = "SymmetricCryptoKey")]
@@ -96,7 +253,7 @@ pub struct SymmetricCryptoKey {
 #[napi]
 impl SymmetricCryptoKey {
     #[napi(constructor)]
-    pub fn new(bytes: Option<&[u8]>) -> Result<Self> {
+    pub fn new(bytes: Option<&[u8]>) -> napi::Result<Self> {
         match bytes {
             Some(bytes) => Ok(Self::from_bytes(bytes)?),
             None => Ok(Self::generate_random()),
@@ -123,13 +280,19 @@ impl SymmetricCryptoKey {
         Ok(Self { key })
     }
 
-    /// Borrow the raw key bytes.
+    /// Borrow the raw key bytes in Rust.
     pub fn as_bytes(&self) -> &[u8] {
         &self.key
     }
 
+    /// Borrow the raw key bytes as a Buffer for JS.
+    #[napi(js_name = "asBytes")]
+    pub fn napi_as_bytes(&self) -> Buffer {
+        Buffer::from(self.key.to_vec())
+    }
+
     /// Encrypt `plaintext` into `MAGIC_HEADER || nonce || ciphertext+tag` (ChaCha20-Poly1305).
-    pub fn encrypt(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
+    pub fn encrypt_raw(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
         use rand::RngCore as _;
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -149,8 +312,15 @@ impl SymmetricCryptoKey {
         Ok(result)
     }
 
-    /// Decrypt a payload produced by [`SymmetricCryptoKey::encrypt`].
-    pub fn decrypt(&self, ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
+    /// Encrypt `plaintext` Buffer into `MAGIC_HEADER || nonce || ciphertext+tag` (ChaCha20-Poly1305).
+    #[napi]
+    pub fn encrypt(&self, plaintext: Buffer) -> napi::Result<Buffer> {
+        let out = self.encrypt_raw(plaintext.as_ref())?;
+        Ok(Buffer::from(out))
+    }
+
+    /// Decrypt a payload produced by [`SymmetricCryptoKey::encrypt_raw`].
+    pub fn decrypt_raw(&self, ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
         let min_size = MAGIC_HEADER.len() + NONCE_SIZE;
         if ciphertext.len() < min_size {
             return Err(CryptoError::Crypto("ciphertext too short".into()));
@@ -168,9 +338,22 @@ impl SymmetricCryptoKey {
             .map_err(|_| CryptoError::Crypto("decryption failed (wrong key or tampered)".into()))
     }
 
+    /// Decrypt a payload produced by [`SymmetricCryptoKey::encrypt`].
+    #[napi]
+    pub fn decrypt(&self, ciphertext: Buffer) -> napi::Result<Buffer> {
+        let out = self.decrypt_raw(ciphertext.as_ref())?;
+        Ok(Buffer::from(out))
+    }
+
     /// Whether `data` carries the crypt magic header.
-    pub fn is_encrypted(data: &[u8]) -> bool {
+    pub fn is_encrypted_raw(data: &[u8]) -> bool {
         data.len() >= MAGIC_HEADER.len() && &data[..MAGIC_HEADER.len()] == MAGIC_HEADER
+    }
+
+    /// Whether `data` carries the crypt magic header.
+    #[napi(js_name = "isEncrypted")]
+    pub fn is_encrypted(data: Buffer) -> bool {
+        Self::is_encrypted_raw(data.as_ref())
     }
 }
 
@@ -182,9 +365,9 @@ impl SymmetricCryptoKey {
 // module keeps resolving `KeyManager` / `IdentityManager`.
 // ---------------------------------------------------------------------------
 
-pub use crate::vault::KeyManager;
 #[cfg(feature = "ssh")]
 pub use crate::vault::IdentityManager;
+pub use crate::vault::KeyManager;
 
 /// Lowercase hex encoding, without pulling in an extra dependency.
 fn hex_lower(bytes: &[u8]) -> String {
@@ -196,436 +379,444 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-#[cfg(feature = "openssl")]
+#[cfg(all(feature = "multi-sig", feature = "ssh"))]
 mod legacy_webcrypto {
     use super::*;
 
-#[napi(js_name = "SignatureBytes")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SignatureBytes {
-    bytes: Vec<u8>,
-}
+    #[napi(js_name = "SignatureBytes")]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct SignatureBytes {
+        bytes: Vec<u8>,
+    }
 
-#[napi]
-impl SignatureBytes {
-    /// Create from raw bytes.
-    #[napi(constructor)]
-    pub fn new(bytes: Buffer) -> Self {
-        Self {
-            bytes: bytes.as_ref().to_vec(),
+    #[napi]
+    impl SignatureBytes {
+        /// Create from raw bytes.
+        #[napi(constructor)]
+        pub fn new(bytes: Buffer) -> Self {
+            Self {
+                bytes: bytes.as_ref().to_vec(),
+            }
+        }
+
+        /// The raw bytes.
+        #[napi(getter)]
+        pub fn bytes(&self) -> Buffer {
+            Buffer::from(self.bytes.clone())
+        }
+
+        /// Alias for [`SignatureBytes::bytes`].
+        #[napi]
+        pub fn as_bytes(&self) -> Buffer {
+            Buffer::from(self.bytes.clone())
+        }
+
+        /// Length in bytes.
+        #[napi(getter)]
+        pub fn length(&self) -> u32 {
+            self.bytes.len() as u32
+        }
+
+        /// Whether the signature is empty.
+        #[napi(getter)]
+        pub fn is_empty(&self) -> bool {
+            self.bytes.is_empty()
+        }
+
+        /// Lowercase hex form.
+        #[napi(getter)]
+        pub fn hex(&self) -> String {
+            hex_lower(&self.bytes)
         }
     }
 
-    /// The raw bytes.
-    #[napi(getter)]
-    pub fn bytes(&self) -> Buffer {
-        Buffer::from(self.bytes.clone())
-    }
-
-    /// Alias for [`SignatureBytes::bytes`].
+    /// A signature scheme identifier. Mirrors `multi_sig::types::SignatureScheme`.
     #[napi]
-    pub fn as_bytes(&self) -> Buffer {
-        Buffer::from(self.bytes.clone())
-    }
-
-    /// Length in bytes.
-    #[napi(getter)]
-    pub fn length(&self) -> u32 {
-        self.bytes.len() as u32
-    }
-
-    /// Whether the signature is empty.
-    #[napi(getter)]
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    /// Lowercase hex form.
-    #[napi(getter)]
-    pub fn hex(&self) -> String {
-        hex_lower(&self.bytes)
-    }
-}
-
-/// A signature scheme identifier. Mirrors `multi_sig::types::SignatureScheme`.
-#[napi]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SignatureScheme {
-    code: u32,
-    name: String,
-}
-
-#[napi]
-impl SignatureScheme {
-    /// Create from a multicodec name (e.g. `"eddsa-msig"`) or numeric codec value.
-    #[napi(factory)]
-    pub fn from_codec(codec: Either<String, u32>) -> Result<Self> {
-        let c = match codec {
-            Either::A(name) => multi_codec::Codec::try_from(name.as_str())
-                .map_err(|e| napi::Error::from_reason(format!("unknown codec '{name}': {e}")))?,
-            Either::B(code) => multi_codec::Codec::try_from(code)
-                .map_err(|e| napi::Error::from_reason(format!("unknown codec {code}: {e}")))?,
-        };
-        Ok(Self {
-            code: c.code() as u32,
-            name: c.as_str().to_string(),
-        })
-    }
-
-    /// The multicodec name, e.g. `"eddsa-msig"`.
-    #[napi(getter)]
-    pub fn name(&self) -> String {
-        self.name.clone()
-    }
-
-    /// The multicodec numeric value.
-    #[napi(getter)]
-    pub fn code(&self) -> u32 {
-        self.code
-    }
-}
-
-/// A self-describing multisignature.
-#[napi]
-#[derive(Clone)]
-pub struct MultiSignature {
-    inner: multi_sig::Multisig,
-    key_format: Option<String>,
-}
-
-#[napi]
-impl MultiSignature {
-    /// Decode a MultiSignature from its binary wire form.
-    #[napi(constructor)]
-    pub fn new(bytes: Buffer, key_format: Option<String>) -> Result<Self> {
-        multi_sig::Multisig::try_from(bytes.as_ref())
-            .map(|inner| Self { inner, key_format })
-            .map_err(|e| napi::Error::from_reason(format!("decode multisig: {e}")))
-    }
-
-    /// The key format this signature is associated with (e.g. `CryptoKey.Format.JWK`),
-    /// when supplied at construction time. Otherwise `undefined`.
-    #[napi(getter, js_name = "keyFormat")]
-    pub fn key_format(&self) -> Option<String> {
-        self.key_format.clone()
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct SignatureScheme {
+        code: u32,
+        name: String,
     }
 
     #[napi]
-    pub fn from_bytes(&self) -> Buffer {
-        Buffer::from(Vec::from(self.inner.clone()))
-    }
-
-    /// The base-encoded string form (lowercase hex, with the multibase `f` prefix) — identical to
-    /// what [`Signature::try_build_encoded`] produces.
-    #[napi]
-    pub fn from_hex(&self) -> String {
-        let encoded: multi_sig::BaseEncoded<multi_sig::Multisig> =
-            multi_sig::BaseEncoded::from(self.inner.clone());
-        encoded.to_string()
-    }
-
-    /// The signature codec name, e.g. `"eddsa-msig"`.
-    #[napi(getter)]
-    pub fn codec(&self) -> String {
-        self.inner.codec().as_str().to_string()
-    }
-
-    /// The signature codec numeric value.
-    #[napi(getter)]
-    pub fn code(&self) -> u32 {
-        self.inner.codec().code() as u32
-    }
-
-    /// The raw signature bytes.
-    #[napi]
-    pub fn signature_bytes(&self) -> Result<SignatureBytes> {
-        let data = multi_sig::ViewBuilder::new(&self.inner)
-            .data()
-            .build()
-            .map_err(|e| napi::Error::from_reason(format!("data view: {e}")))?;
-        let bytes = data
-            .sig_bytes()
-            .map_err(|e| napi::Error::from_reason(format!("sig bytes: {e}")))?;
-        Ok(SignatureBytes::new(Buffer::from(bytes)))
-    }
-
-    /// The raw signature bytes (alias of [`MultiSignature::signature_bytes`] for property access).
-    #[napi(getter)]
-    pub fn bytes(&self) -> Buffer {
-        Buffer::from(Vec::from(self.inner.clone()))
-    }
-
-    /// The in-band signed message (empty for a detached signature).
-    #[napi(getter)]
-    pub fn message(&self) -> Buffer {
-        Buffer::from(self.inner.message.clone())
-    }
-
-    /// True when the message travels in-band (combined signature).
-    #[napi(getter)]
-    pub fn is_combined(&self) -> bool {
-        !self.inner.message.is_empty()
-    }
-
-    /// The one-time leaf index consumed (XMSS stateful signatures), if present.
-    #[napi(getter)]
-    pub fn sig_index(&self) -> Option<u32> {
-        self.inner.sig_index()
-    }
-
-    /// The Merkle tree depth (Merkle-Lamport), if present.
-    #[napi(getter)]
-    pub fn depth(&self) -> Option<u8> {
-        self.inner.depth()
-    }
-}
-
-/// Resolve an `Either<String, u32>` codec argument into a `multi_codec::Codec`.
-fn resolve_codec(codec: Either<String, u32>) -> Result<multi_codec::Codec> {
-    match codec {
-        Either::A(name) => multi_codec::Codec::try_from(name.as_str())
-            .map_err(|e| napi::Error::from_reason(format!("unknown codec '{name}': {e}"))),
-        Either::B(code) => multi_codec::Codec::try_from(code)
-            .map_err(|e| napi::Error::from_reason(format!("unknown codec {code}: {e}"))),
-    }
-}
-
-#[napi]
-pub struct Signature {
-    inner: multi_sig::Builder,
-}
-
-#[napi]
-impl Signature {
-    /// Create a builder for `codec` — a multicodec name (`"eddsa-msig"`) or numeric value.
-    #[napi(constructor)]
-    pub fn new(codec: Either<String, u32>) -> Result<Self> {
-        let c = resolve_codec(codec)?;
-        Ok(Self {
-            inner: multi_sig::Builder::new(c),
-        })
-    }
-
-    /// Set the message payload (makes a combined signature).
-    #[napi]
-    pub fn with_message(&mut self, message: Buffer) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_message_bytes(&message);
-        self
-    }
-
-    /// Set the raw signature bytes.
-    #[napi]
-    pub fn with_signature(&mut self, signature: Buffer) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_signature_bytes(&signature);
-        self
-    }
-
-    /// Set the payload encoding codec (name or numeric value).
-    #[napi]
-    pub fn with_payload_encoding(&mut self, codec: Either<String, u32>) -> Result<&Self> {
-        let c = resolve_codec(codec)?;
-        self.inner = std::mem::take(&mut self.inner).with_payload_encoding(c);
-        Ok(self)
-    }
-
-    /// Set the BLS scheme type: 0=Basic, 1=MessageAugmentation, 2=ProofOfPossession.
-    #[napi]
-    pub fn with_scheme(&mut self, scheme: u32) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_scheme(scheme as u8);
-        self
-    }
-
-    /// Set the threshold value `t` (plaintext).
-    #[napi]
-    pub fn with_threshold(&mut self, threshold: u32) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_threshold(threshold as usize);
-        self
-    }
-
-    /// Set the share count `n` (plaintext).
-    #[napi]
-    pub fn with_limit(&mut self, limit: u32) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_limit(limit as usize);
-        self
-    }
-
-    /// Set the share identifier (32-byte BLS scalar).
-    #[napi]
-    pub fn with_identifier(&mut self, identifier: Buffer) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_identifier(&identifier);
-        self
-    }
-
-    /// Set the accumulated threshold data blob.
-    #[napi]
-    pub fn with_threshold_data(&mut self, data: Buffer) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_threshold_data(&data);
-        self
-    }
-
-    /// Set the XMSS one-time leaf index consumed by this signature.
-    #[napi]
-    pub fn with_sig_index(&mut self, index: u32) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_sig_index(index);
-        self
-    }
-
-    /// Set the Merkle tree depth.
-    #[napi]
-    pub fn with_depth(&mut self, depth: u32) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).with_depth(depth as u8);
-        self
-    }
-
-    /// Accumulate a threshold signature share (folded in by `try_build`).
-    #[napi]
-    pub fn add_signature_share(&mut self, share: &MultiSignature) -> &Self {
-        self.inner = std::mem::take(&mut self.inner).add_signature_share(&share.inner);
-        self
-    }
-
-    /// Set the threshold disclosure mode for a share being built.
-    ///
-    /// `mode`: 0 = Full (t/n plaintext), 1 = Partial (n plaintext, t encrypted),
-    /// 2 = FullConfidential (both encrypted). `metaKey` (32 bytes from
-    /// [`Signature::generateMetaKey`]) is required for modes 1 and 2.
-    #[napi]
-    pub fn with_disclosure(
-        &mut self,
-        mode: u32,
-        meta_key: Option<Buffer>,
-        threshold: u32,
-        limit: u32,
-    ) -> Result<&Self> {
-        let disclosure = match mode {
-            0 => multi_sig::ThresholdDisclosure::Full,
-            1 => multi_sig::ThresholdDisclosure::Partial,
-            2 => multi_sig::ThresholdDisclosure::FullConfidential,
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "invalid disclosure mode {other}; expected 0 (Full), 1 (Partial) or 2 (FullConfidential)"
-                )));
-            }
-        };
-        let meta: Option<&[u8]> = meta_key.as_ref().map(|b| b.as_ref());
-        self.inner = std::mem::take(&mut self.inner).with_disclosure(
-            disclosure,
-            meta,
-            threshold as usize,
-            limit as usize,
-        );
-        Ok(self)
-    }
-
-    /// Construct from a BLS12-381 signature (`blsful::Signature`) with an explicit codec —
-    /// `"bls12_381-g1-msig"` (48-byte sig) or `"bls12_381-g2-msig"` (96-byte sig).
-    #[napi(factory)]
-    pub fn new_from_bls_signature(codec: Either<String, u32>, signature: Buffer) -> Result<Self> {
-        let c = resolve_codec(codec)?;
-        let inner = match c {
-            multi_codec::Codec::Bls12381G1Msig => {
-                let sig = blsful::Signature::<blsful::Bls12381G1Impl>::try_from(signature.as_ref())
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("invalid BLS12-381 G1 signature: {e}"))
-                    })?;
-                multi_sig::Builder::new_from_bls_signature_with_codec(c, &sig)
-                    .map_err(|e| napi::Error::from_reason(format!("bls signature: {e}")))?
-            }
-            multi_codec::Codec::Bls12381G2Msig => {
-                let sig = blsful::Signature::<blsful::Bls12381G2Impl>::try_from(signature.as_ref())
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("invalid BLS12-381 G2 signature: {e}"))
-                    })?;
-                multi_sig::Builder::new_from_bls_signature_with_codec(c, &sig)
-                    .map_err(|e| napi::Error::from_reason(format!("bls signature: {e}")))?
-            }
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "{other:?} is not a BLS12-381 signature codec"
-                )));
-            }
-        };
-        Ok(Self { inner })
-    }
-
-    /// Construct from a BLS12-381 signature *share* (`blsful::SignatureShare`) with an explicit
-    /// share codec — `"bls12_381-g1-share-msig"` or `"bls12_381-g2-share-msig"`.
-    #[napi(factory)]
-    pub fn new_from_bls_signature_share(
-        codec: Either<String, u32>,
-        threshold: u32,
-        limit: u32,
-        share: Buffer,
-    ) -> Result<Self> {
-        let c = resolve_codec(codec)?;
-        let inner = match c {
-            multi_codec::Codec::Bls12381G1ShareMsig => {
-                let s = blsful::SignatureShare::<blsful::Bls12381G1Impl>::try_from(share.as_ref())
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("invalid BLS12-381 G1 share: {e}"))
-                    })?;
-                multi_sig::Builder::new_from_bls_signature_share_with_codec(
-                    c,
-                    threshold as usize,
-                    limit as usize,
-                    &s,
-                )
-                .map_err(|e| napi::Error::from_reason(format!("bls share: {e}")))?
-            }
-            multi_codec::Codec::Bls12381G2ShareMsig => {
-                let s = blsful::SignatureShare::<blsful::Bls12381G2Impl>::try_from(share.as_ref())
-                    .map_err(|e| {
-                        napi::Error::from_reason(format!("invalid BLS12-381 G2 share: {e}"))
-                    })?;
-                multi_sig::Builder::new_from_bls_signature_share_with_codec(
-                    c,
-                    threshold as usize,
-                    limit as usize,
-                    &s,
-                )
-                .map_err(|e| napi::Error::from_reason(format!("bls share: {e}")))?
-            }
-            other => {
-                return Err(napi::Error::from_reason(format!(
-                    "{other:?} is not a BLS12-381 signature share codec"
-                )));
-            }
-        };
-        Ok(Self { inner })
-    }
-
-    /// Generate a fresh 32-byte threshold-metadata key, required by the Partial and
-    /// FullConfidential disclosure modes.
-    ///
-    /// **Store it safely** — losing it makes `t` (and `n`) unrecoverable.
-    #[napi]
-    pub fn generate_meta_key() -> Buffer {
-        Buffer::from(multi_sig::generate_meta_key().to_vec())
-    }
-
-    /// Build the [`MultiSignature`], folding in any accumulated shares.
-    #[napi]
-    pub fn try_build(&self) -> Result<MultiSignature> {
-        self.inner
-            .clone()
-            .try_build()
-            .map(|inner| MultiSignature {
-                inner,
-                key_format: None,
+    impl SignatureScheme {
+        /// Create from a multicodec name (e.g. `"eddsa-msig"`) or numeric codec value.
+        #[napi(factory)]
+        pub fn from_codec(codec: Either<String, u32>) -> napi::Result<Self> {
+            let c = match codec {
+                Either::A(name) => multi_codec::Codec::try_from(name.as_str()).map_err(|e| {
+                    napi::Error::from_reason(format!("unknown codec '{name}': {e}"))
+                })?,
+                Either::B(code) => multi_codec::Codec::try_from(code)
+                    .map_err(|e| napi::Error::from_reason(format!("unknown codec {code}: {e}")))?,
+            };
+            Ok(Self {
+                code: c.code() as u32,
+                name: c.as_str().to_string(),
             })
-            .map_err(|e| napi::Error::from_reason(format!("build multisig: {e}")))
+        }
+
+        /// The multicodec name, e.g. `"eddsa-msig"`.
+        #[napi(getter)]
+        pub fn name(&self) -> String {
+            self.name.clone()
+        }
+
+        /// The multicodec numeric value.
+        #[napi(getter)]
+        pub fn code(&self) -> u32 {
+            self.code
+        }
     }
 
-    /// Build and return the base-encoded (lowercase hex) string form.
+    /// A self-describing multisignature.
     #[napi]
-    pub fn try_build_encoded(&self) -> Result<String> {
-        self.inner
-            .clone()
-            .try_build_encoded()
-            .map(|encoded| encoded.to_string())
-            .map_err(|e| napi::Error::from_reason(format!("build multisig: {e}")))
+    #[derive(Clone)]
+    pub struct MultiSignature {
+        inner: multi_sig::Multisig,
+        key_format: Option<String>,
     }
-}
+
+    #[napi]
+    impl MultiSignature {
+        /// Decode a MultiSignature from its binary wire form.
+        #[napi(constructor)]
+        pub fn new(bytes: Buffer, key_format: Option<String>) -> napi::Result<Self> {
+            multi_sig::Multisig::try_from(bytes.as_ref())
+                .map(|inner| Self { inner, key_format })
+                .map_err(|e| napi::Error::from_reason(format!("decode multisig: {e}")))
+        }
+
+        /// The key format this signature is associated with (e.g. `CryptoKey.Format.JWK`),
+        /// when supplied at construction time. Otherwise `undefined`.
+        #[napi(getter, js_name = "keyFormat")]
+        pub fn key_format(&self) -> Option<String> {
+            self.key_format.clone()
+        }
+
+        #[napi]
+        pub fn from_bytes(&self) -> Buffer {
+            Buffer::from(Vec::from(self.inner.clone()))
+        }
+
+        /// The base-encoded string form (lowercase hex, with the multibase `f` prefix) — identical to
+        /// what [`Signature::try_build_encoded`] produces.
+        #[napi]
+        pub fn from_hex(&self) -> String {
+            let encoded: multi_sig::BaseEncoded<multi_sig::Multisig> =
+                multi_sig::BaseEncoded::from(self.inner.clone());
+            encoded.to_string()
+        }
+
+        /// The signature codec name, e.g. `"eddsa-msig"`.
+        #[napi(getter)]
+        pub fn codec(&self) -> String {
+            self.inner.codec().as_str().to_string()
+        }
+
+        /// The signature codec numeric value.
+        #[napi(getter)]
+        pub fn code(&self) -> u32 {
+            self.inner.codec().code() as u32
+        }
+
+        /// The raw signature bytes.
+        #[napi]
+        pub fn signature_bytes(&self) -> napi::Result<SignatureBytes> {
+            let data = multi_sig::ViewBuilder::new(&self.inner)
+                .data()
+                .build()
+                .map_err(|e| napi::Error::from_reason(format!("data view: {e}")))?;
+            let bytes = data
+                .sig_bytes()
+                .map_err(|e| napi::Error::from_reason(format!("sig bytes: {e}")))?;
+            Ok(SignatureBytes::new(Buffer::from(bytes)))
+        }
+
+        /// The raw signature bytes (alias of [`MultiSignature::signature_bytes`] for property access).
+        #[napi(getter)]
+        pub fn bytes(&self) -> Buffer {
+            Buffer::from(Vec::from(self.inner.clone()))
+        }
+
+        /// The in-band signed message (empty for a detached signature).
+        #[napi(getter)]
+        pub fn message(&self) -> Buffer {
+            Buffer::from(self.inner.message.clone())
+        }
+
+        /// True when the message travels in-band (combined signature).
+        #[napi(getter)]
+        pub fn is_combined(&self) -> bool {
+            !self.inner.message.is_empty()
+        }
+
+        /// The one-time leaf index consumed (XMSS stateful signatures), if present.
+        #[napi(getter)]
+        pub fn sig_index(&self) -> Option<u32> {
+            self.inner.sig_index()
+        }
+
+        /// The Merkle tree depth (Merkle-Lamport), if present.
+        #[napi(getter)]
+        pub fn depth(&self) -> Option<u8> {
+            self.inner.depth()
+        }
+    }
+
+    /// Resolve an `Either<String, u32>` codec argument into a `multi_codec::Codec`.
+    fn resolve_codec(codec: Either<String, u32>) -> napi::Result<multi_codec::Codec> {
+        match codec {
+            Either::A(name) => multi_codec::Codec::try_from(name.as_str())
+                .map_err(|e| napi::Error::from_reason(format!("unknown codec '{name}': {e}"))),
+            Either::B(code) => multi_codec::Codec::try_from(code)
+                .map_err(|e| napi::Error::from_reason(format!("unknown codec {code}: {e}"))),
+        }
+    }
+
+    #[napi]
+    pub struct Signature {
+        inner: multi_sig::Builder,
+    }
+
+    #[napi]
+    impl Signature {
+        /// Create a builder for `codec` — a multicodec name (`"eddsa-msig"`) or numeric value.
+        #[napi(constructor)]
+        pub fn new(codec: Either<String, u32>) -> napi::Result<Self> {
+            let c = resolve_codec(codec)?;
+            Ok(Self {
+                inner: multi_sig::Builder::new(c),
+            })
+        }
+
+        /// Set the message payload (makes a combined signature).
+        #[napi]
+        pub fn with_message(&mut self, message: Buffer) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_message_bytes(&message);
+            self
+        }
+
+        /// Set the raw signature bytes.
+        #[napi]
+        pub fn with_signature(&mut self, signature: Buffer) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_signature_bytes(&signature);
+            self
+        }
+
+        /// Set the payload encoding codec (name or numeric value).
+        #[napi]
+        pub fn with_payload_encoding(&mut self, codec: Either<String, u32>) -> napi::Result<&Self> {
+            let c = resolve_codec(codec)?;
+            self.inner = std::mem::take(&mut self.inner).with_payload_encoding(c);
+            Ok(self)
+        }
+
+        /// Set the BLS scheme type: 0=Basic, 1=MessageAugmentation, 2=ProofOfPossession.
+        #[napi]
+        pub fn with_scheme(&mut self, scheme: u32) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_scheme(scheme as u8);
+            self
+        }
+
+        /// Set the threshold value `t` (plaintext).
+        #[napi]
+        pub fn with_threshold(&mut self, threshold: u32) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_threshold(threshold as usize);
+            self
+        }
+
+        /// Set the share count `n` (plaintext).
+        #[napi]
+        pub fn with_limit(&mut self, limit: u32) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_limit(limit as usize);
+            self
+        }
+
+        /// Set the share identifier (32-byte BLS scalar).
+        #[napi]
+        pub fn with_identifier(&mut self, identifier: Buffer) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_identifier(&identifier);
+            self
+        }
+
+        /// Set the accumulated threshold data blob.
+        #[napi]
+        pub fn with_threshold_data(&mut self, data: Buffer) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_threshold_data(&data);
+            self
+        }
+
+        /// Set the XMSS one-time leaf index consumed by this signature.
+        #[napi]
+        pub fn with_sig_index(&mut self, index: u32) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_sig_index(index);
+            self
+        }
+
+        /// Set the Merkle tree depth.
+        #[napi]
+        pub fn with_depth(&mut self, depth: u32) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).with_depth(depth as u8);
+            self
+        }
+
+        /// Accumulate a threshold signature share (folded in by `try_build`).
+        #[napi]
+        pub fn add_signature_share(&mut self, share: &MultiSignature) -> &Self {
+            self.inner = std::mem::take(&mut self.inner).add_signature_share(&share.inner);
+            self
+        }
+
+        /// Set the threshold disclosure mode for a share being built.
+        ///
+        /// `mode`: 0 = Full (t/n plaintext), 1 = Partial (n plaintext, t encrypted),
+        /// 2 = FullConfidential (both encrypted). `metaKey` (32 bytes from
+        /// [`Signature::generateMetaKey`]) is required for modes 1 and 2.
+        #[napi]
+        pub fn with_disclosure(
+            &mut self,
+            mode: u32,
+            meta_key: Option<Buffer>,
+            threshold: u32,
+            limit: u32,
+        ) -> napi::Result<&Self> {
+            let disclosure = match mode {
+                0 => multi_sig::ThresholdDisclosure::Full,
+                1 => multi_sig::ThresholdDisclosure::Partial,
+                2 => multi_sig::ThresholdDisclosure::FullConfidential,
+                other => {
+                    return Err(napi::Error::from_reason(format!(
+                        "invalid disclosure mode {other}; expected 0 (Full), 1 (Partial) or 2 (FullConfidential)"
+                    )));
+                }
+            };
+            let meta: Option<&[u8]> = meta_key.as_ref().map(|b| b.as_ref());
+            self.inner = std::mem::take(&mut self.inner).with_disclosure(
+                disclosure,
+                meta,
+                threshold as usize,
+                limit as usize,
+            );
+            Ok(self)
+        }
+
+        /// Construct from a BLS12-381 signature (`blsful::Signature`) with an explicit codec —
+        /// `"bls12_381-g1-msig"` (48-byte sig) or `"bls12_381-g2-msig"` (96-byte sig).
+        #[napi(factory)]
+        pub fn new_from_bls_signature(
+            codec: Either<String, u32>,
+            signature: Buffer,
+        ) -> napi::Result<Self> {
+            let c = resolve_codec(codec)?;
+            let inner = match c {
+                multi_codec::Codec::Bls12381G1Msig => {
+                    let sig =
+                        blsful::Signature::<blsful::Bls12381G1Impl>::try_from(signature.as_ref())
+                            .map_err(|e| {
+                            napi::Error::from_reason(format!("invalid BLS12-381 G1 signature: {e}"))
+                        })?;
+                    multi_sig::Builder::new_from_bls_signature_with_codec(c, &sig)
+                        .map_err(|e| napi::Error::from_reason(format!("bls signature: {e}")))?
+                }
+                multi_codec::Codec::Bls12381G2Msig => {
+                    let sig =
+                        blsful::Signature::<blsful::Bls12381G2Impl>::try_from(signature.as_ref())
+                            .map_err(|e| {
+                            napi::Error::from_reason(format!("invalid BLS12-381 G2 signature: {e}"))
+                        })?;
+                    multi_sig::Builder::new_from_bls_signature_with_codec(c, &sig)
+                        .map_err(|e| napi::Error::from_reason(format!("bls signature: {e}")))?
+                }
+                other => {
+                    return Err(napi::Error::from_reason(format!(
+                        "{other:?} is not a BLS12-381 signature codec"
+                    )));
+                }
+            };
+            Ok(Self { inner })
+        }
+
+        /// Construct from a BLS12-381 signature *share* (`blsful::SignatureShare`) with an explicit
+        /// share codec — `"bls12_381-g1-share-msig"` or `"bls12_381-g2-share-msig"`.
+        #[napi(factory)]
+        pub fn new_from_bls_signature_share(
+            codec: Either<String, u32>,
+            threshold: u32,
+            limit: u32,
+            share: Buffer,
+        ) -> napi::Result<Self> {
+            let c = resolve_codec(codec)?;
+            let inner = match c {
+                multi_codec::Codec::Bls12381G1ShareMsig => {
+                    let s =
+                        blsful::SignatureShare::<blsful::Bls12381G1Impl>::try_from(share.as_ref())
+                            .map_err(|e| {
+                                napi::Error::from_reason(format!("invalid BLS12-381 G1 share: {e}"))
+                            })?;
+                    multi_sig::Builder::new_from_bls_signature_share_with_codec(
+                        c,
+                        threshold as usize,
+                        limit as usize,
+                        &s,
+                    )
+                    .map_err(|e| napi::Error::from_reason(format!("bls share: {e}")))?
+                }
+                multi_codec::Codec::Bls12381G2ShareMsig => {
+                    let s =
+                        blsful::SignatureShare::<blsful::Bls12381G2Impl>::try_from(share.as_ref())
+                            .map_err(|e| {
+                                napi::Error::from_reason(format!("invalid BLS12-381 G2 share: {e}"))
+                            })?;
+                    multi_sig::Builder::new_from_bls_signature_share_with_codec(
+                        c,
+                        threshold as usize,
+                        limit as usize,
+                        &s,
+                    )
+                    .map_err(|e| napi::Error::from_reason(format!("bls share: {e}")))?
+                }
+                other => {
+                    return Err(napi::Error::from_reason(format!(
+                        "{other:?} is not a BLS12-381 signature share codec"
+                    )));
+                }
+            };
+            Ok(Self { inner })
+        }
+
+        /// Generate a fresh 32-byte threshold-metadata key, required by the Partial and
+        /// FullConfidential disclosure modes.
+        ///
+        /// **Store it safely** — losing it makes `t` (and `n`) unrecoverable.
+        #[napi]
+        pub fn generate_meta_key() -> Buffer {
+            Buffer::from(multi_sig::generate_meta_key().to_vec())
+        }
+
+        /// Build the [`MultiSignature`], folding in any accumulated shares.
+        #[napi]
+        pub fn try_build(&self) -> napi::Result<MultiSignature> {
+            self.inner
+                .clone()
+                .try_build()
+                .map(|inner| MultiSignature {
+                    inner,
+                    key_format: None,
+                })
+                .map_err(|e| napi::Error::from_reason(format!("build multisig: {e}")))
+        }
+
+        /// Build and return the base-encoded (lowercase hex) string form.
+        #[napi]
+        pub fn try_build_encoded(&self) -> napi::Result<String> {
+            self.inner
+                .clone()
+                .try_build_encoded()
+                .map(|encoded| encoded.to_string())
+                .map_err(|e| napi::Error::from_reason(format!("build multisig: {e}")))
+        }
+    }
 }
 
 /// A crypt handle bound to an open repository. Obtain via `Repository::crypt()`.
@@ -780,6 +971,37 @@ impl Crypto {
 
 #[napi]
 impl Crypto {
+    /// Active crypto mode for the repository (filter, entire_repo, or hybrid).
+    #[napi]
+    pub fn mode(&self) -> CryptoMode {
+        let config_path = self.config_path();
+        let mut has_filter = false;
+        let mut has_entire_repo = false;
+
+        if config_path.exists() {
+            if let Ok(config) =
+                gix::config::File::from_path_no_includes(config_path, gix::config::Source::Local)
+            {
+                if config.string("filter.crypto.clean").is_some()
+                    || config.string("filter.git-crypt.clean").is_some()
+                {
+                    has_filter = true;
+                }
+                if let Some(val) = config.string("gcrypt.mode") {
+                    if val == "entire_repo" {
+                        has_entire_repo = true;
+                    }
+                }
+            }
+        }
+
+        match (has_filter, has_entire_repo) {
+            (true, true) => CryptoMode::Hybrid,
+            (false, true) => CryptoMode::EntireRepo,
+            _ => CryptoMode::Filter,
+        }
+    }
+
     /// Whether the repository has been initialized for crypt.
     #[napi]
     pub fn is_initialized(&self) -> bool {
@@ -798,7 +1020,7 @@ impl Crypto {
     /// Generate a fresh random key and persist it as the default key, overwriting any existing
     /// default. Requires the repository to already be initialized.
     #[napi]
-    pub fn generate_key(&self) -> Result<SymmetricCryptoKey> {
+    pub fn generate_key(&self) -> napi::Result<SymmetricCryptoKey> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptoError::NotInitialized.into());
@@ -806,26 +1028,75 @@ impl Crypto {
         Ok(km.generate_key()?)
     }
 
-    /// Initialize crypt: create the key directory, generate a key, and configure filters.
-    /// Idempotent — a no-op if already initialized. `opts` overrides the filter name/commands
-    /// (defaults to the built-in `crypto` filter).
+    /// Initialize crypt: create key directory, generate a key, set gcrypt.mode = entire_repo,
+    /// and configure git-crypt filter drivers.
+    /// Both full repo encryption (git-remote-gcrypt) and partial worktree encryption (git-crypt)
+    /// are applied by default (Hybrid mode).
     #[napi]
-    pub fn init(&self, opts: Option<CryptFilterOptions>) -> Result<()> {
+    pub fn init(&self, opts: Option<CryptFilterOptions>) -> napi::Result<String> {
         let km = self.key_manager();
-        if km.is_initialized() {
-            return Ok(());
+        if !km.is_initialized() {
+            km.init_dirs()?;
+            let _key = km.generate_key()?;
         }
-        km.init_dirs()?;
-        let _key = km.generate_key()?;
+
         self.configure_filters(&opts.unwrap_or_default().resolve())?;
-        Ok(())
+
+        let config_path = self.config_path();
+        let mut config = if config_path.exists() {
+            gix::config::File::from_path_no_includes(
+                config_path.clone(),
+                gix::config::Source::Local,
+            )
+            .map_err(|e| CryptoError::Git(e.to_string()))?
+        } else {
+            gix::config::File::new(gix::config::file::Metadata::from(
+                gix::config::Source::Local,
+            ))
+        };
+
+        config
+            .set_raw_value("gcrypt.mode", "entire_repo")
+            .map_err(|e| CryptoError::Git(e.to_string()))?;
+
+        let existing_id = config.string("gcrypt.id").map(|s| s.to_string());
+        let repo_id = match existing_id {
+            Some(id) if !id.is_empty() => id,
+            _ => format!(
+                ":id:{}",
+                hex_lower(&SymmetricCryptoKey::generate_random().as_bytes()[..15])
+            ),
+        };
+
+        config
+            .set_raw_value("gcrypt.id", &repo_id)
+            .map_err(|e| CryptoError::Git(e.to_string()))?;
+
+        let mut file = std::fs::File::create(&config_path)?;
+        config.write_to(&mut file)?;
+
+        Ok(repo_id)
+    }
+
+    /// Initialize the repository for Entire Repository Encryption mode (gcrypt mode).
+    /// Alias for init() which sets up both full repository encryption and partial filter drivers.
+    #[napi]
+    pub fn init_entire_repo(&self, opts: Option<CryptFilterOptions>) -> napi::Result<String> {
+        self.init(opts)
+    }
+
+    /// Whether repository is configured with Entire Repository Encryption enabled (entire_repo or hybrid).
+    #[napi]
+    pub fn is_entire_repo_mode(&self) -> bool {
+        let m = self.mode();
+        m == CryptoMode::EntireRepo || m == CryptoMode::Hybrid
     }
 
     /// Lock the repository by removing the `filter.<name>.*` config (encrypted files then
     /// show their encrypted content on checkout). `opts.filterName` selects which section to
     /// remove (defaults to `crypto`).
     #[napi]
-    pub fn lock(&self, opts: Option<CryptFilterOptions>) -> Result<()> {
+    pub fn lock(&self, opts: Option<CryptFilterOptions>) -> napi::Result<()> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptoError::NotInitialized.into());
@@ -839,7 +1110,11 @@ impl Crypto {
     /// is verified and the `filter.<name>.*` config is (re)written. `opts` overrides the
     /// filter name/commands (defaults to the built-in `crypto` filter).
     #[napi]
-    pub fn unlock(&self, key_file: Option<String>, opts: Option<CryptFilterOptions>) -> Result<()> {
+    pub fn unlock(
+        &self,
+        key_file: Option<String>,
+        opts: Option<CryptFilterOptions>,
+    ) -> napi::Result<()> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptoError::NotInitialized.into());
@@ -854,7 +1129,7 @@ impl Crypto {
 
     /// Export the default key to `output_path`.
     #[napi]
-    pub fn export_key(&self, output_path: String) -> Result<()> {
+    pub fn export_key(&self, output_path: String) -> napi::Result<()> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptoError::NotInitialized.into());
@@ -865,7 +1140,7 @@ impl Crypto {
 
     /// Import a key from `input_path` as the default key.
     #[napi]
-    pub fn import_key(&self, input_path: String) -> Result<()> {
+    pub fn import_key(&self, input_path: String) -> napi::Result<()> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptoError::NotInitialized.into());
@@ -876,24 +1151,127 @@ impl Crypto {
 
     /// Encrypt `data`, returning `MAGIC_HEADER || nonce || ciphertext+tag`.
     #[napi]
-    pub fn encrypt(&self, data: Buffer) -> Result<Buffer> {
+    pub fn encrypt(&self, data: Buffer) -> napi::Result<Buffer> {
         let key = self.load_key()?;
-        let out = key.encrypt(data.as_ref())?;
+        let out = key.encrypt_raw(data.as_ref())?;
         Ok(Buffer::from(out))
     }
 
     /// Decrypt `data` produced by [`Crypto::encrypt`].
     #[napi]
-    pub fn decrypt(&self, data: Buffer) -> Result<Buffer> {
+    pub fn decrypt(&self, data: Buffer) -> napi::Result<Buffer> {
         let key = self.load_key()?;
-        let out = key.decrypt(data.as_ref())?;
+        let out = key.decrypt_raw(data.as_ref())?;
         Ok(Buffer::from(out))
     }
 
     /// Whether `data` carries the crypt magic header.
     #[napi]
     pub fn is_encrypted(&self, data: Buffer) -> bool {
-        SymmetricCryptoKey::is_encrypted(data.as_ref())
+        SymmetricCryptoKey::is_encrypted_raw(data.as_ref())
+    }
+
+    /// Encrypt a repo manifest payload using the repository key.
+    #[napi]
+    pub fn encrypt_manifest(&self, manifest: RepoManifest) -> napi::Result<Buffer> {
+        let key = self.load_key()?;
+        let text = serialize_manifest(manifest);
+        let enc = key.encrypt_raw(text.as_bytes())?;
+        Ok(Buffer::from(enc))
+    }
+
+    /// Decrypt a repo manifest payload using the repository key.
+    #[napi]
+    pub fn decrypt_manifest(&self, ciphertext: Buffer) -> napi::Result<RepoManifest> {
+        let key = self.load_key()?;
+        let dec = key.decrypt_raw(ciphertext.as_ref())?;
+        let text = String::from_utf8(dec)
+            .map_err(|e| napi::Error::from_reason(format!("manifest UTF-8 error: {e}")))?;
+        parse_manifest(text)
+    }
+
+    /// Encrypt a packfile buffer using a symmetric key (or a newly generated key).
+    /// Returns the SHA256 digest of the encrypted output as pack_id.
+    #[napi]
+    pub fn encrypt_pack(
+        &self,
+        pack_data: Buffer,
+        pack_key: Option<String>,
+    ) -> napi::Result<EncryptedPackResult> {
+        use sha2::{Digest, Sha256};
+
+        let key = match pack_key {
+            Some(ref k) => {
+                let bytes = hex::decode(k)
+                    .map_err(|e| napi::Error::from_reason(format!("invalid pack key hex: {e}")))?;
+                if bytes.len() < KEY_SIZE {
+                    return Err(napi::Error::from_reason(format!(
+                        "pack key must be at least {KEY_SIZE} bytes"
+                    )));
+                }
+                SymmetricCryptoKey::from_bytes(&bytes[..KEY_SIZE])?
+            }
+            None => SymmetricCryptoKey::generate_random(),
+        };
+
+        let encrypted = key.encrypt_raw(pack_data.as_ref())?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&encrypted);
+        let digest = hasher.finalize();
+        let pack_id = hex_lower(&digest);
+
+        let key_hex = hex_lower(key.as_bytes());
+
+        Ok(EncryptedPackResult {
+            pack_id,
+            hash_type: "SHA256".to_string(),
+            pack_key: key_hex,
+            encrypted_bytes: Buffer::from(encrypted),
+        })
+    }
+
+    /// Decrypt an encrypted packfile buffer using its pack key and verify its digest.
+    #[napi]
+    pub fn decrypt_pack(
+        &self,
+        encrypted_pack_data: Buffer,
+        hash_type: String,
+        expected_pack_id: String,
+        pack_key: String,
+    ) -> napi::Result<Buffer> {
+        use sha2::{Digest, Sha256};
+
+        if hash_type != "SHA256" && hash_type != "sha256" {
+            return Err(napi::Error::from_reason(format!(
+                "unsupported hash type: {hash_type}"
+            )));
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(encrypted_pack_data.as_ref());
+        let digest = hasher.finalize();
+        let calculated_id = hex_lower(&digest);
+
+        if !calculated_id.eq_ignore_ascii_case(&expected_pack_id) {
+            return Err(CryptoError::Crypto(format!(
+                "packfile digest mismatch: expected {expected_pack_id}, got {calculated_id}"
+            ))
+            .into());
+        }
+
+        let key_bytes = hex::decode(&pack_key)
+            .map_err(|e| napi::Error::from_reason(format!("invalid pack key hex: {e}")))?;
+        if key_bytes.len() < KEY_SIZE {
+            return Err(napi::Error::from_reason(format!(
+                "pack key must be at least {KEY_SIZE} bytes"
+            )));
+        }
+
+        let key = SymmetricCryptoKey::from_bytes(&key_bytes[..KEY_SIZE])?;
+        let decrypted = key.decrypt_raw(encrypted_pack_data.as_ref())?;
+
+        Ok(Buffer::from(decrypted))
     }
 }
 
@@ -911,7 +1289,7 @@ impl Crypto {
     /// Add an SSH (ed25519) recipient (feature `ssh`). The repo's symmetric key is encrypted
     /// for the recipient's public key and written to `crypt/keys/ssh/<name>.ssh`.
     #[napi]
-    pub fn add_ssh_user(&self, ssh_key_path: String, alias: Option<String>) -> Result<()> {
+    pub fn add_ssh_user(&self, ssh_key_path: String, alias: Option<String>) -> napi::Result<()> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptoError::NotInitialized.into());
@@ -941,7 +1319,7 @@ impl Crypto {
         encrypted_path: String,
         identity_path: String,
         passphrase: Option<String>,
-    ) -> Result<()> {
+    ) -> napi::Result<()> {
         let km = self.key_manager();
         if !km.is_initialized() {
             return Err(CryptoError::NotInitialized.into());
@@ -976,7 +1354,7 @@ impl Crypto {
         key_pem: String,
         passphrase: Option<String>,
         opts: Option<KeyStoreOptions>,
-    ) -> Result<()> {
+    ) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         let pass = passphrase.unwrap_or_default();
 
@@ -1016,7 +1394,7 @@ impl Crypto {
 
     /// Read the stored OpenSSH public key at `refs/keys/<name>.pub` (default `sign`).
     #[napi]
-    pub fn get_public_key(&self, name: Option<String>) -> Result<String> {
+    pub fn get_public_key(&self, name: Option<String>) -> napi::Result<String> {
         let r = thread_local(&self.repo);
         let name = name.unwrap_or_else(|| "sign".to_string());
         let bytes = read_ref_blob(&r, &format!("refs/keys/{name}.pub"))?.ok_or_else(|| {
@@ -1030,7 +1408,7 @@ impl Crypto {
     /// Ed25519-sign `data` with the stored seed at `refs/keys/<name>.pem` (default `sign`). The
     /// seed is decrypted with the repo's symmetric crypto key.
     #[napi]
-    pub fn sign(&self, data: Buffer, name: Option<String>) -> Result<Buffer> {
+    pub fn sign(&self, data: Buffer, name: Option<String>) -> napi::Result<Buffer> {
         let r = thread_local(&self.repo);
         let name = name.unwrap_or_else(|| "sign".to_string());
 
@@ -1048,7 +1426,12 @@ impl Crypto {
     /// Verify an Ed25519 `signature` over `data` using the stored public key at
     /// `refs/keys/<name>.pub` (default `sign`).
     #[napi]
-    pub fn verify(&self, data: Buffer, signature: Buffer, name: Option<String>) -> Result<bool> {
+    pub fn verify(
+        &self,
+        data: Buffer,
+        signature: Buffer,
+        name: Option<String>,
+    ) -> napi::Result<bool> {
         let name = name.unwrap_or_else(|| "sign".to_string());
         let pub_text = self.get_public_key(Some(name))?;
         SshIdentity::verify_with_public_key(pub_text, data, signature)
@@ -1056,7 +1439,7 @@ impl Crypto {
 
     /// List the distinct key names stored under `refs/keys/*` (e.g. `["sign", "alice"]`).
     #[napi]
-    pub fn list_keys(&self) -> Result<Vec<String>> {
+    pub fn list_keys(&self) -> napi::Result<Vec<String>> {
         let r = thread_local(&self.repo);
         Ok(list_key_names(&r)?)
     }
@@ -1069,7 +1452,11 @@ impl Crypto {
     /// match confirms the registered keys are a genuine, working keypair. Returns `false` when the
     /// key cannot be opened (wrong passphrase / malformed) or is not registered.
     #[napi]
-    pub fn authenticate(&self, identity_pem: String, passphrase: Option<String>) -> Result<bool> {
+    pub fn authenticate(
+        &self,
+        identity_pem: String,
+        passphrase: Option<String>,
+    ) -> napi::Result<bool> {
         let r = thread_local(&self.repo);
         let pass = passphrase.unwrap_or_default();
 
@@ -1110,7 +1497,7 @@ impl Crypto {
     ///
     /// STATEFUL: the key yields a bounded number of signatures; sign with [`Crypto::sign_xmss`].
     #[napi]
-    pub fn generate_xmss_key(&self, name: String, passphrase: Option<String>) -> Result<()> {
+    pub fn generate_xmss_key(&self, name: String, passphrase: Option<String>) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         let initial = initial_commit_id(&r)?;
         let pass = passphrase.unwrap_or_default();
@@ -1133,7 +1520,7 @@ impl Crypto {
 
     /// Number of signatures already issued by the XMSS^MT key `name` (observability).
     #[napi]
-    pub fn xmss_used(&self, name: String) -> Result<u32> {
+    pub fn xmss_used(&self, name: String) -> napi::Result<u32> {
         let r = thread_local(&self.repo);
         let used = match read_ref_blob(&r, &format!("refs/keys/{name}.xmss.hwm"))? {
             Some(b) if b.len() == 8 => {
@@ -1153,7 +1540,7 @@ impl Crypto {
         name: String,
         data: Buffer,
         passphrase: Option<String>,
-    ) -> Result<Buffer> {
+    ) -> napi::Result<Buffer> {
         let r = thread_local(&self.repo);
         let initial = initial_commit_id(&r)?;
         let pass = passphrase.unwrap_or_default();
@@ -1207,7 +1594,7 @@ impl Crypto {
     /// Verify an XMSS^MT `signature` over `data` against the stored public key
     /// `refs/keys/<name>.xmss.vk`.
     #[napi]
-    pub fn verify_xmss(&self, name: String, data: Buffer, signature: Buffer) -> Result<bool> {
+    pub fn verify_xmss(&self, name: String, data: Buffer, signature: Buffer) -> napi::Result<bool> {
         let r = thread_local(&self.repo);
         let vk_bytes =
             read_ref_blob(&r, &format!("refs/keys/{name}.xmss.vk"))?.ok_or_else(|| {
@@ -1228,7 +1615,7 @@ impl Crypto {
     /// returns an actionable error rather than panicking. The repository is opened
     /// automatically from the current directory.
     #[napi]
-    pub fn add_gpg_user(gpg_id: String) -> Result<()> {
+    pub fn add_gpg_user(gpg_id: String) -> napi::Result<()> {
         let git_dir = open_repo_git_dir(".")?;
         let km = KeyManager::new(&git_dir);
         if !km.is_initialized() {
@@ -1252,11 +1639,11 @@ impl Crypto {
 pub fn clean_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if SymmetricCryptoKey::is_encrypted(&input) {
+    if SymmetricCryptoKey::is_encrypted_raw(&input) {
         io::stdout().write_all(&input)?;
         return Ok(());
     }
-    let encrypted = key.encrypt(&input)?;
+    let encrypted = key.encrypt_raw(&input)?;
     io::stdout().write_all(&encrypted)?;
     Ok(())
 }
@@ -1266,11 +1653,11 @@ pub fn clean_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
 pub fn smudge_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if !SymmetricCryptoKey::is_encrypted(&input) {
+    if !SymmetricCryptoKey::is_encrypted_raw(&input) {
         io::stdout().write_all(&input)?;
         return Ok(());
     }
-    let decrypted = key.decrypt(&input)?;
+    let decrypted = key.decrypt_raw(&input)?;
     io::stdout().write_all(&decrypted)?;
     Ok(())
 }
@@ -1280,7 +1667,7 @@ pub fn smudge_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
 pub fn diff_filter() -> CryptoResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if SymmetricCryptoKey::is_encrypted(&input) {
+    if SymmetricCryptoKey::is_encrypted_raw(&input) {
         writeln!(io::stdout(), "*** This file is encrypted with crypt ***")?;
     } else {
         io::stdout().write_all(&input)?;
@@ -1966,7 +2353,7 @@ impl SshIdentity {
     /// Load an OpenSSH or PKCS#8 ed25519 identity from PEM text (unencrypted, or
     /// passphrase-protected when `passphrase` is given).
     #[napi(constructor)]
-    pub fn from_private_key(pem: String, passphrase: Option<String>) -> Result<Self> {
+    pub fn from_private_key(pem: String, passphrase: Option<String>) -> napi::Result<Self> {
         let pass = passphrase.unwrap_or_default();
         let (seed, public) = parse_ed25519_private(&pem, &pass)
             .map_err(|e| napi::Error::from_reason(format!("invalid SSH identity: {e}")))?;
@@ -1975,7 +2362,7 @@ impl SshIdentity {
 
     /// Ed25519-sign `data`, returning the 64-byte raw signature.
     #[napi]
-    pub fn sign(&self, data: Buffer) -> Result<Buffer> {
+    pub fn sign(&self, data: Buffer) -> napi::Result<Buffer> {
         let kp = signature::Ed25519KeyPair::from_seed_unchecked(&self.seed)
             .map_err(|_| napi::Error::from_reason("invalid ed25519 seed".to_string()))?;
         let sig = kp.sign(data.as_ref());
@@ -1984,7 +2371,7 @@ impl SshIdentity {
 
     /// Verify an Ed25519 `signature` over `data` using this identity's public key.
     #[napi]
-    pub fn verify(&self, data: Buffer, signature: Buffer) -> Result<bool> {
+    pub fn verify(&self, data: Buffer, signature: Buffer) -> napi::Result<bool> {
         let pk = signature::UnparsedPublicKey::new(&signature::ED25519, &self.public);
         Ok(pk.verify(data.as_ref(), signature.as_ref()).is_ok())
     }
@@ -1995,7 +2382,7 @@ impl SshIdentity {
         pub_pem: String,
         data: Buffer,
         signature: Buffer,
-    ) -> Result<bool> {
+    ) -> napi::Result<bool> {
         let pubkey = ssh_key::PublicKey::from_openssh(pub_pem.trim())
             .map_err(|e| napi::Error::from_reason(format!("invalid SSH public key: {e}")))?;
         let pub_bytes = ed25519_pub_from_ssh_public(&pubkey)
@@ -2017,2381 +2404,707 @@ pub struct GpgManager;
 impl GpgManager {
     /// Encrypt a key for a GPG recipient. Currently a stub: certificate/keyring lookup is
     /// not implemented, so this returns an actionable error instead of panicking.
-    pub fn encrypt_key_for_recipient(_key: &SymmetricCryptoKey, _recipient: &str) -> CryptoResult<Vec<u8>> {
+    pub fn encrypt_key_for_recipient(
+        _key: &SymmetricCryptoKey,
+        _recipient: &str,
+    ) -> CryptoResult<Vec<u8>> {
         Err(CryptoError::Gpg(
             "GPG recipient encryption is not yet implemented (keyring lookup pending)".into(),
         ))
     }
 }
 
-#[cfg(feature = "openssl")]
+#[cfg(feature = "btls")]
 mod legacy_webcrypto_key {
     use super::*;
+    use napi::bindgen_prelude::{ClassInstance, Uint8Array};
+    use napi_derive::napi;
 
-// `CryptoKey` is a *stateful* class rather than a plain data object: it holds
-// either raw symmetric key material or an OpenSSL key handle, and it backs the
-// `new CryptoKey.*` operations. Node's Web Crypto `CryptoKey` is the reference
-// API, so the read-only `algorithm` / `extractable` / `type` / `usages`
-// accessors and the operation names match it exactly.
-//
-// Asymmetric generation returns a `CryptoKey` whose `publicKey` / `privateKey`
-// getters are populated, so `const { publicKey, privateKey } = await
-// new CryptoKey(...)` destructures the same way it does against Node.
-//
-// Operations are exposed both statically (`CryptoKey.encrypt(alg, key, data)`,
-// as documented for Node) and as instance methods (`cryptoKey.encrypt(alg, key,
-// data)`), so both call styles work.
-//
-// Backend: blsful 0.10 — the same provider Node itself uses.
-
-use openssl::bn::{BigNum, BigNumContext};
-use openssl::ec::{EcGroup, EcGroupRef, EcKey, EcPoint, PointConversionForm};
-use openssl::encrypt::{Decrypter, Encrypter};
-use openssl::hash::{MessageDigest, hash};
-use openssl::nid::Nid;
-use openssl::pkey::{Id, PKey, Private, Public};
-use openssl::pkey_ctx::PkeyCtx;
-use openssl::rsa::{Padding, Rsa};
-use openssl::sign::{RsaPssSaltlen, Signer, Verifier};
-use openssl::symm::{Cipher, Crypter, Mode};
-use napi::bindgen_prelude::{ClassInstance, Uint8Array};
-
-fn bad(msg: impl Into<String>) -> napi::Error {
-    napi::Error::new(napi::Status::InvalidArg, msg.into())
-}
-
-fn fail(msg: impl Into<String>) -> napi::Error {
-    napi::Error::new(napi::Status::GenericFailure, msg.into())
-}
-
-/// Base algorithm object. Always present; carries at least `name`.
-#[napi(object)]
-#[derive(Clone)]
-pub struct KeyAlgorithm {
-    /// The algorithm name, e.g. `"SHA-256"`.
-    pub name: String,
-}
-
-/// The normalized `algorithm` dictionary of a [`CryptoKey`].
-#[napi(object)]
-#[derive(Clone)]
-pub struct CryptoKeyAlgorithm {
-    /// The algorithm name, e.g. `"AES-GCM"`, `"RSASSA-PKCS1-v1_5"`, `"ECDSA"`.
-    pub name: String,
-    /// Symmetric key length in bits.
-    pub length: Option<u32>,
-    /// Named curve for `ECDSA` / `ECDH`, e.g. `"P-256"`.
-    pub named_curve: Option<String>,
-    /// Associated hash, e.g. `{ name: "SHA-256" }`.
-    pub hash: Option<KeyAlgorithm>,
-    /// RSA modulus length in bits.
-    pub modulus_length: Option<u32>,
-    /// RSA public exponent as bytes (65537 -> `010001`).
-    pub public_exponent: Option<Vec<u8>>,
-}
-
-/// Parameters of a crypto operation (`encrypt`, `decrypt`, `sign`, `verify`,
-/// `deriveBits`, `deriveKey`, `wrapKey`, `digest`).
-#[napi(object)]
-pub struct CryptoOpParams<'a> {
-    /// Algorithm name, e.g. `"AES-CBC"`.
-    pub name: Option<String>,
-    /// Initialization vector / nonce / counter block.
-    pub iv: Option<Uint8Array>,
-    /// Additional authenticated data for AEAD modes.
-    pub additional_data: Option<Uint8Array>,
-    /// AEAD tag length in bits (default 128).
-    pub tag_length: Option<u32>,
-    /// PBKDF2 iterations.
-    pub iterations: Option<u32>,
-    /// PBKDF2 salt.
-    pub salt: Option<Uint8Array>,
-    /// HKDF `info`.
-    pub info: Option<Uint8Array>,
-    /// RSA-OAEP label.
-    pub label: Option<Uint8Array>,
-    /// Associated hash.
-    pub hash: Option<KeyAlgorithm>,
-    /// RSA-PSS salt length in bytes.
-    pub salt_length: Option<u32>,
-    /// Peer public key for ECDH / X25519 derivation.
-    pub public: Option<ClassInstance<'a, CryptoKey>>,
-    /// Requested output length in bits (deriveBits).
-    pub length: Option<u32>,
-}
-
-/// Key material backing a [`CryptoKey`].
-#[derive(Clone)]
-enum KeyMaterial {
-    /// Symmetric (AES / HMAC / ChaCha20-Poly1305 / AES-KW) raw bytes.
-    Secret(Vec<u8>),
-    /// Asymmetric private key.
-    Private(PKey<Private>),
-    /// Asymmetric public key.
-    Public(PKey<Public>),
-}
-
-/// A Web Crypto `CryptoKey`.
-#[napi]
-pub struct CryptoKey {
-    material: KeyMaterial,
-    algorithm: CryptoKeyAlgorithm,
-    extractable: bool,
-    key_type: String,
-    usages: Vec<String>,
-    public_key: Option<Box<CryptoKey>>,
-    private_key: Option<Box<CryptoKey>>,
-}
-
-/// The two halves of an asymmetric [`CryptoKey`].
-#[napi]
-pub struct CryptoKeyPair {
-    public_key: CryptoKey,
-    private_key: CryptoKey,
-}
-
-// ---------------------------------------------------------------------------
-// Algorithm helpers
-// ---------------------------------------------------------------------------
-
-/// Which family an algorithm name belongs to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum AlgKind {
-    Aes,
-    ChaCha,
-    Mac,
-    Ecdsa,
-    Ecdh,
-    Ed25519,
-    X25519,
-    RsaOaep,
-    RsaPss,
-    RsaPkcs1,
-    Kdf,
-}
-
-fn alg_kind(name: &str) -> Option<AlgKind> {
-    Some(match name {
-        "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-KW" | "AES-OCB" => AlgKind::Aes,
-        "ChaCha20-Poly1305" => AlgKind::ChaCha,
-        "HMAC" | "KMAC128" | "KMAC256" => AlgKind::Mac,
-        "ECDSA" => AlgKind::Ecdsa,
-        "ECDH" => AlgKind::Ecdh,
-        "Ed25519" | "Ed448" => AlgKind::Ed25519,
-        "X25519" | "X448" => AlgKind::X25519,
-        "RSA-OAEP" => AlgKind::RsaOaep,
-        "RSA-PSS" => AlgKind::RsaPss,
-        "RSASSA-PKCS1-v1_5" => AlgKind::RsaPkcs1,
-        "PBKDF2" | "HKDF" | "Argon2d" | "Argon2i" | "Argon2id" => AlgKind::Kdf,
-        _ => return None,
-    })
-}
-
-fn is_symmetric(kind: AlgKind) -> bool {
-    matches!(kind, AlgKind::Aes | AlgKind::ChaCha | AlgKind::Mac)
-}
-
-fn digest_from_name(name: &str) -> Result<MessageDigest> {
-    MessageDigest::from_name(name).ok_or_else(|| bad(format!("unsupported hash algorithm: {name}")))
-}
-
-fn hash_name(hash: &Option<KeyAlgorithm>) -> String {
-    hash.as_ref()
-        .map(|h| h.name.clone())
-        .unwrap_or_else(|| "SHA-256".to_string())
-}
-
-fn curve_nid(name: &str) -> Result<Nid> {
-    match name {
-        "P-256" | "prime256v1" | "secp256r1" => Ok(Nid::X9_62_PRIME256V1),
-        "P-384" | "secp384r1" => Ok(Nid::SECP384R1),
-        "P-521" | "secp521r1" => Ok(Nid::SECP521R1),
-        _ => Err(bad(format!("unsupported named curve: {name}"))),
+    fn bad(msg: impl Into<String>) -> napi::Error {
+        napi::Error::new(napi::Status::InvalidArg, msg.into())
     }
-}
 
-fn curve_name(nid: Nid) -> &'static str {
-    match nid {
-        Nid::X9_62_PRIME256V1 => "P-256",
-        Nid::SECP384R1 => "P-384",
-        Nid::SECP521R1 => "P-521",
-        _ => "unknown",
+    #[allow(dead_code)]
+    fn fail(msg: impl Into<String>) -> napi::Error {
+        napi::Error::new(napi::Status::GenericFailure, msg.into())
     }
-}
 
-fn curve_oid(nid: Nid) -> &'static str {
-    match nid {
-        Nid::X9_62_PRIME256V1 => "1.2.840.10045.3.1.7",
-        Nid::SECP384R1 => "1.3.132.0.34",
-        Nid::SECP521R1 => "1.3.132.0.35",
-        _ => "",
+    /// Placeholder error: the btls-backed WebCrypto implementation is not yet wired up.
+    fn not_implemented() -> napi::Error {
+        napi::Error::new(
+            napi::Status::GenericFailure,
+            "btls-backed WebCrypto is not yet implemented",
+        )
     }
-}
 
-fn curve_from_oid(oid: &str) -> Option<Nid> {
-    match oid {
-        "1.2.840.10045.3.1.7" => Some(Nid::X9_62_PRIME256V1),
-        "1.3.132.0.34" => Some(Nid::SECP384R1),
-        "1.3.132.0.35" => Some(Nid::SECP521R1),
-        _ => None,
+    /// Base algorithm object. Always present; carries at least `name`.
+    #[napi(object)]
+    #[derive(Clone)]
+    pub struct KeyAlgorithm {
+        pub name: String,
     }
-}
 
-fn aes_cipher(name: &str, bits: u32) -> Result<Cipher> {
-    let c = match (name, bits) {
-        ("AES-CBC", 128) => Cipher::aes_128_cbc(),
-        ("AES-CBC", 192) => Cipher::aes_192_cbc(),
-        ("AES-CBC", 256) => Cipher::aes_256_cbc(),
-        ("AES-CTR", 128) => Cipher::aes_128_ctr(),
-        ("AES-CTR", 192) => Cipher::aes_192_ctr(),
-        ("AES-CTR", 256) => Cipher::aes_256_ctr(),
-        ("AES-GCM", 128) => Cipher::aes_128_gcm(),
-        ("AES-GCM", 192) => Cipher::aes_192_gcm(),
-        ("AES-GCM", 256) => Cipher::aes_256_gcm(),
-        ("AES-KW", 128) => Cipher::aes_128_ecb(),
-        ("AES-KW", 192) => Cipher::aes_192_ecb(),
-        ("AES-KW", 256) => Cipher::aes_256_ecb(),
-        ("AES-OCB", 128) => Cipher::aes_128_ocb(),
-        ("AES-OCB", 192) => Cipher::aes_192_ocb(),
-        ("AES-OCB", 256) => Cipher::aes_256_ocb(),
-        _ => {
-            return Err(bad(format!(
-                "unsupported AES variant/length: {name} ({bits} bits)"
-            )));
-        }
-    };
-    Ok(c)
-}
+    /// The normalized `algorithm` dictionary of a [`CryptoKey`].
+    #[napi(object)]
+    #[derive(Clone)]
+    pub struct CryptoKeyAlgorithm {
+        pub name: String,
+        pub length: Option<u32>,
+        pub named_curve: Option<String>,
+        pub hash: Option<KeyAlgorithm>,
+        pub modulus_length: Option<u32>,
+        pub public_exponent: Option<Vec<u8>>,
+    }
 
-fn is_aead(name: &str) -> bool {
-    matches!(name, "AES-GCM" | "AES-OCB" | "ChaCha20-Poly1305")
-}
+    /// Parameters of a crypto operation (`encrypt`, `decrypt`, `sign`, `verify`,
+    /// `deriveBits`, `deriveKey`, `wrapKey`, `digest`).
+    #[napi(object)]
+    pub struct CryptoOpParams<'a> {
+        pub name: Option<String>,
+        pub iv: Option<Uint8Array>,
+        pub additional_data: Option<Uint8Array>,
+        pub tag_length: Option<u32>,
+        pub iterations: Option<u32>,
+        pub salt: Option<Uint8Array>,
+        pub info: Option<Uint8Array>,
+        pub label: Option<Uint8Array>,
+        pub hash: Option<KeyAlgorithm>,
+        pub salt_length: Option<u32>,
+        pub public: Option<ClassInstance<'a, CryptoKey>>,
+        pub length: Option<u32>,
+    }
 
-fn allowed_usages(kind: AlgKind, alg_name: &str) -> &'static [&'static str] {
-    match kind {
-        AlgKind::Aes if alg_name == "AES-KW" => &["wrapKey", "unwrapKey"],
-        AlgKind::Aes => &["encrypt", "decrypt", "wrapKey", "unwrapKey"],
-        AlgKind::ChaCha => &["encrypt", "decrypt"],
-        AlgKind::Mac => &["sign", "verify"],
-        AlgKind::Ecdsa | AlgKind::Ed25519 | AlgKind::RsaPss | AlgKind::RsaPkcs1 => {
-            &["sign", "verify"]
-        }
-        AlgKind::Ecdh | AlgKind::X25519 => &["deriveKey", "deriveBits"],
-        AlgKind::RsaOaep => &["encrypt", "decrypt", "wrapKey", "unwrapKey"],
-        AlgKind::Kdf => &["deriveKey", "deriveBits"],
+    /// Which family an algorithm name belongs to.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum AlgKind {
+        Aes,
+        ChaCha,
+        Mac,
+        Ecdsa,
+        Ecdh,
+        Ed25519,
+        X25519,
+        RsaOaep,
+        RsaPss,
+        RsaPkcs1,
+        Kdf,
     }
-}
 
-fn validate_usages(kind: AlgKind, alg_name: &str, usages: &[String]) -> Result<()> {
-    if usages.is_empty() {
-        return Err(bad("Usages cannot be empty"));
-    }
-    let allowed = allowed_usages(kind, alg_name);
-    for u in usages {
-        if !allowed.contains(&u.as_str()) {
-            return Err(bad(format!(
-                "Unsupported key usage '{u}' for {alg_name} (allowed: {})",
-                allowed.join(", ")
-            )));
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// DER (minimal SPKI only — PKCS#8 is handled by OpenSSL directly)
-// ---------------------------------------------------------------------------
-
-fn der_len_into(mut len: usize, out: &mut Vec<u8>) {
-    if len < 0x80 {
-        out.push(len as u8);
-        return;
-    }
-    let mut tmp = [0u8; 9];
-    let mut i = tmp.len();
-    while len > 0 {
-        i -= 1;
-        tmp[i] = (len & 0xff) as u8;
-        len >>= 8;
-    }
-    let n = tmp.len() - i;
-    out.push(0x80 | n as u8);
-    out.extend_from_slice(&tmp[i..]);
-}
-
-fn der_tlv(tag: u8, content: &[u8], out: &mut Vec<u8>) {
-    out.push(tag);
-    der_len_into(content.len(), out);
-    out.extend_from_slice(content);
-}
-
-fn der_seq(items: &[&[u8]], out: &mut Vec<u8>) {
-    let mut c = Vec::new();
-    for it in items {
-        c.extend_from_slice(it);
-    }
-    der_tlv(0x30, &c, out);
-}
-
-fn der_uint_be(bytes: &[u8], out: &mut Vec<u8>) {
-    let mut s = bytes;
-    while s.len() > 1 && s[0] == 0 {
-        s = &s[1..];
-    }
-    if !s.is_empty() && s[0] & 0x80 != 0 {
-        let mut c = Vec::with_capacity(s.len() + 1);
-        c.push(0);
-        c.extend_from_slice(s);
-        der_tlv(0x02, &c, out);
-    } else {
-        der_tlv(0x02, s, out);
-    }
-}
-
-fn der_null(out: &mut Vec<u8>) {
-    der_tlv(0x05, &[], out);
-}
-
-fn der_oid(oid: &str, out: &mut Vec<u8>) {
-    let parts: Vec<u32> = oid.split('.').filter_map(|p| p.parse().ok()).collect();
-    let mut c = Vec::new();
-    if parts.len() >= 2 {
-        c.push((parts[0] * 40 + parts[1]).min(255) as u8);
-    }
-    for &arc in &parts[2..] {
-        let mut tmp = [0u8; 5];
-        let mut i = tmp.len();
-        let mut v = arc;
-        loop {
-            i -= 1;
-            tmp[i] = (v & 0x7f) as u8;
-            v >>= 7;
-            if v == 0 {
-                break;
-            }
-        }
-        for j in i..(tmp.len() - 1) {
-            tmp[j] |= 0x80;
-        }
-        c.extend_from_slice(&tmp[i..]);
-    }
-    der_tlv(0x06, &c, out);
-}
-
-fn der_bit_string(bytes: &[u8], out: &mut Vec<u8>) {
-    let mut c = Vec::with_capacity(bytes.len() + 1);
-    c.push(0); // no unused bits
-    c.extend_from_slice(bytes);
-    der_tlv(0x03, &c, out);
-}
-
-/// Reads one DER TLV, returning `(tag, content)` and advancing `pos`.
-fn der_read_tlv<'a>(buf: &'a [u8], pos: &mut usize) -> Option<(u8, &'a [u8])> {
-    if *pos >= buf.len() {
-        return None;
-    }
-    let tag = buf[*pos];
-    let mut i = *pos + 1;
-    if i >= buf.len() {
-        return None;
-    }
-    let first = buf[i];
-    i += 1;
-    let len: usize = if first < 0x80 {
-        first as usize
-    } else {
-        let n = (first & 0x7f) as usize;
-        if n == 0 || n > 4 || i + n > buf.len() {
-            return None;
-        }
-        let mut l = 0usize;
-        for _ in 0..n {
-            l = (l << 8) | buf[i] as usize;
-            i += 1;
-        }
-        l
-    };
-    let end = i.checked_add(len)?;
-    if end > buf.len() {
-        return None;
-    }
-    *pos = end;
-    Some((tag, &buf[i..end]))
-}
-
-fn decode_oid(bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let mut parts: Vec<String> = vec![(bytes[0] / 40).to_string(), (bytes[0] % 40).to_string()];
-    let mut i = 1;
-    while i < bytes.len() {
-        let mut v: u64 = 0;
-        loop {
-            if i >= bytes.len() {
-                return None;
-            }
-            let b = bytes[i];
-            i += 1;
-            v = (v << 7) | (b & 0x7f) as u64;
-            if b & 0x80 == 0 {
-                break;
-            }
-        }
-        parts.push(v.to_string());
-    }
-    Some(parts.join("."))
-}
-
-/// Encode a public key as a SubjectPublicKeyInfo (SPKI) DER blob.
-fn spki_encode(pkey: &PKey<Public>) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    if let Some(ec) = pkey.ec_key() {
-        let nid = ec
-            .group()
-            .curve_name()
-            .ok_or_else(|| fail("cannot determine the key's curve"))?;
-        let mut oid_alg = Vec::new();
-        der_oid("1.2.840.10045.2.1", &mut oid_alg);
-        let mut oid_crv = Vec::new();
-        der_oid(curve_oid(nid), &mut oid_crv);
-        let mut algid = Vec::new();
-        der_seq(&[&oid_alg, &oid_crv], &mut algid);
-        let ctx = BigNumContext::new()?;
-        let point =
-            ec.public_key()
-                .to_bytes(ec.group(), PointConversionForm::UNCOMPRESSED, &ctx)?;
-        let mut bits = Vec::new();
-        der_bit_string(&point, &mut bits);
-        der_seq(&[&algid, &bits], &mut out);
-    } else if let Some(rsa) = pkey.rsa() {
-        let mut oid_alg = Vec::new();
-        der_oid("1.2.840.113549.1.1.1", &mut oid_alg);
-        let mut null = Vec::new();
-        der_null(&mut null);
-        let mut algid = Vec::new();
-        der_seq(&[&oid_alg, &null], &mut algid);
-        let mut n = Vec::new();
-        der_uint_be(&rsa.n().to_vec(), &mut n);
-        let mut e = Vec::new();
-        der_uint_be(&rsa.e().to_vec(), &mut e);
-        let mut rk = Vec::new();
-        der_seq(&[&n, &e], &mut rk);
-        let mut bits = Vec::new();
-        der_bit_string(&rk, &mut bits);
-        der_seq(&[&algid, &bits], &mut out);
-    } else {
-        let oid = match pkey.id() {
-            Id::ED25519 => "1.3.101.112",
-            Id::X25519 => "1.3.101.110",
-            _ => return Err(fail("unsupported key type for SPKI export")),
-        };
-        let mut oid_alg = Vec::new();
-        der_oid(oid, &mut oid_alg);
-        let mut algid = Vec::new();
-        der_seq(&[&oid_alg], &mut algid);
-        let mut bits = Vec::new();
-        der_bit_string(&pkey.raw_public_key()?, &mut bits);
-        der_seq(&[&algid, &bits], &mut out);
-    }
-    Ok(out)
-}
-
-/// Parse a SubjectPublicKeyInfo (SPKI) DER blob into a public key.
-fn spki_decode(der: &[u8]) -> Result<PKey<Public>> {
-    let mut p = 0;
-    let (tag, content) =
-        der_read_tlv(der, &mut p).ok_or_else(|| bad("malformed SPKI: not a SEQUENCE"))?;
-    if tag != 0x30 {
-        return Err(bad("malformed SPKI: outer structure is not a SEQUENCE"));
-    }
-    let mut q = 0;
-    let (atag, algid) = der_read_tlv(content, &mut q)
-        .ok_or_else(|| bad("malformed SPKI: missing AlgorithmIdentifier"))?;
-    if atag != 0x30 {
-        return Err(bad("malformed SPKI: AlgorithmIdentifier is not a SEQUENCE"));
-    }
-    let (btag, bits) = der_read_tlv(content, &mut q)
-        .ok_or_else(|| bad("malformed SPKI: missing subjectPublicKey"))?;
-    if btag != 0x03 || bits.is_empty() {
-        return Err(bad("malformed SPKI: subjectPublicKey is not a BIT STRING"));
-    }
-    let key_bytes = &bits[1..]; // skip the unused-bits octet
-
-    let mut r = 0;
-    let (otag, oid_bytes) =
-        der_read_tlv(algid, &mut r).ok_or_else(|| bad("malformed SPKI: missing algorithm OID"))?;
-    if otag != 0x06 {
-        return Err(bad("malformed SPKI: algorithm OID missing"));
-    }
-    let oid = decode_oid(oid_bytes).ok_or_else(|| bad("malformed SPKI: undecodable OID"))?;
-    let params = der_read_tlv(algid, &mut r);
-
-    match oid.as_str() {
-        "1.2.840.10045.2.1" => {
-            let crv = params
-                .and_then(|(t, c)| if t == 0x06 { decode_oid(c) } else { None })
-                .ok_or_else(|| bad("malformed SPKI: EC curve parameter missing"))?;
-            let nid =
-                curve_from_oid(&crv).ok_or_else(|| bad(format!("unsupported curve OID: {crv}")))?;
-            let group = EcGroup::from_curve_name(nid)?;
-            let ctx = BigNumContext::new()?;
-            let point = EcPoint::from_bytes(&group, key_bytes, &ctx)?;
-            let ec = EcKey::from_public_key(&group, &point)?;
-            Ok(PKey::from_ec_key(ec)?)
-        }
-        "1.2.840.113549.1.1.1" => {
-            let mut s = 0;
-            let (_, seq) = der_read_tlv(key_bytes, &mut s)
-                .ok_or_else(|| bad("malformed SPKI: RSAPublicKey is not a SEQUENCE"))?;
-            let mut t = 0;
-            let (_, n_b) = der_read_tlv(seq, &mut t)
-                .ok_or_else(|| bad("malformed SPKI: RSA modulus missing"))?;
-            let (_, e_b) = der_read_tlv(seq, &mut t)
-                .ok_or_else(|| bad("malformed SPKI: RSA exponent missing"))?;
-            let n = BigNum::from_slice(n_b)?;
-            let e = BigNum::from_slice(e_b)?;
-            Ok(PKey::from_rsa(Rsa::from_public_components(&n, &e)?)?)
-        }
-        "1.3.101.112" => Ok(PKey::public_key_from_raw_bytes(key_bytes, Id::ED25519)?),
-        "1.3.101.110" => Ok(PKey::public_key_from_raw_bytes(key_bytes, Id::X25519)?),
-        _ => Err(bad(format!("unsupported SPKI algorithm OID: {oid}"))),
-    }
-}
-
-fn aead_seal(cipher: Cipher, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let mut c = Crypter::new(cipher, Mode::Encrypt, key, Some(iv))?;
-    c.pad(false);
-    if !aad.is_empty() {
-        c.aad_update(aad)?;
-    }
-    let mut out = vec![0u8; data.len() + cipher.block_size()];
-    let mut n = c.update(data, &mut out)?;
-    n += c.finalize(&mut out[n..])?;
-    out.truncate(n);
-    let mut tag = [0u8; 16];
-    c.get_tag(&mut tag)?;
-    out.extend_from_slice(&tag);
-    Ok(out)
-}
-
-fn aead_open(cipher: Cipher, key: &[u8], iv: &[u8], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    if data.len() < 16 {
-        return Err(bad("ciphertext too short to contain an authentication tag"));
-    }
-    let (ct, tag) = data.split_at(data.len() - 16);
-    let mut c = Crypter::new(cipher, Mode::Decrypt, key, Some(iv))?;
-    c.pad(false);
-    c.set_tag_len(16)?;
-    c.set_tag(tag)?;
-    if !aad.is_empty() {
-        c.aad_update(aad)?;
-    }
-    let mut out = vec![0u8; ct.len() + cipher.block_size()];
-    let mut n = c.update(ct, &mut out)?;
-    n += c.finalize(&mut out[n..])?;
-    out.truncate(n);
-    Ok(out)
-}
-
-fn block_crypt(cipher: Cipher, mode: Mode, key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let mut c = Crypter::new(cipher, mode, key, Some(iv))?;
-    c.pad(false);
-    let mut out = vec![0u8; data.len() + cipher.block_size()];
-    let mut n = c.update(data, &mut out)?;
-    n += c.finalize(&mut out[n..])?;
-    out.truncate(n);
-    Ok(out)
-}
-
-fn aes_ecb_raw(cipher: Cipher, mode: Mode, key: &[u8], block: &[u8]) -> Result<Vec<u8>> {
-    let mut c = Crypter::new(cipher, mode, key, None)?;
-    c.pad(false);
-    let mut out = vec![0u8; block.len() + cipher.block_size()];
-    let mut n = c.update(block, &mut out)?;
-    n += c.finalize(&mut out[n..])?;
-    out.truncate(n);
-    Ok(out)
-}
-
-/// RFC 3394 AES key wrap.
-fn aes_kw_wrap(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    if plaintext.len() % 8 != 0 || plaintext.len() < 16 {
-        return Err(bad(
-            "AES-KW key material must be a multiple of 8 bytes and at least 16 bytes",
-        ));
-    }
-    let n = plaintext.len() / 8;
-    let cipher = aes_cipher("AES-KW", (kek.len() * 8) as u32)?;
-    let mut blocks: Vec<[u8; 8]> = plaintext
-        .chunks_exact(8)
-        .map(|c| {
-            let mut b = [0u8; 8];
-            b.copy_from_slice(c);
-            b
+    fn alg_kind(name: &str) -> Option<AlgKind> {
+        Some(match name {
+            "AES-CBC" | "AES-CTR" | "AES-GCM" | "AES-KW" | "AES-OCB" => AlgKind::Aes,
+            "ChaCha20-Poly1305" => AlgKind::ChaCha,
+            "HMAC" | "KMAC128" | "KMAC256" => AlgKind::Mac,
+            "ECDSA" => AlgKind::Ecdsa,
+            "ECDH" => AlgKind::Ecdh,
+            "Ed25519" | "Ed448" => AlgKind::Ed25519,
+            "X25519" | "X448" => AlgKind::X25519,
+            "RSA-OAEP" => AlgKind::RsaOaep,
+            "RSA-PSS" => AlgKind::RsaPss,
+            "RSASSA-PKCS1-v1_5" => AlgKind::RsaPkcs1,
+            "PBKDF2" | "HKDF" | "Argon2d" | "Argon2i" | "Argon2id" => AlgKind::Kdf,
+            _ => return None,
         })
-        .collect();
-    let mut a = [0xA6u8; 8]; // RFC 3394 default IV
-    for i in 1..=6u64 {
-        for (j, blk) in blocks.iter_mut().enumerate() {
-            let mut input = Vec::with_capacity(16);
-            input.extend_from_slice(&a);
-            input.extend_from_slice(blk);
-            let enc = aes_ecb_raw(cipher, Mode::Encrypt, kek, &input)?;
-            a.copy_from_slice(&enc[..8]);
-            blk.copy_from_slice(&enc[8..]);
-            let cnt = (i * n as u64 + j as u64).to_be_bytes();
-            for k in 0..8 {
-                a[k] ^= cnt[k];
+    }
+
+    fn is_symmetric(kind: AlgKind) -> bool {
+        matches!(kind, AlgKind::Aes | AlgKind::ChaCha | AlgKind::Mac)
+    }
+
+    fn hash_name(hash: &Option<KeyAlgorithm>) -> String {
+        hash.as_ref()
+            .map(|h| h.name.clone())
+            .unwrap_or_else(|| "SHA-256".to_string())
+    }
+
+    fn allowed_usages(kind: AlgKind, alg_name: &str) -> &'static [&'static str] {
+        match kind {
+            AlgKind::Aes if alg_name == "AES-KW" => &["wrapKey", "unwrapKey"],
+            AlgKind::Aes => &["encrypt", "decrypt", "wrapKey", "unwrapKey"],
+            AlgKind::ChaCha => &["encrypt", "decrypt"],
+            AlgKind::Mac => &["sign", "verify"],
+            AlgKind::Ecdsa | AlgKind::Ed25519 | AlgKind::RsaPss | AlgKind::RsaPkcs1 => {
+                &["sign", "verify"]
             }
+            AlgKind::Ecdh | AlgKind::X25519 => &["deriveKey", "deriveBits"],
+            AlgKind::RsaOaep => &["encrypt", "decrypt", "wrapKey", "unwrapKey"],
+            AlgKind::Kdf => &["deriveKey", "deriveBits"],
         }
     }
-    let mut out = Vec::with_capacity((n + 1) * 8);
-    out.extend_from_slice(&a);
-    for b in &blocks {
-        out.extend_from_slice(b);
-    }
-    Ok(out)
-}
 
-/// RFC 3394 AES key unwrap.
-fn aes_kw_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>> {
-    if wrapped.len() % 8 != 0 || wrapped.len() < 24 {
-        return Err(bad(
-            "AES-KW wrapped key must be a multiple of 8 bytes and at least 24 bytes",
-        ));
-    }
-    let n = wrapped.len() / 8 - 1;
-    let cipher = aes_cipher("AES-KW", (kek.len() * 8) as u32)?;
-    let mut a = [0u8; 8];
-    a.copy_from_slice(&wrapped[..8]);
-    let mut blocks: Vec<[u8; 8]> = wrapped[8..]
-        .chunks_exact(8)
-        .map(|c| {
-            let mut b = [0u8; 8];
-            b.copy_from_slice(c);
-            b
-        })
-        .collect();
-    for i in (1..=6u64).rev() {
-        for j in (0..n).rev() {
-            let cnt = (i * n as u64 + j as u64).to_be_bytes();
-            let mut at = a;
-            for k in 0..8 {
-                at[k] ^= cnt[k];
-            }
-            let mut input = Vec::with_capacity(16);
-            input.extend_from_slice(&at);
-            input.extend_from_slice(&blocks[j]);
-            let dec = aes_ecb_raw(cipher, Mode::Decrypt, kek, &input)?;
-            a.copy_from_slice(&dec[..8]);
-            blocks[j].copy_from_slice(&dec[8..]);
+    fn validate_usages(kind: AlgKind, alg_name: &str, usages: &[String]) -> napi::Result<()> {
+        if usages.is_empty() {
+            return Err(bad("Usages cannot be empty"));
         }
-    }
-    if a != [0xA6u8; 8] {
-        return Err(fail("AES-KW integrity check failed"));
-    }
-    let mut out = Vec::with_capacity(n * 8);
-    for b in &blocks {
-        out.extend_from_slice(b);
-    }
-    Ok(out)
-}
-
-fn public_from_private(p: &PKey<Private>) -> Result<PKey<Public>> {
-    if let Some(ec) = p.ec_key() {
-        let ec_pub = EcKey::from_public_key(ec.group(), ec.public_key())?;
-        return Ok(PKey::from_ec_key(ec_pub)?);
-    }
-    if let Some(rsa) = p.rsa() {
-        let n = BigNum::from_slice(&rsa.n().to_vec())?;
-        let e = BigNum::from_slice(&rsa.e().to_vec())?;
-        return Ok(PKey::from_rsa(Rsa::from_public_components(&n, &e)?)?);
-    }
-    PKey::public_key_from_raw_bytes(&p.raw_public_key()?, p.id())
-}
-
-fn fill_derived(alg: &mut CryptoKeyAlgorithm, material: &KeyMaterial) {
-    match material {
-        KeyMaterial::Secret(b) => alg.length = Some((b.len() * 8) as u32),
-        KeyMaterial::Private(p) | KeyMaterial::Public(p) => {
-            if let Some(ec) = p.ec_key() {
-                if let Some(nid) = ec.group().curve_name() {
-                    alg.named_curve = Some(curve_name(nid).to_string());
-                }
-            } else if let Some(rsa) = p.rsa() {
-                alg.modulus_length = Some(p.bits());
-                alg.public_exponent = Some(rsa.e().to_vec());
-            }
-            if alg.hash.is_none()
-                && matches!(
-                    alg.name.as_str(),
-                    "RSA-OAEP" | "RSA-PSS" | "RSASSA-PKCS1-v1_5"
-                )
-            {
-                alg.hash = Some(KeyAlgorithm {
-                    name: "SHA-256".to_string(),
-                });
-            }
-        }
-    }
-}
-
-const B64URL_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-fn b64url_encode(data: &[u8]) -> String {
-    let mut out = String::new();
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        let n = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i + 2]);
-        out.push(B64URL_CHARS[(n >> 18) as usize] as char);
-        out.push(B64URL_CHARS[((n >> 12) & 0x3f) as usize] as char);
-        out.push(B64URL_CHARS[((n >> 6) & 0x3f) as usize] as char);
-        out.push(B64URL_CHARS[(n & 0x3f) as usize] as char);
-        i += 3;
-    }
-    let rem = data.len() - i;
-    if rem == 1 {
-        let n = u32::from(data[i]) << 16;
-        out.push(B64URL_CHARS[(n >> 18) as usize] as char);
-        out.push(B64URL_CHARS[((n >> 12) & 0x3f) as usize] as char);
-    } else if rem == 2 {
-        let n = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8);
-        out.push(B64URL_CHARS[(n >> 18) as usize] as char);
-        out.push(B64URL_CHARS[((n >> 12) & 0x3f) as usize] as char);
-        out.push(B64URL_CHARS[((n >> 6) & 0x3f) as usize] as char);
-    }
-    out
-}
-
-fn b64url_decode(s: &str) -> Result<Vec<u8>> {
-    let mut rev = [255u8; 256];
-    for (i, &c) in B64URL_CHARS.iter().enumerate() {
-        rev[c as usize] = i as u8;
-    }
-    let s = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < s.len() {
-        let mut buf = [255u8; 4];
-        let mut cnt = 0;
-        while i < s.len() && cnt < 4 {
-            let c = s[i];
-            if c == b'=' {
-                i += 1;
-                continue;
-            }
-            let v = rev[c as usize];
-            if v == 255 {
-                return Err(bad("invalid base64url character"));
-            }
-            buf[cnt] = v;
-            cnt += 1;
-            i += 1;
-        }
-        if cnt == 0 {
-            break;
-        }
-        if cnt == 4 {
-            let n = (u32::from(buf[0]) << 18)
-                | (u32::from(buf[1]) << 12)
-                | (u32::from(buf[2]) << 6)
-                | u32::from(buf[3]);
-            out.push((n >> 16) as u8);
-            out.push((n >> 8) as u8);
-            out.push(n as u8);
-        } else if cnt == 3 {
-            let n =
-                (u32::from(buf[0]) << 18) | (u32::from(buf[1]) << 12) | (u32::from(buf[2]) << 6);
-            out.push((n >> 16) as u8);
-            out.push((n >> 8) as u8);
-        } else if cnt == 2 {
-            let n = (u32::from(buf[0]) << 18) | (u32::from(buf[1]) << 12);
-            out.push((n >> 16) as u8);
-        } else {
-            return Err(bad("invalid base64url length"));
-        }
-    }
-    Ok(out)
-}
-
-fn jwk_alg_name(alg: &CryptoKeyAlgorithm) -> String {
-    match alg.name.as_str() {
-        "HMAC" => format!("HS{}", alg.length.unwrap_or(256)),
-        "ECDSA" => format!(
-            "ES{}",
-            alg.named_curve
-                .as_deref()
-                .unwrap_or("256")
-                .trim_start_matches('P')
-        ),
-        "RSASSA-PKCS1-v1_5" => "RS256".to_string(),
-        "RSA-PSS" => "PS256".to_string(),
-        "RSA-OAEP" => "RSA-OAEP".to_string(),
-        n => n.to_string(),
-    }
-}
-
-fn jwk_encode(key: &CryptoKey) -> Result<serde_json::Value> {
-    use serde_json::{Map, Value, json};
-    let mut m = Map::new();
-    match &key.material {
-        KeyMaterial::Secret(b) => {
-            m.insert("kty".into(), json!("oct"));
-            m.insert("k".into(), json!(b64url_encode(b)));
-        }
-        KeyMaterial::Private(p) | KeyMaterial::Public(p) => {
-            let is_private = matches!(key.material, KeyMaterial::Private(_));
-            if let Some(ec) = p.ec_key() {
-                let nid = ec
-                    .group()
-                    .curve_name()
-                    .ok_or_else(|| fail("cannot determine the key's curve"))?;
-                let ctx = BigNumContext::new()?;
-                let point = ec.public_key().to_bytes(
-                    ec.group(),
-                    PointConversionForm::UNCOMPRESSED,
-                    &ctx,
-                )?;
-                let coord_len = (point.len() - 1) / 2;
-                m.insert("kty".into(), json!("EC"));
-                m.insert("crv".into(), json!(curve_name(nid)));
-                m.insert("x".into(), json!(b64url_encode(&point[1..1 + coord_len])));
-                m.insert("y".into(), json!(b64url_encode(&point[1 + coord_len..])));
-                if is_private {
-                    m.insert("d".into(), json!(b64url_encode(&ec.private_key().to_vec())));
-                }
-            } else if let Some(rsa) = p.rsa() {
-                m.insert("kty".into(), json!("RSA"));
-                m.insert("n".into(), json!(b64url_encode(&rsa.n().to_vec())));
-                m.insert("e".into(), json!(b64url_encode(&rsa.e().to_vec())));
-                if is_private {
-                    m.insert("d".into(), json!(b64url_encode(&rsa.d().to_vec())));
-                    m.insert("p".into(), json!(b64url_encode(&rsa.p().to_vec())));
-                    m.insert("q".into(), json!(b64url_encode(&rsa.q().to_vec())));
-                    m.insert("dp".into(), json!(b64url_encode(&rsa.dmp1().to_vec())));
-                    m.insert("dq".into(), json!(b64url_encode(&rsa.dmq1().to_vec())));
-                    m.insert("qi".into(), json!(b64url_encode(&rsa.iqmp().to_vec())));
-                }
-            } else {
-                let crv = match p.id() {
-                    Id::ED25519 => "Ed25519",
-                    Id::X25519 => "X25519",
-                    _ => return Err(fail("unsupported key type for JWK export")),
-                };
-                m.insert("kty".into(), json!("OKP"));
-                m.insert("crv".into(), json!(crv));
-                m.insert("x".into(), json!(b64url_encode(&p.raw_public_key()?)));
-                if is_private {
-                    m.insert("d".into(), json!(b64url_encode(&p.raw_private_key()?)));
-                }
-            }
-        }
-    }
-    m.insert("alg".into(), json!(jwk_alg_name(&key.algorithm)));
-    m.insert("ext".into(), json!(key.extractable));
-    m.insert(
-        "key_ops".into(),
-        json!(key.usages.iter().cloned().collect::<Vec<_>>()),
-    );
-    Ok(Value::Object(m))
-}
-
-fn jwk_str(jwk: &serde_json::Value, field: &str) -> Result<String> {
-    jwk.get(field)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| bad(format!("JWK is missing the '{field}' member")))
-}
-
-fn ec_point_from_coords(group: &EcGroupRef, x: &[u8], y: &[u8]) -> Result<EcPoint> {
-    let mut buf = Vec::with_capacity(1 + x.len() + y.len());
-    buf.push(0x04); // uncompressed
-    buf.extend_from_slice(x);
-    buf.extend_from_slice(y);
-    let ctx = BigNumContext::new()?;
-    Ok(EcPoint::from_bytes(group, &buf, &ctx)?)
-}
-
-fn jwk_decode(
-    jwk: &serde_json::Value,
-    algorithm: CryptoKeyAlgorithm,
-    extractable: bool,
-    usages: Vec<String>,
-) -> Result<CryptoKey> {
-    let kty = jwk_str(jwk, "kty")?;
-    let kind = alg_kind(&algorithm.name)
-        .ok_or_else(|| bad(format!("unsupported algorithm: {}", algorithm.name)))?;
-    validate_usages(kind, &algorithm.name, &usages)?;
-    let mut alg = algorithm;
-
-    let (material, key_type) = match kty.as_str() {
-        "oct" => {
-            let k = b64url_decode(&jwk_str(jwk, "k")?)?;
-            (KeyMaterial::Secret(k), "secret")
-        }
-        "EC" => {
-            let nid = curve_nid(&jwk_str(jwk, "crv")?)?;
-            let group = EcGroup::from_curve_name(nid)?;
-            let x = b64url_decode(&jwk_str(jwk, "x")?)?;
-            let y = b64url_decode(&jwk_str(jwk, "y")?)?;
-            let point = ec_point_from_coords(&group, &x, &y)?;
-            match jwk.get("d").and_then(|v| v.as_str()) {
-                Some(ds) => {
-                    let d = b64url_decode(ds)?;
-                    let ec = EcKey::from_private_components(
-                        &group,
-                        &BigNum::from_slice(&d)?,
-                        Some(&point),
-                    )?;
-                    (KeyMaterial::Private(PKey::from_ec_key(ec)?), "private")
-                }
-                None => {
-                    let ec = EcKey::from_public_key(&group, &point)?;
-                    (KeyMaterial::Public(PKey::from_ec_key(ec)?), "public")
-                }
-            }
-        }
-        "RSA" => {
-            let n = BigNum::from_slice(&b64url_decode(&jwk_str(jwk, "n")?)?)?;
-            let e = BigNum::from_slice(&b64url_decode(&jwk_str(jwk, "e")?)?)?;
-            match jwk.get("d").and_then(|v| v.as_str()) {
-                Some(ds) => {
-                    let d = b64url_decode(ds)?;
-                    let rsa = Rsa::from_private_components(
-                        &n,
-                        &e,
-                        &BigNum::from_slice(&d)?,
-                        &BigNum::from_slice(&b64url_decode(&jwk_str(jwk, "p")?)?)?,
-                        &BigNum::from_slice(&b64url_decode(&jwk_str(jwk, "q")?)?)?,
-                        &BigNum::from_slice(&b64url_decode(&jwk_str(jwk, "dp")?)?)?,
-                        &BigNum::from_slice(&b64url_decode(&jwk_str(jwk, "dq")?)?)?,
-                        &BigNum::from_slice(&b64url_decode(&jwk_str(jwk, "qi")?)?)?,
-                    )?;
-                    (KeyMaterial::Private(PKey::from_rsa(rsa)?), "private")
-                }
-                None => (
-                    KeyMaterial::Public(PKey::from_rsa(Rsa::from_public_components(&n, &e)?)?),
-                    "public",
-                ),
-            }
-        }
-        "OKP" => {
-            let crv = jwk_str(jwk, "crv")?;
-            let id = match crv.as_str() {
-                "Ed25519" => Id::ED25519,
-                "X25519" => Id::X25519,
-                _ => return Err(bad(format!("unsupported OKP curve: {crv}"))),
-            };
-            let x = b64url_decode(&jwk_str(jwk, "x")?)?;
-            match jwk.get("d").and_then(|v| v.as_str()) {
-                Some(ds) => {
-                    let d = b64url_decode(ds)?;
-                    let p = PKey::private_key_from_raw_bytes(&d, id)?;
-                    (KeyMaterial::Private(p), "private")
-                }
-                None => (
-                    KeyMaterial::Public(PKey::public_key_from_raw_bytes(&x, id)?),
-                    "public",
-                ),
-            }
-        }
-        other => return Err(bad(format!("unsupported JWK key type: {other}"))),
-    };
-
-    fill_derived(&mut alg, &material);
-    Ok(CryptoKey {
-        material,
-        algorithm: alg,
-        extractable,
-        key_type: key_type.to_string(),
-        usages,
-        public_key: None,
-        private_key: None,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Operation helpers
-// ---------------------------------------------------------------------------
-
-fn hmac(md: MessageDigest, key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let pkey = PKey::hmac(key)?;
-    let mut s = Signer::new(md, &pkey)?;
-    s.update(data)?;
-    Ok(s.sign_to_vec()?)
-}
-
-/// Manual HKDF (extract + expand) — avoids the opaque blsful kdf helper surface.
-fn hkdf(
-    md: MessageDigest,
-    ikm: &[u8],
-    salt: Option<&[u8]>,
-    info: Option<&[u8]>,
-    out: &mut [u8],
-) -> Result<()> {
-    let hashlen = md.size();
-    let empty = vec![0u8; hashlen];
-    let salt = salt.unwrap_or(&empty);
-    let info = info.unwrap_or(&[]);
-    // Extract
-    let prk = hmac(md, salt, ikm)?;
-    // Expand
-    let mut acc = Vec::new();
-    let mut t = Vec::new();
-    let mut counter: u8 = 1;
-    while acc.len() < out.len() {
-        let mut input = Vec::with_capacity(t.len() + info.len() + 1);
-        input.extend_from_slice(&t);
-        input.extend_from_slice(info);
-        input.push(counter);
-        t = hmac(md, &prk, &input)?;
-        acc.extend_from_slice(&t);
-        counter = counter.wrapping_add(1);
-        if counter == 0 {
-            break;
-        }
-    }
-    out.copy_from_slice(&acc[..out.len()]);
-    Ok(())
-}
-
-fn sign_impl(
-    kind: AlgKind,
-    pkey: &PKey<Private>,
-    hash_name: &str,
-    salt_len: Option<u32>,
-    data: &[u8],
-) -> Result<Vec<u8>> {
-    let mut s = match kind {
-        AlgKind::Ed25519 => Signer::new_without_digest(pkey)?,
-        AlgKind::Ecdsa => Signer::new(digest_from_name(hash_name)?, pkey)?,
-        AlgKind::RsaPss => {
-            let mut s = Signer::new(digest_from_name(hash_name)?, pkey)?;
-            s.set_rsa_padding(Padding::PKCS1_PSS)?;
-            s.set_rsa_pss_saltlen(RsaPssSaltlen::DIGEST_LENGTH)?;
-            s
-        }
-        AlgKind::RsaPkcs1 => Signer::new(digest_from_name(hash_name)?, pkey)?,
-        _ => return Err(bad("algorithm does not support signing")),
-    };
-    s.update(data)?;
-    Ok(s.sign_to_vec()?)
-}
-
-fn verify_impl(
-    kind: AlgKind,
-    pkey: &PKey<Public>,
-    hash_name: &str,
-    data: &[u8],
-    signature: &[u8],
-) -> Result<bool> {
-    let mut v = match kind {
-        AlgKind::Ed25519 => Verifier::new_without_digest(pkey)?,
-        AlgKind::Ecdsa => Verifier::new(digest_from_name(hash_name)?, pkey)?,
-        AlgKind::RsaPss => {
-            let mut v = Verifier::new(digest_from_name(hash_name)?, pkey)?;
-            v.set_rsa_padding(Padding::PKCS1_PSS)?;
-            v.set_rsa_pss_saltlen(RsaPssSaltlen::DIGEST_LENGTH)?;
-            v
-        }
-        AlgKind::RsaPkcs1 => Verifier::new(digest_from_name(hash_name)?, pkey)?,
-        _ => return Err(bad("algorithm does not support verification")),
-    };
-    v.update(data)?;
-    Ok(v.verify(signature)?)
-}
-
-fn encrypt_impl(params: &CryptoOpParams, key: &CryptoKey, data: &[u8]) -> Result<Vec<u8>> {
-    let name = params
-        .name
-        .clone()
-        .ok_or_else(|| bad("encrypt requires algorithm.name"))?;
-    let kind = alg_kind(&name).ok_or_else(|| bad(format!("unsupported algorithm: {name}")))?;
-    key.check_usage("encrypt")?;
-    let iv = params.iv.as_ref().map(|u| u.as_ref().to_vec());
-    let aad = params
-        .additional_data
-        .as_ref()
-        .map(|u| u.as_ref().to_vec())
-        .unwrap_or_default();
-
-    match (&key.material, kind) {
-        (KeyMaterial::Secret(k), AlgKind::Aes) => {
-            let bits = (k.len() * 8) as u32;
-            let cipher = aes_cipher(&name, bits)?;
-            if is_aead(&name) {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                aead_seal(cipher, k, &iv, &aad, data)
-            } else if name == "AES-KW" {
-                Err(bad("AES-KW cannot be used with encrypt; use wrapKey"))
-            } else {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                block_crypt(cipher, Mode::Encrypt, k, &iv, data)
-            }
-        }
-        (KeyMaterial::Secret(k), AlgKind::ChaCha) => {
-            let iv = iv.ok_or_else(|| bad("ChaCha20-Poly1305 requires an iv"))?;
-            aead_seal(Cipher::chacha20_poly1305(), k, &iv, &aad, data)
-        }
-        (KeyMaterial::Public(p), AlgKind::RsaOaep)
-        | (KeyMaterial::Private(p), AlgKind::RsaOaep) => {
-            let md = digest_from_name(&hash_name(&params.hash))?;
-            let mut e = Encrypter::new(p)?;
-            e.set_rsa_padding(Padding::PKCS1_OAEP)?;
-            e.set_rsa_oaep_md(md)?;
-            if let Some(l) = &params.label {
-                if !l.is_empty() {
-                    e.set_rsa_oaep_label(l.as_ref())?;
-                }
-            }
-            Ok(e.encrypt(data)?)
-        }
-        _ => Err(bad(format!(
-            "{name} cannot be used to encrypt with this key"
-        ))),
-    }
-}
-
-fn decrypt_impl(params: &CryptoOpParams, key: &CryptoKey, data: &[u8]) -> Result<Vec<u8>> {
-    let name = params
-        .name
-        .clone()
-        .ok_or_else(|| bad("decrypt requires algorithm.name"))?;
-    let kind = alg_kind(&name).ok_or_else(|| bad(format!("unsupported algorithm: {name}")))?;
-    key.check_usage("decrypt")?;
-    let iv = params.iv.as_ref().map(|u| u.as_ref().to_vec());
-    let aad = params
-        .additional_data
-        .as_ref()
-        .map(|u| u.as_ref().to_vec())
-        .unwrap_or_default();
-
-    match (&key.material, kind) {
-        (KeyMaterial::Secret(k), AlgKind::Aes) => {
-            let bits = (k.len() * 8) as u32;
-            let cipher = aes_cipher(&name, bits)?;
-            if is_aead(&name) {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                aead_open(cipher, k, &iv, &aad, data)
-            } else if name == "AES-KW" {
-                Err(bad("AES-KW cannot be used with decrypt; use unwrapKey"))
-            } else {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                block_crypt(cipher, Mode::Decrypt, k, &iv, data)
-            }
-        }
-        (KeyMaterial::Secret(k), AlgKind::ChaCha) => {
-            let iv = iv.ok_or_else(|| bad("ChaCha20-Poly1305 requires an iv"))?;
-            aead_open(Cipher::chacha20_poly1305(), k, &iv, &aad, data)
-        }
-        (KeyMaterial::Private(p), AlgKind::RsaOaep) => {
-            let md = digest_from_name(&hash_name(&params.hash))?;
-            let mut d = Decrypter::new(p)?;
-            d.set_rsa_padding(Padding::PKCS1_OAEP)?;
-            d.set_rsa_oaep_md(md)?;
-            if let Some(l) = &params.label {
-                if !l.is_empty() {
-                    d.set_rsa_oaep_label(l.as_ref())?;
-                }
-            }
-            Ok(d.decrypt(data)?)
-        }
-        _ => Err(bad(format!(
-            "{name} cannot be used to decrypt with this key"
-        ))),
-    }
-}
-
-/// HMAC over `data` using `password`, backed by blsful (OpenSSL). Keeps the
-/// PBKDF2 path free of a direct `blsful` crate dependency.
-fn bls_hmac(md: MessageDigest, password: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let pkey = PKey::hmac(password)?;
-    let mut signer = Signer::new(md, &pkey)?;
-    signer.update(data)?;
-    Ok(signer.sign_to_vec()?)
-}
-
-/// PBKDF2-HMAC implemented on top of [`bls_hmac`], replacing `blsful::pkcs5`.
-fn pbkdf2_hmac_bl(
-    md: MessageDigest,
-    password: &[u8],
-    salt: &[u8],
-    iter: usize,
-    out: &mut [u8],
-) -> Result<()> {
-    let hlen = md.size();
-    if hlen == 0 {
-        return Err(bad("unsupported digest for PBKDF2"));
-    }
-    let mut i = 1u32;
-    let mut offset = 0usize;
-    while offset < out.len() {
-        let mut msg = Vec::with_capacity(salt.len() + 4);
-        msg.extend_from_slice(salt);
-        msg.extend_from_slice(&i.to_be_bytes());
-        let mut u = bls_hmac(md, password, &msg)?;
-        let mut t = u.clone();
-        for _ in 1..iter {
-            u = bls_hmac(md, password, &u)?;
-            for (a, b) in t.iter_mut().zip(u.iter()) {
-                *a ^= *b;
-            }
-        }
-        let take = std::cmp::min(hlen, out.len() - offset);
-        out[offset..offset + take].copy_from_slice(&t[..take]);
-        offset += take;
-        i += 1;
-    }
-    Ok(())
-}
-
-fn derive_bits_impl(
-    params: &CryptoOpParams,
-    base_key: &CryptoKey,
-    length: Option<u32>,
-) -> Result<Vec<u8>> {
-    let name = params
-        .name
-        .clone()
-        .ok_or_else(|| bad("deriveBits requires algorithm.name"))?;
-    let kind = alg_kind(&name).ok_or_else(|| bad(format!("unsupported algorithm: {name}")))?;
-    // Web Crypto allows either "deriveKey" or "deriveBits" usage for derivation.
-    if !base_key
-        .usages
-        .iter()
-        .any(|u| u == "deriveBits" || u == "deriveKey")
-    {
-        return Err(bad(
-            "The requested operation is not valid for this key; 'deriveKey'/'deriveBits' is not in its usages",
-        ));
-    }
-    let md = digest_from_name(&hash_name(&params.hash))?;
-
-    match (&base_key.material, kind) {
-        (KeyMaterial::Secret(k), AlgKind::Kdf) => match name.as_str() {
-            "PBKDF2" => {
-                let salt = params
-                    .salt
-                    .as_ref()
-                    .ok_or_else(|| bad("PBKDF2 requires a salt"))?;
-                let iters = params.iterations.unwrap_or(100_000);
-                let len = length.ok_or_else(|| bad("PBKDF2 deriveBits requires a length"))?;
-                let mut out = vec![0u8; (len / 8) as usize];
-                pbkdf2_hmac_bl(md, k, salt.as_ref(), iters as usize, &mut out)?;
-                Ok(out)
-            }
-            "HKDF" => {
-                let len = length.ok_or_else(|| bad("HKDF deriveBits requires a length"))?;
-                let mut out = vec![0u8; (len / 8) as usize];
-                hkdf(
-                    md,
-                    k,
-                    params.salt.as_ref().map(|s| s.as_ref()),
-                    params.info.as_ref().map(|i| i.as_ref()),
-                    &mut out,
-                )?;
-                Ok(out)
-            }
-            _ => Err(bad(format!("{name} is not supported for derivation"))),
-        },
-        (KeyMaterial::Private(p), AlgKind::Ecdh) | (KeyMaterial::Public(p), AlgKind::Ecdh) => {
-            let peer = params
-                .public
-                .as_ref()
-                .ok_or_else(|| bad("ECDH requires the peer public key as algorithm.public"))?;
-            let peer_pub = public_from_private_peer(peer)?;
-            let mut ctx = PkeyCtx::new(p)?;
-            ctx.derive_init()?;
-            ctx.derive_set_peer(&peer_pub)?;
-            let len = (p.bits() as usize + 7) / 8;
-            let mut out = vec![0u8; len];
-            ctx.derive(Some(&mut out))?;
-            Ok(out)
-        }
-        (KeyMaterial::Private(p), AlgKind::X25519) => {
-            let peer = params
-                .public
-                .as_ref()
-                .ok_or_else(|| bad("X25519 requires the peer public key as algorithm.public"))?;
-            let peer_pub = public_from_private_peer(peer)?;
-            let mut ctx = PkeyCtx::new(p)?;
-            ctx.derive_init()?;
-            ctx.derive_set_peer(&peer_pub)?;
-            let mut out = vec![0u8; 32];
-            ctx.derive(Some(&mut out))?;
-            Ok(out)
-        }
-        _ => Err(bad(format!(
-            "{name} cannot be used for derivation with this key"
-        ))),
-    }
-}
-
-fn public_from_private_peer(peer: &CryptoKey) -> Result<PKey<Public>> {
-    match &peer.material {
-        KeyMaterial::Public(p) => Ok(p.clone()),
-        KeyMaterial::Private(p) => public_from_private(p),
-        KeyMaterial::Secret(_) => Err(bad("a symmetric key cannot be an ECDH peer")),
-    }
-}
-
-fn to_public_of(key: &CryptoKey) -> Result<PKey<Public>> {
-    match &key.material {
-        KeyMaterial::Public(p) => Ok(p.clone()),
-        KeyMaterial::Private(p) => public_from_private(p),
-        KeyMaterial::Secret(_) => Err(bad("symmetric keys have no public half")),
-    }
-}
-
-fn to_private_of(key: &CryptoKey) -> Result<PKey<Private>> {
-    match &key.material {
-        KeyMaterial::Private(p) => Ok(p.clone()),
-        _ => Err(bad("operation requires a private key")),
-    }
-}
-
-fn to_secret_of(key: &CryptoKey) -> Result<Vec<u8>> {
-    match &key.material {
-        KeyMaterial::Secret(b) => Ok(b.clone()),
-        _ => Err(bad("operation requires a symmetric (secret) key")),
-    }
-}
-
-fn to_private_of_key(material: &KeyMaterial) -> Result<PKey<Private>> {
-    match material {
-        KeyMaterial::Private(p) => Ok(p.clone()),
-        _ => Err(bad("expected a private key")),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The class
-// ---------------------------------------------------------------------------
-
-/// Normalize an algorithm argument that may be given either as a bare name
-/// string (Node allows `"AES-GCM"`) or as a full algorithm dictionary.
-fn to_key_algorithm(a: Either<String, CryptoKeyAlgorithm>) -> CryptoKeyAlgorithm {
-    match a {
-        Either::A(name) => CryptoKeyAlgorithm {
-            name,
-            length: None,
-            named_curve: None,
-            hash: None,
-            modulus_length: None,
-            public_exponent: None,
-        },
-        Either::B(a) => a,
-    }
-}
-
-#[napi]
-impl CryptoKey {
-    /// Generate a new key (or key pair) for `algorithm`.
-    ///
-    /// Asymmetric generation returns a `CryptoKey` whose `publicKey` /
-    /// `privateKey` getters are populated, so `const { publicKey, privateKey } =
-    /// await new CryptoKey(...)` works.
-    #[napi(constructor)]
-    pub fn new(
-        algorithm: Either<String, CryptoKeyAlgorithm>,
-        extractable: bool,
-        usages: Vec<String>,
-    ) -> Result<Self> {
-        Self::build_key(algorithm, extractable, usages)
-    }
-
-    fn build_key(
-        algorithm: Either<String, CryptoKeyAlgorithm>,
-        extractable: bool,
-        usages: Vec<String>,
-    ) -> Result<Self> {
-        let mut algorithm = to_key_algorithm(algorithm);
-        let kind = alg_kind(&algorithm.name)
-            .ok_or_else(|| bad(format!("unsupported algorithm: {}", algorithm.name)))?;
-        validate_usages(kind, &algorithm.name, &usages)?;
-
-        let material = match kind {
-            AlgKind::Aes | AlgKind::ChaCha => {
-                let bits = algorithm.length.unwrap_or(256);
-                let mut b = vec![0u8; (bits / 8) as usize];
-                rand::rng().fill_bytes(&mut b);
-                KeyMaterial::Secret(b)
-            }
-            AlgKind::Mac => {
-                let len = match algorithm.length {
-                    Some(l) => (l / 8) as usize,
-                    None => digest_from_name(&hash_name(&algorithm.hash))?.size(),
-                };
-                let mut b = vec![0u8; len];
-                rand::rng().fill_bytes(&mut b);
-                KeyMaterial::Secret(b)
-            }
-            AlgKind::Ecdsa | AlgKind::Ecdh => {
-                let curve = algorithm
-                    .named_curve
-                    .clone()
-                    .unwrap_or_else(|| "P-256".to_string());
-                let group = EcGroup::from_curve_name(curve_nid(&curve)?)?;
-                KeyMaterial::Private(PKey::from_ec_key(EcKey::generate(&group)?)?)
-            }
-            AlgKind::Ed25519 => KeyMaterial::Private(PKey::generate_ed25519()?),
-            AlgKind::X25519 => KeyMaterial::Private(PKey::generate_x25519()?),
-            AlgKind::RsaOaep | AlgKind::RsaPss | AlgKind::RsaPkcs1 => {
-                let bits = algorithm.modulus_length.unwrap_or(2048);
-                let e_bytes = algorithm
-                    .public_exponent
-                    .as_ref()
-                    .map(|u| u.as_ref().to_vec())
-                    .unwrap_or_else(|| vec![1, 0, 1]);
-                let e = BigNum::from_slice(&e_bytes)?;
-                KeyMaterial::Private(PKey::from_rsa(Rsa::generate_with_e(bits, &e)?)?)
-            }
-            AlgKind::Kdf => {
+        let allowed = allowed_usages(kind, alg_name);
+        for u in usages {
+            if !allowed.contains(&u.as_str()) {
                 return Err(bad(format!(
-                    "{} does not support key generation; use importKey",
-                    algorithm.name
+                    "Unsupported key usage '{u}' for {alg_name} (allowed: {})",
+                    allowed.join(", ")
                 )));
             }
-        };
-
-        if is_symmetric(kind) {
-            fill_derived(&mut algorithm, &material);
-            return Ok(Self {
-                material,
-                algorithm,
-                extractable,
-                key_type: "secret".to_string(),
-                usages,
-                public_key: None,
-                private_key: None,
-            });
         }
-
-        let pkey = to_private_of_key(&material)?;
-        let public = public_from_private(&pkey)?;
-        fill_derived(&mut algorithm, &KeyMaterial::Private(pkey.clone()));
-        let mut pub_alg = algorithm.clone();
-        fill_derived(&mut pub_alg, &KeyMaterial::Public(public.clone()));
-
-        let pub_key = Self {
-            material: KeyMaterial::Public(public),
-            algorithm: pub_alg,
-            extractable,
-            key_type: "public".to_string(),
-            usages: usages.clone(),
-            public_key: None,
-            private_key: None,
-        };
-        let priv_key = Self {
-            material: KeyMaterial::Private(pkey.clone()),
-            algorithm: algorithm.clone(),
-            extractable,
-            key_type: "private".to_string(),
-            usages: usages.clone(),
-            public_key: None,
-            private_key: None,
-        };
-        Ok(Self {
-            material: KeyMaterial::Private(pkey),
-            algorithm,
-            extractable,
-            key_type: "private".to_string(),
-            usages,
-            public_key: Some(Box::new(pub_key)),
-            private_key: Some(Box::new(priv_key)),
-        })
+        Ok(())
     }
 
-    // --- accessors ---------------------------------------------------------
-
-    #[napi(getter)]
-    pub fn algorithm(&self) -> CryptoKeyAlgorithm {
-        self.algorithm.clone()
-    }
-
-    #[napi(getter)]
-    pub fn extractable(&self) -> bool {
-        self.extractable
-    }
-
-    #[napi(getter, js_name = "type")]
-    pub fn get_type(&self) -> String {
-        self.key_type.clone()
-    }
-
-    #[napi(getter)]
-    pub fn usages(&self) -> Vec<String> {
-        self.usages.clone()
-    }
-
-    /// Key-format identifiers, e.g. `CryptoKey.Format.JWK === "jwk"`. Pass one of
-    /// these strings to `importKey` / `exportKey` / `wrapKey` / `unwrapKey`.
-    #[napi(js_name = "Format", getter)]
-    pub fn format() -> serde_json::Value {
-        serde_json::json!({
-            "RAW": "raw",
-            "RAW_SECRET": "raw-secret",
-            "RAW_PUBLIC": "raw-public",
-            "RAW_SEED": "raw-seed",
-            "SPKI": "spki",
-            "PKCS8": "pkcs8",
-            "JWK": "jwk",
-        })
-    }
-
-    /// The public half of an asymmetric key pair, else `undefined`.
-    #[napi(getter, js_name = "publicKey")]
-    pub fn get_public_key_prop(&self) -> Option<CryptoKey> {
-        self.public_key.clone()
-    }
-
-    /// The private half of an asymmetric key pair, else `undefined`.
-    #[napi(getter, js_name = "privateKey")]
-    pub fn get_private_key_prop(&self) -> Option<CryptoKey> {
-        self.private_key.clone()
-    }
-
-    fn check_usage(&self, usage: &str) -> Result<()> {
-        if self.usages.iter().any(|u| u == usage) {
-            Ok(())
-        } else {
-            Err(bad(format!(
-                "The requested operation is not valid for this key; '{usage}' is not in its usages"
-            )))
+    /// Normalize an algorithm argument that may be given either as a bare name
+    /// string (Node allows `"AES-GCM"`) or as a full algorithm dictionary.
+    fn to_key_algorithm(a: Either<String, CryptoKeyAlgorithm>) -> CryptoKeyAlgorithm {
+        match a {
+            Either::A(name) => CryptoKeyAlgorithm {
+                name,
+                length: None,
+                named_curve: None,
+                hash: None,
+                modulus_length: None,
+                public_exponent: None,
+            },
+            Either::B(a) => a,
         }
     }
 
-    // --- key management (static) -------------------------------------------
+    /// Key material backing a [`CryptoKey`].
+    ///
+    /// The btls backend is not yet wired up, so asymmetric material is stored as
+    /// raw bytes; only symmetric (`Secret`) keys carry usable data for now.
+    #[derive(Clone)]
+    enum KeyMaterial {
+        Secret(Vec<u8>),
+        Private(Vec<u8>),
+        Public(Vec<u8>),
+    }
 
-    /// Import key material in `format` (`raw`, `raw-secret`, `pkcs8`, `spki`,
-    /// or `jwk`).
+    /// A Web Crypto `CryptoKey`.
     #[napi]
-    pub fn import_key(
-        format: String,
-        key_data: Either<Uint8Array, serde_json::Value>,
-        algorithm: Either<String, CryptoKeyAlgorithm>,
+    #[derive(Clone)]
+    pub struct CryptoKey {
+        material: KeyMaterial,
+        algorithm: CryptoKeyAlgorithm,
         extractable: bool,
+        key_type: String,
         usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        let mut alg = to_key_algorithm(algorithm);
-        let kind = alg_kind(&alg.name)
-            .ok_or_else(|| bad(format!("unsupported algorithm: {}", alg.name)))?;
-        validate_usages(kind, &alg.name, &usages)?;
+        public_key: Option<Box<CryptoKey>>,
+        private_key: Option<Box<CryptoKey>>,
+    }
 
-        let (material, key_type): (KeyMaterial, &str) = match format.as_str() {
-            "raw" | "raw-secret" => {
-                let bytes = match &key_data {
-                    Either::A(b) => b.as_ref().to_vec(),
-                    Either::B(_) => return Err(bad("raw key material must be bytes")),
-                };
-                match kind {
-                    AlgKind::Aes | AlgKind::ChaCha | AlgKind::Mac => {
-                        (KeyMaterial::Secret(bytes), "secret")
-                    }
-                    AlgKind::Ed25519 => (
-                        KeyMaterial::Private(PKey::private_key_from_raw_bytes(
-                            &bytes,
-                            Id::ED25519,
-                        )?),
-                        "private",
-                    ),
-                    AlgKind::X25519 => (
-                        KeyMaterial::Private(PKey::private_key_from_raw_bytes(&bytes, Id::X25519)?),
-                        "private",
-                    ),
-                    AlgKind::Ecdsa | AlgKind::Ecdh => {
-                        let nid = curve_nid(alg.named_curve.as_deref().unwrap_or("P-256"))?;
-                        let group = EcGroup::from_curve_name(nid)?;
-                        let ctx = BigNumContext::new()?;
-                        let d = BigNum::from_slice(&bytes)?;
-                        let point = EcPoint::mul_generator(&group, &d, &ctx)?;
-                        let ec = EcKey::from_private_components(&group, &d, Some(&point))?;
-                        (KeyMaterial::Private(PKey::from_ec_key(ec)?), "private")
-                    }
-                    _ => return Err(bad(format!("{} cannot be imported as raw", alg.name))),
+    /// The two halves of an asymmetric [`CryptoKey`].
+    #[napi]
+    pub struct CryptoKeyPair {
+        public_key: CryptoKey,
+        private_key: CryptoKey,
+    }
+
+    #[napi]
+    impl CryptoKey {
+        /// Generate a new key (or key pair) for `algorithm`.
+        ///
+        /// The btls backend is not yet implemented; this returns `NotImplemented`.
+        #[napi(constructor)]
+        pub fn new(
+            _algorithm: Either<String, CryptoKeyAlgorithm>,
+            _extractable: bool,
+            _usages: Vec<String>,
+        ) -> napi::Result<Self> {
+            Err(not_implemented())
+        }
+
+        #[napi(getter)]
+        pub fn algorithm(&self) -> CryptoKeyAlgorithm {
+            self.algorithm.clone()
+        }
+
+        #[napi(getter)]
+        pub fn extractable(&self) -> bool {
+            self.extractable
+        }
+
+        #[napi(getter, js_name = "type")]
+        pub fn get_type(&self) -> String {
+            self.key_type.clone()
+        }
+
+        #[napi(getter)]
+        pub fn usages(&self) -> Vec<String> {
+            self.usages.clone()
+        }
+
+        /// Key-format identifiers, e.g. `CryptoKey.Format.JWK === "jwk"`. Pass one of
+        /// these strings to `importKey` / `exportKey` / `wrapKey` / `unwrapKey`.
+        #[napi(js_name = "Format", getter)]
+        pub fn format() -> serde_json::Value {
+            serde_json::json!({
+                "RAW": "raw",
+                "RAW_SECRET": "raw-secret",
+                "RAW_PUBLIC": "raw-public",
+                "RAW_SEED": "raw-seed",
+                "SPKI": "spki",
+                "PKCS8": "pkcs8",
+                "JWK": "jwk",
+            })
+        }
+
+        /// The public half of an asymmetric key pair, else `undefined`.
+        #[napi(getter, js_name = "publicKey")]
+        pub fn get_public_key_prop(&self) -> Option<CryptoKey> {
+            self.public_key.clone().map(|b| *b)
+        }
+
+        /// The private half of an asymmetric key pair, else `undefined`.
+        #[napi(getter, js_name = "privateKey")]
+        pub fn get_private_key_prop(&self) -> Option<CryptoKey> {
+            self.private_key.clone().map(|b| *b)
+        }
+
+        fn check_usage(&self, usage: &str) -> napi::Result<()> {
+            if self.usages.iter().any(|u| u == usage) {
+                Ok(())
+            } else {
+                Err(bad(format!(
+                    "The requested operation is not valid for this key; '{usage}' is not in its usages"
+                )))
+            }
+        }
+
+        /// Import key material in `format` (`raw`, `raw-secret`, `pkcs8`, `spki`,
+        /// or `jwk`).
+        #[napi]
+        pub fn import_key(
+            _format: String,
+            _key_data: Uint8Array,
+            _algorithm: Either<String, CryptoKeyAlgorithm>,
+            _extractable: bool,
+            _usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Err(not_implemented())
+        }
+
+        /// Export a key. `jwk` returns the JWK object; every other format returns a
+        /// `Buffer` of DER/raw bytes.
+        #[napi]
+        pub fn export_key(
+            _format: String,
+            _key: &CryptoKey,
+        ) -> napi::Result<Buffer> {
+            Err(not_implemented())
+        }
+
+        /// Extract the public half of an asymmetric key.
+        #[napi]
+        pub fn get_public_key(_key: &CryptoKey) -> napi::Result<CryptoKey> {
+            Err(not_implemented())
+        }
+
+        /// Feature detection: is `operation` supported for `algorithm`?
+        #[napi]
+        pub fn supports(
+            operation: String,
+            algorithm: Either<String, CryptoOpParams>,
+            _length_or_additional_algorithm: Option<Either<u32, CryptoOpParams>>,
+        ) -> bool {
+            let name = match &algorithm {
+                Either::A(s) => s.clone(),
+                Either::B(a) => a.name.clone().unwrap_or_default(),
+            };
+            if name.is_empty() {
+                return false;
+            }
+            let kind = match alg_kind(&name) {
+                Some(k) => k,
+                None => return false,
+            };
+            match operation.as_str() {
+                "generateKey" => !matches!(kind, AlgKind::Kdf),
+                "importKey" => true,
+                "exportKey" => !matches!(kind, AlgKind::Kdf),
+                "encrypt" | "decrypt" => {
+                    matches!(kind, AlgKind::Aes | AlgKind::ChaCha | AlgKind::RsaOaep)
                 }
-            }
-            "pkcs8" => {
-                let bytes = match &key_data {
-                    Either::A(b) => b.as_ref().to_vec(),
-                    Either::B(_) => return Err(bad("pkcs8 key material must be bytes")),
-                };
-                (
-                    KeyMaterial::Private(PKey::private_key_from_pkcs8(&bytes)?),
-                    "private",
-                )
-            }
-            "spki" => {
-                let bytes = match &key_data {
-                    Either::A(b) => b.as_ref().to_vec(),
-                    Either::B(_) => return Err(bad("spki key material must be bytes")),
-                };
-                (KeyMaterial::Public(spki_decode(&bytes)?), "public")
-            }
-            "jwk" => match &key_data {
-                Either::B(v) => return jwk_decode(v, alg, extractable, usages),
-                Either::A(_) => return Err(bad("jwk key material must be a JWK object")),
-            },
-            other => return Err(bad(format!("unsupported key format: {other}"))),
-        };
-
-        fill_derived(&mut alg, &material);
-        Ok(CryptoKey {
-            material,
-            algorithm: alg,
-            extractable,
-            key_type: key_type.to_string(),
-            usages,
-            public_key: None,
-            private_key: None,
-        })
-    }
-
-    /// Export a key. `jwk` returns the JWK object; every other format returns a
-    /// `Buffer` of DER/raw bytes.
-    #[napi]
-    pub fn export_key(
-        format: String,
-        key: &CryptoKey,
-    ) -> Result<Either<Buffer, serde_json::Value>> {
-        if !key.extractable {
-            return Err(bad("The key is not extractable"));
-        }
-        match format.as_str() {
-            "jwk" => Ok(Either::B(jwk_encode(key)?)),
-            "raw" | "raw-secret" => {
-                let bytes = match &key.material {
-                    KeyMaterial::Secret(b) => b.clone(),
-                    KeyMaterial::Public(p) if p.id() == Id::ED25519 || p.id() == Id::X25519 => {
-                        p.raw_public_key()?
-                    }
-                    KeyMaterial::Private(p) if p.id() == Id::ED25519 || p.id() == Id::X25519 => {
-                        p.raw_private_key()?
-                    }
-                    _ => {
-                        return Err(bad(format!(
-                            "{} cannot be exported as raw",
-                            key.algorithm.name
-                        )));
-                    }
-                };
-                Ok(Either::A(Buffer::from(bytes)))
-            }
-            "pkcs8" => match &key.material {
-                KeyMaterial::Private(p) => Ok(Either::A(Buffer::from(p.private_key_to_pkcs8()?))),
-                _ => Err(bad("only private keys can be exported as pkcs8")),
-            },
-            "spki" => {
-                let public = to_public_of(key)?;
-                Ok(Either::A(Buffer::from(spki_encode(&public)?)))
-            }
-            other => Err(bad(format!("unsupported key format: {other}"))),
-        }
-    }
-
-    /// Extract the public half of an asymmetric key.
-    #[napi]
-    pub fn get_public_key(key: &CryptoKey) -> Result<CryptoKey> {
-        match &key.material {
-            KeyMaterial::Public(_) => Ok(CryptoKey {
-                material: key.material.clone(),
-                algorithm: key.algorithm.clone(),
-                extractable: key.extractable,
-                key_type: "public".to_string(),
-                usages: key.usages.clone(),
-                public_key: None,
-                private_key: None,
-            }),
-            KeyMaterial::Private(p) => {
-                let public = public_from_private(p)?;
-                let mut alg = key.algorithm.clone();
-                fill_derived(&mut alg, &KeyMaterial::Public(public.clone()));
-                Ok(CryptoKey {
-                    material: KeyMaterial::Public(public),
-                    algorithm: alg,
-                    extractable: key.extractable,
-                    key_type: "public".to_string(),
-                    usages: key.usages.clone(),
-                    public_key: None,
-                    private_key: None,
-                })
-            }
-            KeyMaterial::Secret(_) => Err(bad("symmetric keys have no public half")),
-        }
-    }
-
-    /// Feature detection: is `operation` supported for `algorithm`?
-    #[napi]
-    pub fn supports(
-        operation: String,
-        algorithm: Either<String, CryptoOpParams>,
-        _length_or_additional_algorithm: Option<Either<u32, CryptoOpParams>>,
-    ) -> bool {
-        let name = match &algorithm {
-            Either::A(s) => s.clone(),
-            Either::B(a) => a.name.clone().unwrap_or_default(),
-        };
-        if name.is_empty() {
-            return false;
-        }
-        let kind = match alg_kind(&name) {
-            Some(k) => k,
-            None => return false,
-        };
-        match operation.as_str() {
-            "generateKey" => !matches!(kind, AlgKind::Kdf),
-            "importKey" => true,
-            "exportKey" => !matches!(kind, AlgKind::Kdf),
-            "encrypt" | "decrypt" => {
-                matches!(kind, AlgKind::Aes | AlgKind::ChaCha | AlgKind::RsaOaep)
-            }
-            "sign" | "verify" => {
-                matches!(
+                "sign" | "verify" => matches!(
                     kind,
                     AlgKind::Mac
                         | AlgKind::Ecdsa
                         | AlgKind::Ed25519
                         | AlgKind::RsaPss
                         | AlgKind::RsaPkcs1
-                )
+                ),
+                "digest" => true,
+                "deriveBits" | "deriveKey" => {
+                    matches!(kind, AlgKind::Kdf | AlgKind::Ecdh | AlgKind::X25519)
+                }
+                "wrapKey" | "unwrapKey" => matches!(kind, AlgKind::Aes | AlgKind::RsaOaep),
+                "getPublicKey" => !is_symmetric(kind) && !matches!(kind, AlgKind::Kdf),
+                _ => false,
             }
-            "digest" => true,
-            "deriveBits" | "deriveKey" => {
-                matches!(kind, AlgKind::Kdf | AlgKind::Ecdh | AlgKind::X25519)
-            }
-            "wrapKey" | "unwrapKey" => {
-                matches!(kind, AlgKind::Aes | AlgKind::RsaOaep)
-            }
-            "getPublicKey" => !is_symmetric(kind) && !matches!(kind, AlgKind::Kdf),
-            _ => false,
+        }
+
+        // --- operations (static) ---
+
+        #[napi(js_name = "encrypt")]
+        pub fn encrypt_static(
+            _algorithm: CryptoOpParams,
+            _key: &CryptoKey,
+            _data: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "decrypt")]
+        pub fn decrypt_static(
+            _algorithm: CryptoOpParams,
+            _key: &CryptoKey,
+            _data: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "sign")]
+        pub fn sign_static(
+            _algorithm: CryptoOpParams,
+            _key: &CryptoKey,
+            _data: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "verify")]
+        pub fn verify_static(
+            _algorithm: CryptoOpParams,
+            _key: &CryptoKey,
+            _signature: Uint8Array,
+            _data: Uint8Array,
+        ) -> napi::Result<bool> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "deriveBits")]
+        pub fn derive_bits_static(
+            _algorithm: CryptoOpParams,
+            _base_key: &CryptoKey,
+            _length: Option<u32>,
+        ) -> napi::Result<Buffer> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "deriveKey")]
+        pub fn derive_key_static(
+            _algorithm: CryptoOpParams,
+            _base_key: &CryptoKey,
+            _derived_key_type: CryptoOpParams,
+            _extractable: bool,
+            _key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "digest")]
+        pub fn digest_static(
+            _algorithm: CryptoOpParams,
+            _data: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "wrapKey")]
+        pub fn wrap_key_static(
+            _format: String,
+            _key: &CryptoKey,
+            _wrapping_key: &CryptoKey,
+            _algorithm: Either<String, CryptoOpParams>,
+        ) -> napi::Result<Buffer> {
+            Err(not_implemented())
+        }
+
+        #[napi(js_name = "unwrapKey")]
+        pub fn unwrap_key_static(
+            _format: String,
+            _wrapped_key: Uint8Array,
+            _unwrapping_key: &CryptoKey,
+            _wrap_algorithm: Either<String, CryptoOpParams>,
+            _derived_key_algorithm: CryptoKeyAlgorithm,
+            _extractable: bool,
+            _key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Err(not_implemented())
+        }
+
+        // --- operations (instance) ---
+
+        #[napi]
+        pub fn encrypt(
+            &self,
+            algorithm: CryptoOpParams,
+            key: &CryptoKey,
+            data: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Self::encrypt_static(algorithm, key, data)
+        }
+
+        #[napi]
+        pub fn decrypt(
+            &self,
+            algorithm: CryptoOpParams,
+            key: &CryptoKey,
+            data: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Self::decrypt_static(algorithm, key, data)
+        }
+
+        #[napi]
+        pub fn sign(
+            &self,
+            algorithm: CryptoOpParams,
+            key: &CryptoKey,
+            data: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Self::sign_static(algorithm, key, data)
+        }
+
+        #[napi]
+        pub fn verify(
+            &self,
+            algorithm: CryptoOpParams,
+            key: &CryptoKey,
+            signature: Uint8Array,
+            data: Uint8Array,
+        ) -> napi::Result<bool> {
+            Self::verify_static(algorithm, key, signature, data)
+        }
+
+        #[napi]
+        pub fn derive_bits(
+            &self,
+            algorithm: CryptoOpParams,
+            base_key: &CryptoKey,
+            length: Option<u32>,
+        ) -> napi::Result<Buffer> {
+            Self::derive_bits_static(algorithm, base_key, length)
+        }
+
+        #[napi]
+        pub fn export_key_instance(
+            &self,
+            format: String,
+        ) -> napi::Result<Buffer> {
+            Self::export_key(format, self)
+        }
+
+        #[napi]
+        pub fn get_public_key_instance(&self) -> napi::Result<CryptoKey> {
+            Self::get_public_key(self)
+        }
+
+        #[napi]
+        pub fn derive_key(
+            &self,
+            algorithm: CryptoOpParams,
+            base_key: &CryptoKey,
+            derived_key_type: CryptoOpParams,
+            extractable: bool,
+            key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Self::derive_key_static(algorithm, base_key, derived_key_type, extractable, key_usages)
+        }
+
+        #[napi]
+        pub fn wrap_key(
+            &self,
+            format: String,
+            key: &CryptoKey,
+            wrapping_key: &CryptoKey,
+            algorithm: Either<String, CryptoOpParams>,
+        ) -> napi::Result<Buffer> {
+            Self::wrap_key_static(format, key, wrapping_key, algorithm)
+        }
+
+        #[napi]
+        pub fn unwrap_key(
+            &self,
+            format: String,
+            wrapped_key: Uint8Array,
+            unwrapping_key: &CryptoKey,
+            wrap_algorithm: Either<String, CryptoOpParams>,
+            derived_key_algorithm: CryptoKeyAlgorithm,
+            extractable: bool,
+            key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Self::unwrap_key_static(
+                format,
+                wrapped_key,
+                unwrapping_key,
+                wrap_algorithm,
+                derived_key_algorithm,
+                extractable,
+                key_usages,
+            )
+        }
+
+        #[napi]
+        pub fn digest(&self, algorithm: CryptoOpParams, data: Uint8Array) -> napi::Result<Buffer> {
+            Self::digest_static(algorithm, data)
+        }
+
+        // Post-quantum KEMs are out of scope for this build; the surface is present
+        // so callers can feature-detect and fail with a clear error.
+
+        #[napi(js_name = "encapsulateBits")]
+        pub fn encapsulate_bits_static(
+            _algorithm: CryptoOpParams,
+            _public_key: &CryptoKey,
+        ) -> napi::Result<Buffer> {
+            Err(bad("encapsulateBits (ML-KEM) is not implemented in this build"))
+        }
+
+        #[napi(js_name = "decapsulateBits")]
+        pub fn decapsulate_bits_static(
+            _algorithm: CryptoOpParams,
+            _private_key: &CryptoKey,
+            _ciphertext: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Err(bad("decapsulateBits (ML-KEM) is not implemented in this build"))
+        }
+
+        #[napi(js_name = "encapsulateKey")]
+        pub fn encapsulate_key_static(
+            _algorithm: CryptoOpParams,
+            _public_key: &CryptoKey,
+            _derived_key_type: CryptoOpParams,
+            _extractable: bool,
+            _key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Err(bad("encapsulateKey (ML-KEM) is not implemented in this build"))
+        }
+
+        #[napi(js_name = "decapsulateKey")]
+        pub fn decapsulate_key_static(
+            _algorithm: CryptoOpParams,
+            _private_key: &CryptoKey,
+            _ciphertext: Uint8Array,
+            _derived_key_type: CryptoOpParams,
+            _extractable: bool,
+            _key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Err(bad("decapsulateKey (ML-KEM) is not implemented in this build"))
+        }
+
+        #[napi(js_name = "encapsulateBits")]
+        pub fn encapsulate_bits(
+            &self,
+            algorithm: CryptoOpParams,
+            public_key: &CryptoKey,
+        ) -> napi::Result<Buffer> {
+            Self::encapsulate_bits_static(algorithm, public_key)
+        }
+
+        #[napi(js_name = "decapsulateBits")]
+        pub fn decapsulate_bits(
+            &self,
+            algorithm: CryptoOpParams,
+            private_key: &CryptoKey,
+            ciphertext: Uint8Array,
+        ) -> napi::Result<Buffer> {
+            Self::decapsulate_bits_static(algorithm, private_key, ciphertext)
+        }
+
+        #[napi(js_name = "encapsulateKey")]
+        pub fn encapsulate_key(
+            &self,
+            algorithm: CryptoOpParams,
+            public_key: &CryptoKey,
+            derived_key_type: CryptoOpParams,
+            extractable: bool,
+            key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Self::encapsulate_key_static(
+                algorithm,
+                public_key,
+                derived_key_type,
+                extractable,
+                key_usages,
+            )
+        }
+
+        #[napi(js_name = "decapsulateKey")]
+        pub fn decapsulate_key(
+            &self,
+            algorithm: CryptoOpParams,
+            private_key: &CryptoKey,
+            ciphertext: Uint8Array,
+            derived_key_type: CryptoOpParams,
+            extractable: bool,
+            key_usages: Vec<String>,
+        ) -> napi::Result<CryptoKey> {
+            Self::decapsulate_key_static(
+                algorithm,
+                private_key,
+                ciphertext,
+                derived_key_type,
+                extractable,
+                key_usages,
+            )
         }
     }
 
-    // --- operations (static) ----------------------------------------------
-
-    #[napi(js_name = "encrypt")]
-    pub fn encrypt_static(
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        data: Uint8Array,
-    ) -> Result<Buffer> {
-        Ok(Buffer::from(encrypt_impl(&algorithm, key, data.as_ref())?))
+    /// A format-tagged cryptographic signature value.
+    ///
+    /// Construct it with the key format the signature corresponds to, then load the
+    /// raw signature bytes.
+    #[napi]
+    pub struct SignatureValue {
+        format: String,
+        bytes: Vec<u8>,
     }
 
-    #[napi(js_name = "decrypt")]
-    pub fn decrypt_static(
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        data: Uint8Array,
-    ) -> Result<Buffer> {
-        Ok(Buffer::from(decrypt_impl(&algorithm, key, data.as_ref())?))
-    }
-
-    #[napi(js_name = "sign")]
-    pub fn sign_static(
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        data: Uint8Array,
-    ) -> Result<Buffer> {
-        key.check_usage("sign")?;
-        let name = algorithm
-            .name
-            .clone()
-            .ok_or_else(|| bad("sign requires algorithm.name"))?;
-        let kind = alg_kind(&name).ok_or_else(|| bad(format!("unsupported algorithm: {name}")))?;
-        let out = match kind {
-            AlgKind::Mac => {
-                let k = to_secret_of(key)?;
-                let pkey = PKey::hmac(&k)?;
-                let mut s = Signer::new(digest_from_name(&hash_name(&algorithm.hash))?, &pkey)?;
-                s.update(data.as_ref())?;
-                s.sign_to_vec()?
+    #[napi]
+    impl SignatureValue {
+        /// Create an empty signature tagged with `format`.
+        #[napi(constructor)]
+        pub fn new(format: String) -> Self {
+            Self {
+                format,
+                bytes: Vec::new(),
             }
-            AlgKind::Ecdsa | AlgKind::Ed25519 | AlgKind::RsaPss | AlgKind::RsaPkcs1 => {
-                let p = to_private_of(key)?;
-                sign_impl(
-                    kind,
-                    &p,
-                    &hash_name(&algorithm.hash),
-                    algorithm.salt_length,
-                    data.as_ref(),
-                )?
-            }
-            _ => return Err(bad(format!("{name} does not support signing"))),
-        };
-        Ok(Buffer::from(out))
-    }
-
-    #[napi(js_name = "verify")]
-    pub fn verify_static(
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        signature: Uint8Array,
-        data: Uint8Array,
-    ) -> Result<bool> {
-        key.check_usage("verify")?;
-        let name = algorithm
-            .name
-            .clone()
-            .ok_or_else(|| bad("verify requires algorithm.name"))?;
-        let kind = alg_kind(&name).ok_or_else(|| bad(format!("unsupported algorithm: {name}")))?;
-        match kind {
-            AlgKind::Mac => {
-                let k = to_secret_of(key)?;
-                let pkey = PKey::hmac(&k)?;
-                let mut v = Verifier::new(digest_from_name(&hash_name(&algorithm.hash))?, &pkey)?;
-                v.update(data.as_ref())?;
-                Ok(v.verify(signature.as_ref())?)
-            }
-            AlgKind::Ecdsa | AlgKind::Ed25519 | AlgKind::RsaPss | AlgKind::RsaPkcs1 => {
-                let p = to_public_of(key)?;
-                verify_impl(
-                    kind,
-                    &p,
-                    &hash_name(&algorithm.hash),
-                    data.as_ref(),
-                    signature.as_ref(),
-                )
-            }
-            _ => Err(bad(format!("{name} does not support verification"))),
         }
-    }
 
-    #[napi(js_name = "deriveBits")]
-    pub fn derive_bits_static(
-        algorithm: CryptoOpParams,
-        base_key: &CryptoKey,
-        length: Option<u32>,
-    ) -> Result<Buffer> {
-        Ok(Buffer::from(derive_bits_impl(
-            &algorithm, base_key, length,
-        )?))
-    }
-
-    /// Derive a key: `deriveBits` followed by `importKey` into `derivedKeyType`.
-    #[napi(js_name = "deriveKey")]
-    pub fn derive_key_static(
-        algorithm: CryptoOpParams,
-        base_key: &CryptoKey,
-        derived_key_type: CryptoOpParams,
-        extractable: bool,
-        key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        let name = derived_key_type
-            .name
-            .clone()
-            .ok_or_else(|| bad("deriveKey requires derivedKeyType.name"))?;
-        let bits = derived_key_type.length.unwrap_or(256);
-        let raw = derive_bits_impl(&algorithm, base_key, Some(bits))?;
-        Self::import_key(
-            "raw".to_string(),
-            Either::A(Uint8Array::new(raw)),
-            Either::B(CryptoKeyAlgorithm {
-                name,
-                length: Some(bits),
-                named_curve: None,
-                hash: derived_key_type.hash,
-                modulus_length: None,
-                public_exponent: None,
-            }),
-            extractable,
-            key_usages,
-        )
-    }
-
-    #[napi(js_name = "digest")]
-    pub fn digest_static(algorithm: CryptoOpParams, data: Uint8Array) -> Result<Buffer> {
-        let name = algorithm
-            .name
-            .clone()
-            .ok_or_else(|| bad("digest requires algorithm.name"))?;
-        let md = digest_from_name(&name)?;
-        Ok(Buffer::from(hash(md, data.as_ref())?.to_vec()))
-    }
-
-    /// Wrap `key` with `wrappingKey` using `algorithm`.
-    #[napi(js_name = "wrapKey")]
-    pub fn wrap_key_static(
-        format: String,
-        key: &CryptoKey,
-        wrapping_key: &CryptoKey,
-        algorithm: Either<String, CryptoOpParams>,
-    ) -> Result<Buffer> {
-        let (name, params) = match &algorithm {
-            Either::A(s) => (
-                s.clone(),
-                CryptoOpParams {
-                    name: Some(s.clone()),
-                    iv: None,
-                    additional_data: None,
-                    tag_length: None,
-                    iterations: None,
-                    salt: None,
-                    info: None,
-                    label: None,
-                    hash: None,
-                    salt_length: None,
-                    public: None,
-                    length: None,
-                },
-            ),
-            Either::B(p) => (p.name.clone().unwrap_or_default(), p.clone()),
-        };
-        wrapping_key.check_usage("wrapKey")?;
-        let exported = match Self::export_key(format, key)? {
-            Either::A(b) => b.to_vec(),
-            Either::B(v) => {
-                serde_json::to_vec(&v).map_err(|e| bad(format!("cannot serialize JWK: {e}")))?
-            }
-        };
-        let kind = alg_kind(&name).ok_or_else(|| bad(format!("unsupported algorithm: {name}")))?;
-        let iv = params.iv.as_ref().map(|u| u.as_ref().to_vec());
-        let aad = params
-            .additional_data
-            .as_ref()
-            .map(|u| u.as_ref().to_vec())
-            .unwrap_or_default();
-        match (&wrapping_key.material, kind) {
-            (KeyMaterial::Secret(k), AlgKind::Aes) if name == "AES-KW" => {
-                Ok(Buffer::from(aes_kw_wrap(k, &exported)?))
-            }
-            (KeyMaterial::Secret(k), AlgKind::Aes) if is_aead(&name) => {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                let bits = (k.len() * 8) as u32;
-                Ok(Buffer::from(aead_seal(
-                    aes_cipher(&name, bits)?,
-                    k,
-                    &iv,
-                    &aad,
-                    &exported,
-                )?))
-            }
-            (KeyMaterial::Secret(k), AlgKind::Aes) => {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                let bits = (k.len() * 8) as u32;
-                Ok(Buffer::from(block_crypt(
-                    aes_cipher(&name, bits)?,
-                    Mode::Encrypt,
-                    k,
-                    &iv,
-                    &exported,
-                )?))
-            }
-            (KeyMaterial::Secret(k), AlgKind::ChaCha) => {
-                let iv = iv.ok_or_else(|| bad("ChaCha20-Poly1305 requires an iv"))?;
-                Ok(Buffer::from(aead_seal(
-                    Cipher::chacha20_poly1305(),
-                    k,
-                    &iv,
-                    &aad,
-                    &exported,
-                )?))
-            }
-            (KeyMaterial::Public(p), AlgKind::RsaOaep) => {
-                let md = digest_from_name(&hash_name(&params.hash))?;
-                let mut e = Encrypter::new(p)?;
-                e.set_rsa_padding(Padding::PKCS1_OAEP)?;
-                e.set_rsa_oaep_md(md)?;
-                Ok(Buffer::from(e.encrypt(&exported)?))
-            }
-            _ => Err(bad(format!("{name} cannot be used as a wrapping key"))),
+        /// The key format this signature is associated with.
+        #[napi(getter)]
+        pub fn format(&self) -> String {
+            self.format.clone()
         }
-    }
 
-    /// Unwrap a key produced by `wrapKey`.
-    #[napi(js_name = "unwrapKey")]
-    pub fn unwrap_key_static(
-        format: String,
-        wrapped_key: Uint8Array,
-        unwrapping_key: &CryptoKey,
-        wrap_algorithm: Either<String, CryptoOpParams>,
-        derived_key_algorithm: CryptoKeyAlgorithm,
-        extractable: bool,
-        key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        unwrapping_key.check_usage("unwrapKey")?;
-        let (name, params) = match &wrap_algorithm {
-            Either::A(s) => (
-                s.clone(),
-                CryptoOpParams {
-                    name: Some(s.clone()),
-                    iv: None,
-                    additional_data: None,
-                    tag_length: None,
-                    iterations: None,
-                    salt: None,
-                    info: None,
-                    label: None,
-                    hash: None,
-                    salt_length: None,
-                    public: None,
-                    length: None,
-                },
-            ),
-            Either::B(p) => (p.name.clone().unwrap_or_default(), p.clone()),
-        };
-        let data = wrapped_key.as_ref();
-        let kind = alg_kind(&name).ok_or_else(|| bad(format!("unsupported algorithm: {name}")))?;
-        let iv = params.iv.as_ref().map(|u| u.as_ref().to_vec());
-        let aad = params
-            .additional_data
-            .as_ref()
-            .map(|u| u.as_ref().to_vec())
-            .unwrap_or_default();
-        let plaintext = match (&unwrapping_key.material, kind) {
-            (KeyMaterial::Secret(k), AlgKind::Aes) if name == "AES-KW" => aes_kw_unwrap(k, data)?,
-            (KeyMaterial::Secret(k), AlgKind::Aes) if is_aead(&name) => {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                let bits = (k.len() * 8) as u32;
-                aead_open(aes_cipher(&name, bits)?, k, &iv, &aad, data)?
-            }
-            (KeyMaterial::Secret(k), AlgKind::Aes) => {
-                let iv = iv.ok_or_else(|| bad(format!("{name} requires an iv")))?;
-                let bits = (k.len() * 8) as u32;
-                block_crypt(aes_cipher(&name, bits)?, Mode::Decrypt, k, &iv, data)?
-            }
-            (KeyMaterial::Secret(k), AlgKind::ChaCha) => {
-                let iv = iv.ok_or_else(|| bad("ChaCha20-Poly1305 requires an iv"))?;
-                aead_open(Cipher::chacha20_poly1305(), k, &iv, &aad, data)?
-            }
-            (KeyMaterial::Private(p), AlgKind::RsaOaep) => {
-                let md = digest_from_name(&hash_name(&params.hash))?;
-                let mut d = Decrypter::new(p)?;
-                d.set_rsa_padding(Padding::PKCS1_OAEP)?;
-                d.set_rsa_oaep_md(md)?;
-                d.decrypt(data)?
-            }
-            _ => return Err(bad(format!("{name} cannot be used as an unwrapping key"))),
-        };
-
-        if format == "jwk" {
-            let v: serde_json::Value = serde_json::from_slice(&plaintext)
-                .map_err(|e| bad(format!("unwrapped JWK is not valid JSON: {e}")))?;
-            return jwk_decode(&v, derived_key_algorithm, extractable, key_usages);
+        /// Replace the signature bytes.
+        #[napi]
+        pub fn set_bytes(&mut self, bytes: Buffer) {
+            self.bytes = bytes.as_ref().to_vec();
         }
-        Self::import_key(
-            format,
-            Either::A(Uint8Array::new(plaintext)),
-            Either::B(derived_key_algorithm),
-            extractable,
-            key_usages,
-        )
-    }
 
-    // --- operations (instance) --------------------------------------------
+        /// The raw signature bytes.
+        #[napi(getter)]
+        pub fn bytes(&self) -> Buffer {
+            Buffer::from(self.bytes.clone())
+        }
 
-    #[napi]
-    pub fn encrypt(
-        &self,
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        data: Uint8Array,
-    ) -> Result<Buffer> {
-        Self::encrypt_static(algorithm, key, data)
-    }
+        /// Length in bytes.
+        #[napi(getter)]
+        pub fn length(&self) -> u32 {
+            self.bytes.len() as u32
+        }
 
-    #[napi]
-    pub fn decrypt(
-        &self,
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        data: Uint8Array,
-    ) -> Result<Buffer> {
-        Self::decrypt_static(algorithm, key, data)
-    }
+        /// Whether the signature is empty.
+        #[napi(getter)]
+        pub fn is_empty(&self) -> bool {
+            self.bytes.is_empty()
+        }
 
-    #[napi]
-    pub fn sign(
-        &self,
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        data: Uint8Array,
-    ) -> Result<Buffer> {
-        Self::sign_static(algorithm, key, data)
-    }
-
-    #[napi]
-    pub fn verify(
-        &self,
-        algorithm: CryptoOpParams,
-        key: &CryptoKey,
-        signature: Uint8Array,
-        data: Uint8Array,
-    ) -> Result<bool> {
-        Self::verify_static(algorithm, key, signature, data)
-    }
-
-    #[napi]
-    pub fn derive_bits(
-        &self,
-        algorithm: CryptoOpParams,
-        base_key: &CryptoKey,
-        length: Option<u32>,
-    ) -> Result<Buffer> {
-        Self::derive_bits_static(algorithm, base_key, length)
-    }
-
-    #[napi]
-    pub fn export_key_instance(&self, format: String) -> Result<Either<Buffer, serde_json::Value>> {
-        Self::export_key(format, self)
-    }
-
-    #[napi]
-    pub fn get_public_key_instance(&self) -> Result<CryptoKey> {
-        Self::get_public_key(self)
-    }
-
-    /// Derive a key from `base_key` (instance form of `CryptoKey.deriveKey`).
-    #[napi]
-    pub fn derive_key(
-        &self,
-        algorithm: CryptoOpParams,
-        base_key: &CryptoKey,
-        derived_key_type: CryptoOpParams,
-        extractable: bool,
-        key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        Self::derive_key_static(
-            algorithm,
-            base_key,
-            derived_key_type,
-            extractable,
-            key_usages,
-        )
-    }
-
-    /// Wrap `key` (instance form of `CryptoKey.wrapKey`).
-    #[napi]
-    pub fn wrap_key(
-        &self,
-        format: String,
-        key: &CryptoKey,
-        wrapping_key: &CryptoKey,
-        algorithm: Either<String, CryptoOpParams>,
-    ) -> Result<Buffer> {
-        Self::wrap_key_static(format, key, wrapping_key, algorithm)
-    }
-
-    /// Unwrap a key (instance form of `CryptoKey.unwrapKey`).
-    #[napi]
-    pub fn unwrap_key(
-        &self,
-        format: String,
-        wrapped_key: Uint8Array,
-        unwrapping_key: &CryptoKey,
-        wrap_algorithm: Either<String, CryptoOpParams>,
-        derived_key_algorithm: CryptoKeyAlgorithm,
-        extractable: bool,
-        key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        Self::unwrap_key_static(
-            format,
-            wrapped_key,
-            unwrapping_key,
-            wrap_algorithm,
-            derived_key_algorithm,
-            extractable,
-            key_usages,
-        )
-    }
-
-    /// Digest `data` (instance form of `CryptoKey.digest`).
-    #[napi]
-    pub fn digest(&self, algorithm: CryptoOpParams, data: Uint8Array) -> Result<Buffer> {
-        Self::digest_static(algorithm, data)
-    }
-
-    // Post-quantum KEMs are out of scope for this build; the surface is present
-    // so callers can feature-detect and fail with a clear error.
-
-    /// ML-KEM-based key encapsulation. Not implemented in this build.
-    #[napi(js_name = "encapsulateBits")]
-    pub fn encapsulate_bits_static(
-        _algorithm: CryptoOpParams,
-        _public_key: &CryptoKey,
-    ) -> Result<Buffer> {
-        Err(bad(
-            "encapsulateBits (ML-KEM) is not implemented in this build",
-        ))
-    }
-
-    /// ML-KEM-based key decapsulation. Not implemented in this build.
-    #[napi(js_name = "decapsulateBits")]
-    pub fn decapsulate_bits_static(
-        _algorithm: CryptoOpParams,
-        _private_key: &CryptoKey,
-        _ciphertext: Uint8Array,
-    ) -> Result<Buffer> {
-        Err(bad(
-            "decapsulateBits (ML-KEM) is not implemented in this build",
-        ))
-    }
-
-    /// ML-KEM-based key encapsulation into a `CryptoKey`. Not implemented.
-    #[napi(js_name = "encapsulateKey")]
-    pub fn encapsulate_key_static(
-        _algorithm: CryptoOpParams,
-        _public_key: &CryptoKey,
-        _derived_key_type: CryptoOpParams,
-        _extractable: bool,
-        _key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        Err(bad(
-            "encapsulateKey (ML-KEM) is not implemented in this build",
-        ))
-    }
-
-    /// ML-KEM-based key decapsulation into a `CryptoKey`. Not implemented.
-    #[napi(js_name = "decapsulateKey")]
-    pub fn decapsulate_key_static(
-        _algorithm: CryptoOpParams,
-        _private_key: &CryptoKey,
-        _ciphertext: Uint8Array,
-        _derived_key_type: CryptoOpParams,
-        _extractable: bool,
-        _key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        Err(bad(
-            "decapsulateKey (ML-KEM) is not implemented in this build",
-        ))
-    }
-    /// ML-KEM-based key encapsulation (instance form of `CryptoKey.encapsulateBits`).
-    #[napi(js_name = "encapsulateBits")]
-    pub fn encapsulate_bits(
-        &self,
-        algorithm: CryptoOpParams,
-        public_key: &CryptoKey,
-    ) -> Result<Buffer> {
-        Self::encapsulate_bits_static(algorithm, public_key)
-    }
-
-    /// ML-KEM-based key decapsulation (instance form of `CryptoKey.decapsulateBits`).
-    #[napi(js_name = "decapsulateBits")]
-    pub fn decapsulate_bits(
-        &self,
-        algorithm: CryptoOpParams,
-        private_key: &CryptoKey,
-        ciphertext: Uint8Array,
-    ) -> Result<Buffer> {
-        Self::decapsulate_bits_static(algorithm, private_key, ciphertext)
-    }
-
-    /// ML-KEM-based key encapsulation into a `CryptoKey` (instance form of
-    /// `CryptoKey.encapsulateKey`).
-    #[napi(js_name = "encapsulateKey")]
-    pub fn encapsulate_key(
-        &self,
-        algorithm: CryptoOpParams,
-        public_key: &CryptoKey,
-        derived_key_type: CryptoOpParams,
-        extractable: bool,
-        key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        Self::encapsulate_key_static(
-            algorithm,
-            public_key,
-            derived_key_type,
-            extractable,
-            key_usages,
-        )
-    }
-
-    /// ML-KEM-based key decapsulation into a `CryptoKey` (instance form of
-    /// `CryptoKey.decapsulateKey`).
-    #[napi(js_name = "decapsulateKey")]
-    pub fn decapsulate_key(
-        &self,
-        algorithm: CryptoOpParams,
-        private_key: &CryptoKey,
-        ciphertext: Uint8Array,
-        derived_key_type: CryptoOpParams,
-        extractable: bool,
-        key_usages: Vec<String>,
-    ) -> Result<CryptoKey> {
-        Self::decapsulate_key_static(
-            algorithm,
-            private_key,
-            ciphertext,
-            derived_key_type,
-            extractable,
-            key_usages,
-        )
+        /// Lowercase hex form.
+        #[napi(getter)]
+        pub fn hex(&self) -> String {
+            hex_lower(&self.bytes)
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-
-/// A format-tagged cryptographic signature value.
-///
-/// Construct it with the key format the signature corresponds to, then load the
-/// raw signature bytes:
-///
-/// ```ts
-/// const sig = new Signature(CryptoKey.Format.RAW); // "raw"
-/// sig.setBytes(signatureBytes);
-/// ```
-///
-/// `format` is any value from the `CryptoKey.Format` table (e.g. `"raw"`,
-/// `"jwk"`, `"spki"`, `"pkcs8"`, `"raw-secret"`, `"raw-public"`, `"raw-seed"`).
-#[napi]
-pub struct SignatureValue {
-    format: String,
-    bytes: Vec<u8>,
-}
-
-#[napi]
-impl SignatureValue {
-    /// Create an empty signature tagged with `format`.
-    #[napi(constructor)]
-    pub fn new(format: String) -> Self {
-        Self {
-            format,
-            bytes: Vec::new(),
-        }
-    }
-
-    /// The key format this signature is associated with.
-    #[napi(getter)]
-    pub fn format(&self) -> String {
-        self.format.clone()
-    }
-
-    /// Replace the signature bytes.
-    #[napi]
-    pub fn set_bytes(&mut self, bytes: Buffer) {
-        self.bytes = bytes.as_ref().to_vec();
-    }
-
-    /// The raw signature bytes.
-    #[napi(getter)]
-    pub fn bytes(&self) -> Buffer {
-        Buffer::from(self.bytes.clone())
-    }
-
-    /// Length in bytes.
-    #[napi(getter)]
-    pub fn length(&self) -> u32 {
-        self.bytes.len() as u32
-    }
-
-    /// Whether the signature is empty.
-    #[napi(getter)]
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    /// Lowercase hex form.
-    #[napi(getter)]
-    pub fn hex(&self) -> String {
-        hex_lower(&self.bytes)
-    }
-}
-// ---------------------------------------------------------------------------
-}
-
-#[cfg(all(test, feature = "openssl"))]
+#[cfg(all(test, feature = "btls"))]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -4676,7 +3389,9 @@ pub fn configure_git_filters(key_name: Option<&str>) -> CryptoResult<()> {
         gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
             .map_err(|e| CryptoError::Git(e.to_string()))?
     } else {
-        gix::config::File::new(gix::config::file::Metadata::from(gix::config::Source::Local))
+        gix::config::File::new(gix::config::file::Metadata::from(
+            gix::config::Source::Local,
+        ))
     };
 
     let attr_name = attribute_name(key_name);
@@ -4718,8 +3433,9 @@ pub fn deconfigure_git_filters(key_name: Option<&str>) -> CryptoResult<()> {
     if !config_path.exists() {
         return Ok(());
     }
-    let mut config = gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
-        .map_err(|e| CryptoError::Git(e.to_string()))?;
+    let mut config =
+        gix::config::File::from_path_no_includes(config_path.clone(), gix::config::Source::Local)
+            .map_err(|e| CryptoError::Git(e.to_string()))?;
 
     let attr_name = attribute_name(key_name);
 
@@ -4760,7 +3476,10 @@ pub fn validate_key_name(key_name: Option<&str>) -> std::result::Result<(), Stri
         if name.is_empty() {
             return Err("Key name cannot be empty".to_string());
         }
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
             return Err("Key name contains invalid characters".to_string());
         }
     }
@@ -4818,7 +3537,9 @@ pub fn get_path_to_top() -> CryptoResult<String> {
         .output()
         .map_err(|e| CryptoError::Git(e.to_string()))?;
     if !output.status.success() {
-        return Err(CryptoError::Git("'git rev-parse --show-cdup' failed".to_string()));
+        return Err(CryptoError::Git(
+            "'git rev-parse --show-cdup' failed".to_string(),
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -4875,7 +3596,7 @@ pub fn check_if_blob_is_encrypted(object_id: &str) -> CryptoResult<bool> {
     if !output.status.success() {
         return Err(CryptoError::Git("'git cat-file' failed".to_string()));
     }
-    Ok(SymmetricCryptoKey::is_encrypted(&output.stdout))
+    Ok(SymmetricCryptoKey::is_encrypted_raw(&output.stdout))
 }
 
 pub fn check_if_file_is_encrypted(filename: &str) -> CryptoResult<bool> {
@@ -4944,14 +3665,21 @@ pub fn decrypt_repo_key(
 ) -> CryptoResult<Vec<u8>> {
     let key_dir_name = key_name.unwrap_or("default");
     for seckey in secret_keys {
-        let file_path = keys_path.join(key_dir_name).join(key_version.to_string()).join(format!("{seckey}.gpg"));
+        let file_path = keys_path
+            .join(key_dir_name)
+            .join(key_version.to_string())
+            .join(format!("{seckey}.gpg"));
         if file_path.exists() {
-            if let Ok(decrypted) = crate::gpg::gpg_decrypt_from_file(file_path.to_string_lossy().into_owned()) {
+            if let Ok(decrypted) =
+                crate::gpg::gpg_decrypt_from_file(file_path.to_string_lossy().into_owned())
+            {
                 return Ok(decrypted.to_vec());
             }
         }
     }
-    Err(CryptoError::Gpg("Failed to decrypt repo key with GPG".to_string()))
+    Err(CryptoError::Gpg(
+        "Failed to decrypt repo key with GPG".to_string(),
+    ))
 }
 
 pub fn encrypt_repo_key(

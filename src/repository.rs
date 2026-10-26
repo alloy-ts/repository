@@ -3,9 +3,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{Buffer, Either4};
 use napi_derive::napi;
 
-use crate::error::{
-    cached_namespace_get, cached_namespace_set, err, err_str, parse_oid, thread_local,
-};
+use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::object::kind_to_string;
 use crate::reference::Reference;
 

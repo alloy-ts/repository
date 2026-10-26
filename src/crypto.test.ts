@@ -4,21 +4,24 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  allKeyFormats,
   CryptoKey,
-  Signature,
+  CryptoMode,
+  GpgContext,
+  GpgData,
+  gpgGetExecutable,
+  gpgNthColumn,
+  keyFormats,
   MultiSignature,
+  parseManifest,
+  Protocol,
+  Repository,
+  serializeManifest,
+  Signature,
   SignatureBuilder,
   SignatureBytes,
   SignatureScheme,
-  keyFormats,
-  allKeyFormats,
   SymmetricCryptoKey,
-  Repository,
-  Protocol,
-  GpgData,
-  GpgContext,
-  gpgGetExecutable,
-  gpgNthColumn,
 } from "./main.ts";
 
 const SIG_64 = Buffer.alloc(64, 7);
@@ -54,8 +57,11 @@ describe("Crypto (repository-bound crypt handle)", () => {
       const crypt = repo.crypt();
 
       expect(crypt.isInitialized()).toBe(false);
+      expect(crypt.mode()).toBe(CryptoMode.Filter);
+
       crypt.init();
       expect(crypt.isInitialized()).toBe(true);
+      expect(crypt.mode()).toBe(CryptoMode.Hybrid);
       expect(typeof crypt.keyDir()).toBe("string");
 
       const payload = Buffer.from("classified git content");
@@ -70,6 +76,123 @@ describe("Crypto (repository-bound crypt handle)", () => {
 
       crypt.lock();
       crypt.unlock(exportPath);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("Entire Repository Encryption Mode (gcrypt compatible)", () => {
+    const base = mkdtempSync(join(tmpdir(), "entire-repo-"));
+    try {
+      const repo = Repository.init(base, false);
+      const crypt = repo.crypt();
+
+      expect(crypt.isEntireRepoMode()).toBe(false);
+      const repoId = crypt.initEntireRepo();
+      expect(typeof repoId).toBe("string");
+      expect(repoId).toContain(":id:");
+      expect(crypt.isEntireRepoMode()).toBe(true);
+      expect(crypt.mode()).toBe(CryptoMode.EntireRepo);
+
+      // Manifest creation, serialization, encryption and decryption
+      const manifest = {
+        refs: [
+          {
+            objectId: "1234567890123456789012345678901234567890",
+            name: "refs/heads/main",
+          },
+        ],
+        packs: [
+          {
+            hashType: "SHA256",
+            packId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          },
+        ],
+        keep: [
+          {
+            hashType: "SHA256",
+            packId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            count: 1,
+          },
+        ],
+        repoId,
+        extensions: ["extn comment"],
+      };
+
+      const serialized = serializeManifest(manifest);
+      expect(serialized).toContain("1234567890123456789012345678901234567890 refs/heads/main");
+      expect(serialized).toContain("pack :SHA256:");
+
+      const parsed = parseManifest(serialized);
+      expect(parsed.refs.length).toBe(1);
+      expect(parsed.refs[0].name).toBe("refs/heads/main");
+      expect(parsed.packs.length).toBe(1);
+
+      const encManifest = crypt.encryptManifest(manifest);
+      expect(SymmetricCryptoKey.isEncrypted(encManifest)).toBe(true);
+
+      const decManifest = crypt.decryptManifest(encManifest);
+      expect(decManifest.refs).toEqual(manifest.refs);
+      expect(decManifest.packs).toEqual(manifest.packs);
+
+      // Packfile encryption and decryption
+      const rawPack = Buffer.from("git packfile object store bytes payload");
+      const encPack = crypt.encryptPack(rawPack);
+
+      expect(typeof encPack.packId).toBe("string");
+      expect(encPack.packId.length).toBe(64); // SHA256 hex length
+      expect(encPack.hashType).toBe("SHA256");
+
+      const decPack = crypt.decryptPack(
+        encPack.encryptedBytes,
+        encPack.hashType,
+        encPack.packId,
+        encPack.packKey,
+      );
+      expect(decPack).toEqual(rawPack);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("Hybrid / Layered Mode: partial (git-crypt) on top of full repo encryption (gcrypt)", () => {
+    const base = mkdtempSync(join(tmpdir(), "hybrid-repo-"));
+    try {
+      const repo = Repository.init(base, false);
+      const crypt = repo.crypt();
+
+      // Initialize default Hybrid mode
+      crypt.init();
+      expect(crypt.mode()).toBe(CryptoMode.Hybrid);
+
+      // Initialize full repo encryption on top
+      crypt.initEntireRepo();
+      expect(crypt.mode()).toBe(CryptoMode.Hybrid);
+      expect(crypt.isEntireRepoMode()).toBe(true);
+
+      // Partial mode file encryption still works
+      const sensitiveBlob = Buffer.from("secret file content inside worktree");
+      const encBlob = crypt.encrypt(sensitiveBlob);
+      expect(crypt.isEncrypted(encBlob)).toBe(true);
+      expect(crypt.decrypt(encBlob)).toEqual(sensitiveBlob);
+
+      // Full repo encryption manifest/pack operations also work simultaneously
+      const manifest = {
+        refs: [
+          {
+            objectId: "9999999999999999999999999999999999999999",
+            name: "refs/heads/master",
+          },
+        ],
+        packs: [],
+        keep: [],
+        repoId: "hybrid-repo-id",
+        extensions: [],
+      };
+      const encMani = crypt.encryptManifest(manifest);
+      const decMani = crypt.decryptManifest(encMani);
+      expect(decMani.refs[0].name).toBe("refs/heads/master");
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -104,7 +227,8 @@ describe("GPG / OpenPGP (rPGP NAPI bindings)", () => {
     expect(typeof exe).toBe("string");
     expect(exe.length).toBeGreaterThan(0);
 
-    const line = "uid:u::::1395975462::AB97D6E3E5D8789988CA55E5F77D9E7397D05229::John Smith <jsmith@example.com>:";
+    const line =
+      "uid:u::::1395975462::AB97D6E3E5D8789988CA55E5F77D9E7397D05229::John Smith <jsmith@example.com>:";
     const col = gpgNthColumn(line, 9);
     expect(col).toBe("John Smith <jsmith@example.com>");
   });
@@ -163,10 +287,7 @@ describe("SignatureBuilder / MultiSignature", () => {
 
   test("combined signature carries the message in-band", () => {
     const msg = Buffer.from("hello world");
-    const ms = new SignatureBuilder("eddsa-msig")
-      .withSignature(SIG_64)
-      .withMessage(msg)
-      .tryBuild();
+    const ms = new SignatureBuilder("eddsa-msig").withSignature(SIG_64).withMessage(msg).tryBuild();
     expect(ms.isCombined).toBe(true);
     expect(ms.message).toEqual(msg);
     expect(ms.signatureBytes().bytes).toEqual(SIG_64);
@@ -254,9 +375,7 @@ describe("threshold disclosure", () => {
 
 describe("BLS constructors", () => {
   test("newFromBlsSignature rejects a non-BLS codec", () => {
-    expect(() =>
-      SignatureBuilder.newFromBlsSignature("eddsa-msig", Buffer.alloc(64)),
-    ).toThrow();
+    expect(() => SignatureBuilder.newFromBlsSignature("eddsa-msig", Buffer.alloc(64))).toThrow();
   });
 
   test("newFromBlsSignatureShare rejects a non-share codec", () => {
@@ -289,7 +408,10 @@ describe("CryptoKey — generation", () => {
   });
 
   test("generates an HMAC secret key", () => {
-    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-256" } }, true, ["sign", "verify"]);
+    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-256" } }, true, [
+      "sign",
+      "verify",
+    ]);
     expect(key.type).toBe("secret");
     expect(key.algorithm.hash?.name).toBe("SHA-256");
   });
@@ -312,7 +434,12 @@ describe("CryptoKey — generation", () => {
 
   test("generates an RSA key pair", () => {
     const rsa = new CryptoKey(
-      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: { name: "SHA-256" } },
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: { name: "SHA-256" },
+      },
       true,
       ["sign", "verify"],
     );
@@ -344,19 +471,28 @@ describe("CryptoKey — symmetric encrypt/decrypt", () => {
 
 describe("CryptoKey — sign/verify", () => {
   test("HMAC sign/verify", () => {
-    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-256" } }, true, ["sign", "verify"]);
+    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-256" } }, true, [
+      "sign",
+      "verify",
+    ]);
     const data = enc.encode("message");
     const sig = CryptoKey.sign({ name: "HMAC", hash: { name: "SHA-256" } }, key, data);
-    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-256" } }, key, sig, data)).toBe(true);
+    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-256" } }, key, sig, data)).toBe(
+      true,
+    );
     const tampered = enc.encode("tampered");
-    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-256" } }, key, sig, tampered)).toBe(false);
+    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-256" } }, key, sig, tampered)).toBe(
+      false,
+    );
   });
 
   test("ECDSA sign/verify on a key pair", () => {
     const kp = new CryptoKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
     const data = enc.encode("ecdsa");
     const sig = CryptoKey.sign({ name: "ECDSA", hash: { name: "SHA-256" } }, kp.privateKey!, data);
-    expect(CryptoKey.verify({ name: "ECDSA", hash: { name: "SHA-256" } }, kp.publicKey!, sig, data)).toBe(true);
+    expect(
+      CryptoKey.verify({ name: "ECDSA", hash: { name: "SHA-256" } }, kp.publicKey!, sig, data),
+    ).toBe(true);
   });
 
   test("Ed25519 sign/verify", () => {
@@ -368,32 +504,62 @@ describe("CryptoKey — sign/verify", () => {
 
   test("RSA sign/verify", () => {
     const kp = new CryptoKey(
-      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: { name: "SHA-256" } },
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: { name: "SHA-256" },
+      },
       true,
       ["sign", "verify"],
     );
     const data = enc.encode("rsa");
-    const sig = CryptoKey.sign({ name: "RSASSA-PKCS1-v1_5", hash: { name: "SHA-256" } }, kp.privateKey!, data);
-    expect(CryptoKey.verify({ name: "RSASSA-PKCS1-v1_5", hash: { name: "SHA-256" } }, kp.publicKey!, sig, data)).toBe(true);
+    const sig = CryptoKey.sign(
+      { name: "RSASSA-PKCS1-v1_5", hash: { name: "SHA-256" } },
+      kp.privateKey!,
+      data,
+    );
+    expect(
+      CryptoKey.verify(
+        { name: "RSASSA-PKCS1-v1_5", hash: { name: "SHA-256" } },
+        kp.publicKey!,
+        sig,
+        data,
+      ),
+    ).toBe(true);
   });
 });
 
 describe("CryptoKey — export/import", () => {
   test("HMAC JWK roundtrip", () => {
-    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-512" } }, true, ["sign", "verify"]);
+    const key = new CryptoKey({ name: "HMAC", hash: { name: "SHA-512" } }, true, [
+      "sign",
+      "verify",
+    ]);
     const jwk = CryptoKey.exportKey("jwk", key);
     expect((jwk as any).kty).toBe("oct");
-    const imported = CryptoKey.importKey("jwk", jwk, { name: "HMAC", hash: { name: "SHA-512" } }, true, ["sign", "verify"]);
+    const imported = CryptoKey.importKey(
+      "jwk",
+      jwk,
+      { name: "HMAC", hash: { name: "SHA-512" } },
+      true,
+      ["sign", "verify"],
+    );
     const data = enc.encode("x");
     const sig = CryptoKey.sign({ name: "HMAC", hash: { name: "SHA-512" } }, key, data);
-    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-512" } }, imported, sig, data)).toBe(true);
+    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-512" } }, imported, sig, data)).toBe(
+      true,
+    );
   });
 
   test("AES raw roundtrip", () => {
     const key = new CryptoKey({ name: "AES-GCM", length: 128 }, true, ["encrypt", "decrypt"]);
     const raw = CryptoKey.exportKey("raw", key);
     expect(raw.length).toBe(16);
-    const imported = CryptoKey.importKey("raw", raw, { name: "AES-GCM", length: 128 }, true, ["encrypt", "decrypt"]);
+    const imported = CryptoKey.importKey("raw", raw, { name: "AES-GCM", length: 128 }, true, [
+      "encrypt",
+      "decrypt",
+    ]);
     expect(imported.type).toBe("secret");
   });
 
@@ -401,11 +567,18 @@ describe("CryptoKey — export/import", () => {
     const kp = new CryptoKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
     const pkcs8 = CryptoKey.exportKey("pkcs8", kp.privateKey!);
     const spki = CryptoKey.exportKey("spki", kp.publicKey!);
-    const priv = CryptoKey.importKey("pkcs8", pkcs8, { name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
-    const pub = CryptoKey.importKey("spki", spki, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
+    const priv = CryptoKey.importKey("pkcs8", pkcs8, { name: "ECDSA", namedCurve: "P-256" }, true, [
+      "sign",
+      "verify",
+    ]);
+    const pub = CryptoKey.importKey("spki", spki, { name: "ECDSA", namedCurve: "P-256" }, true, [
+      "verify",
+    ]);
     const data = enc.encode("der");
     const sig = CryptoKey.sign({ name: "ECDSA", hash: { name: "SHA-256" } }, priv, data);
-    expect(CryptoKey.verify({ name: "ECDSA", hash: { name: "SHA-256" } }, pub, sig, data)).toBe(true);
+    expect(CryptoKey.verify({ name: "ECDSA", hash: { name: "SHA-256" } }, pub, sig, data)).toBe(
+      true,
+    );
   });
 
   test("non-extractable key cannot be exported", () => {
@@ -423,9 +596,16 @@ describe("CryptoKey — digest", () => {
 
 describe("CryptoKey — deriveKey (PBKDF2)", () => {
   test("derives an AES key from a password", () => {
-    const pw = CryptoKey.importKey("raw", enc.encode("password"), { name: "PBKDF2" }, false, ["deriveKey"]);
+    const pw = CryptoKey.importKey("raw", enc.encode("password"), { name: "PBKDF2" }, false, [
+      "deriveKey",
+    ]);
     const derived = CryptoKey.deriveKey(
-      { name: "PBKDF2", salt: crypto.getRandomValues(new Uint8Array(16)), iterations: 100_000, hash: { name: "SHA-256" } },
+      {
+        name: "PBKDF2",
+        salt: crypto.getRandomValues(new Uint8Array(16)),
+        iterations: 100_000,
+        hash: { name: "SHA-256" },
+      },
       pw,
       { name: "AES-GCM", length: 256 },
       false,
@@ -439,7 +619,10 @@ describe("CryptoKey — deriveKey (PBKDF2)", () => {
 describe("CryptoKey — wrap/unwrap", () => {
   test("AES-KW wrap/unwrap roundtrip of an HMAC key (jwk)", () => {
     const kw = new CryptoKey({ name: "AES-KW", length: 256 }, true, ["wrapKey", "unwrapKey"]);
-    const hmac = new CryptoKey({ name: "HMAC", hash: { name: "SHA-512" } }, true, ["sign", "verify"]);
+    const hmac = new CryptoKey({ name: "HMAC", hash: { name: "SHA-512" } }, true, [
+      "sign",
+      "verify",
+    ]);
     const wrapped = CryptoKey.wrapKey("jwk", hmac, kw, "AES-KW");
     const unwrapped = CryptoKey.unwrapKey(
       "jwk",
@@ -452,7 +635,9 @@ describe("CryptoKey — wrap/unwrap", () => {
     );
     const data = enc.encode("wrap");
     const sig = CryptoKey.sign({ name: "HMAC", hash: { name: "SHA-512" } }, hmac, data);
-    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-512" } }, unwrapped, sig, data)).toBe(true);
+    expect(
+      CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-512" } }, unwrapped, sig, data),
+    ).toBe(true);
   });
 });
 
@@ -482,9 +667,16 @@ describe("CryptoKey — instance method parity", () => {
   });
 
   test("instance deriveKey mirrors the static API", () => {
-    const pw = CryptoKey.importKey("raw", enc.encode("password"), { name: "PBKDF2" }, false, ["deriveKey"]);
+    const pw = CryptoKey.importKey("raw", enc.encode("password"), { name: "PBKDF2" }, false, [
+      "deriveKey",
+    ]);
     const derived = pw.deriveKey(
-      { name: "PBKDF2", salt: crypto.getRandomValues(new Uint8Array(16)), iterations: 100_000, hash: { name: "SHA-256" } },
+      {
+        name: "PBKDF2",
+        salt: crypto.getRandomValues(new Uint8Array(16)),
+        iterations: 100_000,
+        hash: { name: "SHA-256" },
+      },
       pw,
       { name: "AES-GCM", length: 256 },
       false,
@@ -495,7 +687,10 @@ describe("CryptoKey — instance method parity", () => {
 
   test("instance wrapKey/unwrapKey mirrors the static API", () => {
     const kw = new CryptoKey({ name: "AES-KW", length: 256 }, true, ["wrapKey", "unwrapKey"]);
-    const hmac = new CryptoKey({ name: "HMAC", hash: { name: "SHA-512" } }, true, ["sign", "verify"]);
+    const hmac = new CryptoKey({ name: "HMAC", hash: { name: "SHA-512" } }, true, [
+      "sign",
+      "verify",
+    ]);
     const wrapped = kw.wrapKey("jwk", hmac, kw, "AES-KW");
     const unwrapped = kw.unwrapKey(
       "jwk",
@@ -508,7 +703,9 @@ describe("CryptoKey — instance method parity", () => {
     );
     const data = enc.encode("wrap-instance");
     const sig = CryptoKey.sign({ name: "HMAC", hash: { name: "SHA-512" } }, hmac, data);
-    expect(CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-512" } }, unwrapped, sig, data)).toBe(true);
+    expect(
+      CryptoKey.verify({ name: "HMAC", hash: { name: "SHA-512" } }, unwrapped, sig, data),
+    ).toBe(true);
   });
 
   test("instance digest mirrors the static API", () => {
@@ -520,7 +717,9 @@ describe("CryptoKey — instance method parity", () => {
   test("KEM instance methods are present but not implemented", () => {
     const x = new CryptoKey({ name: "X25519" }, true, ["deriveKey", "deriveBits"]);
     expect(() => x.encapsulateBits({ name: "ML-KEM-768" }, x.publicKey!)).toThrow();
-    expect(() => x.decapsulateBits({ name: "ML-KEM-768" }, x.privateKey!, new Uint8Array(32))).toThrow();
+    expect(() =>
+      x.decapsulateBits({ name: "ML-KEM-768" }, x.privateKey!, new Uint8Array(32)),
+    ).toThrow();
   });
 });
 

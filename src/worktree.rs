@@ -133,6 +133,12 @@ pub struct StreamTask {
     tree_id: String,
 }
 
+impl StreamTask {
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>, tree_id: String) -> Self {
+        Self { repo, tree_id }
+    }
+}
+
 impl Task for StreamTask {
     type Output = Vec<StreamEntry>;
     type JsValue = Vec<StreamEntry>;
@@ -176,6 +182,12 @@ impl Task for StreamTask {
 pub struct StreamRawTask {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     tree_id: String,
+}
+
+impl StreamRawTask {
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>, tree_id: String) -> Self {
+        Self { repo, tree_id }
+    }
 }
 
 impl Task for StreamRawTask {

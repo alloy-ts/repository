@@ -342,6 +342,8 @@ mod snapshot {
     use std::path::{Path, PathBuf};
     use std::time::SystemTime;
 
+    use super::SafeResult;
+
     pub const DEFAULT_SNAPSHOT_KEEP: usize = 10;
 
     pub fn snapshot_dir_for_vault(vault_path: &Path, profile: &str) -> PathBuf {
