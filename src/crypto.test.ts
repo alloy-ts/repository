@@ -98,6 +98,24 @@ describe("Crypto (repository-bound crypt handle)", () => {
       rmSync(base, { recursive: true, force: true });
     }
   });
+
+  test("repository.crypt().init supports submodule git-remote-gcrypt layering options", () => {
+    const base = mkdtempSync(join(tmpdir(), "gcrypt-submodule-repo-"));
+    try {
+      const repo = Repository.init(base, false);
+      const crypt = repo.crypt();
+
+      crypt.init({
+        filterName: "git-crypt",
+        gcryptUrl: "gcrypt::https://git.example.com/vault.git",
+        submodulePath: "secure-submodule",
+      });
+
+      expect(crypt.isInitialized()).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("GPG / OpenPGP (rPGP NAPI bindings)", () => {

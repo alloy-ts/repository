@@ -140,6 +140,15 @@ class SymmetricCryptoKey {
 Bound to a Git repository handle to manage encrypted repository state and Git filters.
 
 ```ts
+interface CryptFilterOptions {
+  filterName?: string;
+  clean?: string;
+  smudge?: string;
+  diff?: string;
+  gcryptUrl?: string;
+  submodulePath?: string;
+}
+
 class Crypto {
   is_initialized(): boolean;
   key_dir(): string;
@@ -154,6 +163,20 @@ class Crypto {
   is_encrypted(data: Buffer): boolean;
 }
 ```
+
+#### Layering with `git-remote-gcrypt` Submodules
+
+`CryptFilterOptions` supports configuring a `git-remote-gcrypt` remote for a submodule worktree directory alongside `git-crypt` file filter encryption:
+
+```ts
+crypt.init({
+  filterName: "git-crypt",
+  gcryptUrl: "gcrypt::https://git.example.com/vault.git",
+  submodulePath: "secure-submodule",
+});
+```
+
+This applies full repository transport encryption at the remote pack level (`git-remote-gcrypt`) while maintaining granular file-level filter encryption (`git-crypt`) within the submodule.
 
 ---
 

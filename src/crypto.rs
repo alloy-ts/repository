@@ -655,6 +655,10 @@ pub struct CryptFilterOptions {
     pub smudge: Option<String>,
     /// The `diff` command. Default `"crypto diff"`.
     pub diff: Option<String>,
+    /// Optional remote URL for `git-remote-gcrypt` transport encryption (e.g. `gcrypt::https://...` or `gcrypt::/path/to/repo.git`).
+    pub gcrypt_url: Option<String>,
+    /// Optional submodule path for layering partial encryption within a `git-remote-gcrypt` submodule worktree directory.
+    pub submodule_path: Option<String>,
 }
 
 impl Default for CryptFilterOptions {
@@ -664,6 +668,8 @@ impl Default for CryptFilterOptions {
             clean: None,
             smudge: None,
             diff: None,
+            gcrypt_url: None,
+            submodule_path: None,
         }
     }
 }
@@ -808,16 +814,52 @@ impl Crypto {
 
     /// Initialize crypt: create the key directory, generate a key, and configure filters.
     /// Idempotent — a no-op if already initialized. `opts` overrides the filter name/commands
-    /// (defaults to the built-in `crypto` filter).
+    /// (defaults to the built-in `crypto` filter). If `opts.gcrypt_url` and `opts.submodule_path`
+    /// are set, configures a `git-remote-gcrypt` submodule remote alongside `git-crypt` filters.
     #[napi]
     pub fn init(&self, opts: Option<CryptFilterOptions>) -> Result<()> {
         let km = self.key_manager();
-        if km.is_initialized() {
-            return Ok(());
+        if !km.is_initialized() {
+            km.init_dirs()?;
+            let _key = km.generate_key()?;
         }
-        km.init_dirs()?;
-        let _key = km.generate_key()?;
-        self.configure_filters(&opts.unwrap_or_default().resolve())?;
+        let options = opts.unwrap_or_default();
+        self.configure_filters(&options.resolve())?;
+
+        if let (Some(gcrypt_url), Some(submodule_path)) = (&options.gcrypt_url, &options.submodule_path) {
+            self.configure_gcrypt_submodule(submodule_path, gcrypt_url)?;
+        }
+        Ok(())
+    }
+
+    /// Configure a `git-remote-gcrypt` remote for a submodule worktree directory.
+    fn configure_gcrypt_submodule(&self, submodule_path: &str, gcrypt_url: &str) -> CryptoResult<()> {
+        let config_path = self.config_path();
+        let mut config = if config_path.exists() {
+            gix::config::File::from_path_no_includes(
+                config_path.clone(),
+                gix::config::Source::Local,
+            )
+            .map_err(|e| CryptoError::Git(e.to_string()))?
+        } else {
+            gix::config::File::new(gix::config::file::Metadata::from(
+                gix::config::Source::Local,
+            ))
+        };
+
+        let remote_name = format!("submodule.{submodule_path}");
+        let formatted_url = if gcrypt_url.starts_with("gcrypt::") {
+            gcrypt_url.to_string()
+        } else {
+            format!("gcrypt::{gcrypt_url}")
+        };
+
+        config
+            .set_raw_value(&format!("remote.{remote_name}.url"), &formatted_url)
+            .map_err(|e| CryptoError::Git(e.to_string()))?;
+
+        let mut file = std::fs::File::create(&config_path)?;
+        config.write_to(&mut file)?;
         Ok(())
     }
 
