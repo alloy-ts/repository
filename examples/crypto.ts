@@ -115,4 +115,68 @@ const uidCol = gpgNthColumn(sampleLine, 9);
 assert.strictEqual(uidCol, "John Smith <jsmith@example.com>");
 
 console.log("GPG / OpenPGP context, data, and CLI helper assertions passed.");
+
+// 4. Encrypted Repository with SSH & gcrypt Remote Configuration
+const sshRepoDir = mkdtempSync(join(tmpdir(), "example-ssh-gcrypt-repo-"));
+
+try {
+  const sshRepo = Repository.init(sshRepoDir, false);
+  const crypt = sshRepo.crypt();
+
+  // Initialize Hybrid Mode (git-crypt filters + full gcrypt repo encryption)
+  const remoteRepoId = crypt.init();
+  assert.ok(crypt.isEntireRepoMode());
+
+  // Configure gcrypt remote using SSH transport:
+  // Format: gcrypt::git@github.com:user/project.git#encrypted
+  // - gcrypt:: tells Git to use the encrypted remote helper
+  // - #encrypted specifies the target encrypted branch on the remote server
+  const sshRemoteUrl = "gcrypt::git@github.com:yourname/my-secret-project.git#encrypted";
+  const participantFingerprint = "1234567890ABCDEF1234567890ABCDEF12345678";
+
+  sshRepo.createRemote("origin", sshRemoteUrl);
+
+  const localConfigPath = sshRepo.gitDir() + "/config";
+  const tx = sshRepo.configFileMut(localConfigPath);
+  tx.setRawValue("remote", "origin", "gcrypt-participants", participantFingerprint);
+  tx.setRawValue("remote", "origin", "gcrypt-require-explicit-force-push", "true");
+  tx.setRawValue("user", null, "signingkey", participantFingerprint);
+  tx.commit();
+
+  // Re-open repo to read updated config snapshot from gix
+  const repoLoaded = Repository.open(sshRepoDir);
+  const originRemote = repoLoaded.findRemote("origin");
+  assert.strictEqual(originRemote.url, sshRemoteUrl);
+
+  const snap = repoLoaded.configSnapshot();
+  assert.strictEqual(snap.string("remote.origin.gcrypt-participants"), participantFingerprint);
+  assert.strictEqual(snap.string("remote.origin.gcrypt-require-explicit-force-push"), "true");
+  assert.strictEqual(snap.string("user.signingkey"), participantFingerprint);
+
+  // Create an encrypted manifest representing remote refs and encrypted packfile states
+  const loadedCrypt = repoLoaded.crypt();
+  const sshManifest = {
+    refs: [{ objectId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", name: "refs/heads/master" }],
+    packs: [],
+    keep: [],
+    repoId: remoteRepoId,
+    extensions: ["extn comment"],
+  };
+
+  const encryptedManifest = loadedCrypt.encryptManifest(sshManifest);
+  const decryptedManifest = loadedCrypt.decryptManifest(encryptedManifest);
+  assert.strictEqual(decryptedManifest.refs[0].name, "refs/heads/master");
+  assert.strictEqual(decryptedManifest.repoId, remoteRepoId);
+
+  // Direct rsync-over-SSH option url format:
+  // gcrypt::rsync://user@your-server.com/home/user/encrypted-repos/my-project
+  const rsyncRemoteUrl = "gcrypt::rsync://user@your-server.com/home/user/encrypted-repos/my-project";
+  const rsyncRemote = sshRepo.createRemote("rsync-origin", rsyncRemoteUrl);
+  assert.strictEqual(rsyncRemote.url, rsyncRemoteUrl);
+
+  console.log("Encrypted Repository with SSH & gcrypt Remote Configuration passed.");
+} finally {
+  rmSync(sshRepoDir, { recursive: true, force: true });
+}
+
 console.log("\nAll crypto and git-crypt example assertions completed successfully.");

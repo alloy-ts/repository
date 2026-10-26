@@ -5159,84 +5159,37 @@ pub fn get_repo_keys_path() -> CryptoResult<PathBuf> {
 }
 
 pub fn get_path_to_top() -> CryptoResult<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-cdup"])
-        .output()
-        .map_err(|e| CryptoError::Git(e.to_string()))?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git rev-parse --show-cdup' failed".to_string()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-pub fn get_git_status() -> CryptoResult<String> {
-    let output = std::process::Command::new("git")
-        .args(["status", "-uno", "--porcelain"])
-        .output()
-        .map_err(|e| CryptoError::Git(e.to_string()))?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git status' failed".to_string()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-pub fn get_file_attributes(filename: &str) -> CryptoResult<(String, String)> {
-    let output = std::process::Command::new("git")
-        .args(["check-attr", "filter", "diff", "--", filename])
-        .output()
-        .map_err(|e| CryptoError::Git(e.to_string()))?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git check-attr' failed".to_string()));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut filter_attr = String::new();
-    let mut diff_attr = String::new();
-
-    for line in stdout.lines() {
-        if let Some(value_pos) = line.rfind(": ") {
-            if value_pos == 0 {
-                continue;
-            }
-            if let Some(name_pos) = line[..value_pos].rfind(": ") {
-                let attr_name = &line[name_pos + 2..value_pos];
-                let attr_value = &line[value_pos + 2..];
-                if attr_value != "unspecified" && attr_value != "unset" && attr_value != "set" {
-                    if attr_name == "filter" {
-                        filter_attr = attr_value.to_string();
-                    } else if attr_name == "diff" {
-                        diff_attr = attr_value.to_string();
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    if let Some(workdir) = repo.workdir() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if cwd != workdir {
+                if let Ok(rel) = cwd.strip_prefix(workdir) {
+                    let depth = rel.components().count();
+                    if depth > 0 {
+                        let cdup = vec![".."; depth].join("/") + "/";
+                        return Ok(cdup);
                     }
                 }
             }
         }
     }
-    Ok((filter_attr, diff_attr))
+    Ok(String::new())
 }
 
 pub fn check_if_blob_is_encrypted(object_id: &str) -> CryptoResult<bool> {
-    let output = std::process::Command::new("git")
-        .args(["cat-file", "blob", object_id])
-        .output()
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    let oid = gix::ObjectId::from_hex(object_id.as_bytes())
         .map_err(|e| CryptoError::Git(e.to_string()))?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git cat-file' failed".to_string()));
-    }
-    Ok(SymmetricCryptoKey::is_encrypted_raw(&output.stdout))
+    let blob = repo.find_blob(oid).map_err(|e| CryptoError::Git(e.to_string()))?;
+    Ok(SymmetricCryptoKey::is_encrypted_raw(&blob.data))
 }
 
 pub fn check_if_file_is_encrypted(filename: &str) -> CryptoResult<bool> {
-    let output = std::process::Command::new("git")
-        .args(["ls-files", "-sz", "--", filename])
-        .output()
-        .map_err(|e| CryptoError::Git(e.to_string()))?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git ls-files' failed".to_string()));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let object_id = parts[1];
-        return check_if_blob_is_encrypted(object_id);
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    let index = repo.open_index().map_err(|e| CryptoError::Git(e.to_string()))?;
+    if let Some(entry) = index.entry_by_path(gix::bstr::BStr::new(filename)) {
+        let blob = repo.find_blob(entry.id).map_err(|e| CryptoError::Git(e.to_string()))?;
+        return Ok(SymmetricCryptoKey::is_encrypted_raw(&blob.data));
     }
     Ok(false)
 }
@@ -5248,34 +5201,15 @@ pub fn attribute_name(key_name: Option<&str>) -> String {
     }
 }
 
-pub fn get_encrypted_files(files: &mut Vec<String>, key_name: Option<&str>) -> CryptoResult<()> {
-    let target_attr = attribute_name(key_name);
-    let path_to_top = get_path_to_top().unwrap_or_default();
-    let mut args = vec!["ls-files", "-csz", "--"];
-    if !path_to_top.is_empty() {
-        args.push(&path_to_top);
-    }
-    let output = std::process::Command::new("git")
-        .args(&args)
-        .output()
-        .map_err(|e| CryptoError::Git(e.to_string()))?;
-    if !output.status.success() {
-        return Err(CryptoError::Git("'git ls-files' failed".to_string()));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for entry in stdout.split('\0') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = entry.split_whitespace().collect();
-        if parts.len() >= 4 {
-            let filename = parts[3];
-            if let Ok((filter_attr, _)) = get_file_attributes(filename) {
-                if filter_attr == target_attr {
-                    files.push(filename.to_string());
-                }
+pub fn get_encrypted_files(files: &mut Vec<String>, _key_name: Option<&str>) -> CryptoResult<()> {
+    let repo = gix::open(".").map_err(|e| CryptoError::Git(e.to_string()))?;
+    let index = repo.open_index().map_err(|e| CryptoError::Git(e.to_string()))?;
+    let backing = index.path_backing();
+    for entry in index.entries() {
+        let path = entry.path_in(backing).to_string();
+        if let Ok(blob) = repo.find_blob(entry.id) {
+            if SymmetricCryptoKey::is_encrypted_raw(&blob.data) {
+                files.push(path);
             }
         }
     }
