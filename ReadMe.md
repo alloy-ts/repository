@@ -11,7 +11,7 @@ async support and full type definitions.
 ## Features
 
 - **Git Operations**: Repositories, commits, trees, blobs, diffs, blame, status, worktrees, branches, tags, and remotes.
-- **Cryptography & Vault**: Symmetric ChaCha20-Poly1305 encryption, ref-backed key vaults, and git-crypt filter drivers.
+- **Cryptography & Vault**: Symmetric ChaCha20-Poly1305 / AES encryption, ref-backed key vaults, git-crypt worktree filter drivers, and git-remote-gcrypt entire repository mode (packfile & manifest encryption).
 - **OpenPGP & GPG**: OpenPGP encryption, decryption, signing, and signature verification via `rPGP`, along with GPG keyring lookup utilities. See [Cryptography API Documentation](docs/api/crypto.md).
 
 ## Getting Started

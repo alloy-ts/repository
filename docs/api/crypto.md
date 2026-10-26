@@ -7,10 +7,11 @@ The cryptography subsystem provides symmetric encryption, repository vault key m
 The cryptography capabilities in `@alloy-ts/repository` consist of two primary areas:
 
 1. **Symmetric Repository Encryption & Key Vault (`src/crypto.rs`)**:
-   - `SymmetricCryptoKey`: ChaCha20-Poly1305 256-bit symmetric encryption/decryption and random key generation.
-   - `Crypto`: Repository-bound crypt handle for `is_initialized`, `generate_key`, `init`, `lock`, `unlock`, `encrypt`, and `decrypt`.
+   - `CryptoMode`: Modes for repository encryption — `Filter` (0), `EntireRepo` (1), and default `Hybrid` (2).
+   - `SymmetricCryptoKey`: ChaCha20-Poly1305 / AES 256-bit symmetric encryption/decryption, raw byte access (`asBytes`), and random key generation.
+   - `Crypto`: Repository-bound crypt handle managing `git-crypt` worktree filter drivers, `git-remote-gcrypt` compatible entire repository encryption, manifest creation/decryption, and packfile AES / ChaCha20-Poly1305 payload encryption.
+   - `RepoManifest` & Manifest Functions: `serializeManifest` and `parseManifest` for `git-remote-gcrypt` manifest handling (refs, packs, keep list, remote repository ID).
    - `CryptFilterOptions`: Configuration for `clean`, `smudge`, and `diff` Git filters.
-   - Git filter configuration functions: `configure_git_filters`, `deconfigure_git_filters`, `git_checkout`, `validate_key_name`, and path resolution helpers.
 
 2. **OpenPGP & GPG Keyring Operations (`src/gpg.rs`)**:
    - `Context`: High-level cryptographic operations including encryption, decryption, signing, and signature verification.
@@ -119,6 +120,18 @@ function gpg_decrypt_from_file(filename: string): Uint8Array;
 
 ## Symmetric Encryption Subsystem (`src/crypto.rs`)
 
+### `CryptoMode`
+
+Enum representing repository active encryption modes:
+
+```ts
+enum CryptoMode {
+  Filter = 0,     // Worktree filter drivers (git-crypt compatible)
+  EntireRepo = 1, // Full repository remote pack & manifest encryption (git-remote-gcrypt compatible)
+  Hybrid = 2,     // Layered / Default mode combining git-crypt filters and gcrypt full repo encryption
+}
+```
+
 ### `SymmetricCryptoKey`
 
 ChaCha20-Poly1305 symmetric key for repository encryption.
@@ -126,33 +139,72 @@ ChaCha20-Poly1305 symmetric key for repository encryption.
 ```ts
 class SymmetricCryptoKey {
   constructor(bytes?: Uint8Array);
-  static generate_random(): SymmetricCryptoKey;
-  static from_bytes(bytes: Uint8Array): SymmetricCryptoKey;
-  as_bytes(): Uint8Array;
-  encrypt(plaintext: Uint8Array): Uint8Array;
-  decrypt(ciphertext: Uint8Array): Uint8Array;
-  static is_encrypted(data: Uint8Array): boolean;
+  static generateRandom(): SymmetricCryptoKey;
+  static fromBytes(bytes: Uint8Array): SymmetricCryptoKey;
+  asBytes(): Buffer;
+  encrypt(plaintext: Uint8Array): Buffer;
+  decrypt(ciphertext: Uint8Array): Buffer;
+  static isEncrypted(data: Uint8Array): boolean;
 }
 ```
 
 ### `Crypto`
 
-Bound to a Git repository handle to manage encrypted repository state and Git filters.
+Bound to a Git repository handle to manage encrypted repository state, worktree filters, manifest handling, and packfile encryption.
 
 ```ts
 class Crypto {
-  is_initialized(): boolean;
-  key_dir(): string;
-  generate_key(): SymmetricCryptoKey;
-  init(opts?: CryptFilterOptions): void;
+  isInitialized(): boolean;
+  mode(): CryptoMode;
+  keyDir(): string;
+  generateKey(): SymmetricCryptoKey;
+  init(opts?: CryptFilterOptions): string;
+  initEntireRepo(): string;
+  isEntireRepoMode(): boolean;
   lock(opts?: CryptFilterOptions): void;
   unlock(key_file?: string, opts?: CryptFilterOptions): void;
-  export_key(output_path: string): void;
-  import_key(input_path: string): void;
+  exportKey(output_path: string): void;
+  importKey(input_path: string): void;
   encrypt(data: Buffer): Buffer;
   decrypt(data: Buffer): Buffer;
-  is_encrypted(data: Buffer): boolean;
+  isEncrypted(data: Buffer): boolean;
+  encryptManifest(manifest: RepoManifest): Buffer;
+  decryptManifest(data: Buffer): RepoManifest;
+  encryptPack(packfile: Buffer): EncryptedPackResult;
+  decryptPack(encryptedBytes: Buffer, hashType: string, packId: string, packKey: string): Buffer;
 }
+```
+
+### `RepoManifest` and Manifest Utilities
+
+```ts
+interface ManifestRef {
+  objectId: string;
+  name: string;
+}
+
+interface ManifestPack {
+  hashType: string; // e.g. "SHA256"
+  packId: string;
+  key: string;
+}
+
+interface ManifestKeep {
+  hashType: string;
+  packId: string;
+  count: number;
+}
+
+interface RepoManifest {
+  refs: ManifestRef[];
+  packs: ManifestPack[];
+  keep: ManifestKeep[];
+  repoId: string;
+  extensions: string[];
+}
+
+function serializeManifest(manifest: RepoManifest): string;
+function parseManifest(text: string): RepoManifest;
 ```
 
 ---

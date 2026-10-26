@@ -36,35 +36,66 @@ try {
 
   assert.strictEqual(crypt.isInitialized(), false);
 
-  // Initialize crypt in repository
-  crypt.init();
+  // 2a. Default Hybrid Mode (git-crypt clean/smudge filters + git-remote-gcrypt entire repo encryption)
+  const repoId = crypt.init();
   assert.strictEqual(crypt.isInitialized(), true);
-  console.log("Crypt initialized at key directory:", crypt.keyDir());
+  assert.strictEqual(crypt.mode(), 2); // CryptoMode.Hybrid (2)
+  assert.ok(crypt.isEntireRepoMode());
+  console.log("Crypt default Hybrid mode initialized with Remote Repo ID:", repoId);
 
-  // Encrypt and decrypt using repository symmetric key
   const secretData = Buffer.from("Confidential repository payload");
   const encryptedPayload = crypt.encrypt(secretData);
   assert.ok(crypt.isEncrypted(encryptedPayload));
-
   const decryptedPayload = crypt.decrypt(encryptedPayload);
   assert.deepEqual(decryptedPayload, secretData);
 
-  // Export repository key
   const keyBackupPath = join(baseDir, "repo.key");
   crypt.exportKey(keyBackupPath);
-
-  // Lock and unlock repository
   crypt.lock();
   crypt.unlock(keyBackupPath);
 
-  console.log("Repository crypt operations (init, encrypt, decrypt, export, lock, unlock) passed.");
+  console.log("Partial Mode (git-crypt filter drivers) passed.");
+
+  // 2b. Entire Repository Encryption Mode (git-remote-gcrypt packfile & manifest encryption)
+  const fullRepoId = crypt.initEntireRepo();
+  assert.ok(typeof fullRepoId === "string");
+  assert.ok(crypt.isEntireRepoMode());
+
+  // When both filter and entire_repo are configured, active mode is Hybrid (2)
+  assert.strictEqual(crypt.mode(), 2); // CryptoMode.Hybrid (2)
+  console.log("Hybrid Mode active (git-crypt + git-remote-gcrypt full repo encryption).");
+
+  // Manifest management in Entire Repo / Hybrid Mode
+  const manifest = {
+    refs: [{ objectId: "1234567890123456789012345678901234567890", name: "refs/heads/main" }],
+    packs: [{ hashType: "SHA256", packId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }],
+    keep: [],
+    repoId: fullRepoId,
+    extensions: ["extn comment"],
+  };
+
+  const encryptedManifest = crypt.encryptManifest(manifest);
+  assert.ok(crypt.isEncrypted(encryptedManifest));
+
+  const decryptedManifest = crypt.decryptManifest(encryptedManifest);
+  assert.strictEqual(decryptedManifest.refs[0].name, "refs/heads/main");
+
+  // Packfile encryption
+  const packfileBytes = Buffer.from("git object store packfile content");
+  const encPack = crypt.encryptPack(packfileBytes);
+  assert.strictEqual(encPack.hashType, "SHA256");
+
+  const decPack = crypt.decryptPack(encPack.encryptedBytes, encPack.hashType, encPack.packId, encPack.packKey);
+  assert.deepEqual(decPack, packfileBytes);
+
+  console.log("Entire Repo / Hybrid Mode manifest & packfile encryption passed.");
 } finally {
   rmSync(baseDir, { recursive: true, force: true });
 }
 
 // 3. OpenPGP / GPG Context & Data abstractions
 const gpgCtx = new GpgContext(Protocol.OpenPgp);
-assert.strictEqual(gpgCtx.protocol, Protocol.OpenPgp);
+assert.strictEqual(gpgCtx.protocol, Protocol.OpenPgp ?? 0);
 
 gpgCtx.setArmor(true);
 
