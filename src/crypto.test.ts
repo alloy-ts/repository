@@ -14,6 +14,9 @@ import {
   allKeyFormats,
   SymmetricCryptoKey,
   Repository,
+  CryptoMode,
+  serializeManifest,
+  parseManifest,
   Protocol,
   GpgData,
   GpgContext,
@@ -54,8 +57,11 @@ describe("Crypto (repository-bound crypt handle)", () => {
       const crypt = repo.crypt();
 
       expect(crypt.isInitialized()).toBe(false);
+      expect(crypt.mode()).toBe(CryptoMode.Filter);
+
       crypt.init();
       expect(crypt.isInitialized()).toBe(true);
+      expect(crypt.mode()).toBe(CryptoMode.Hybrid);
       expect(typeof crypt.keyDir()).toBe("string");
 
       const payload = Buffer.from("classified git content");
@@ -70,6 +76,101 @@ describe("Crypto (repository-bound crypt handle)", () => {
 
       crypt.lock();
       crypt.unlock(exportPath);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("Entire Repository Encryption Mode (gcrypt compatible)", () => {
+    const base = mkdtempSync(join(tmpdir(), "entire-repo-"));
+    try {
+      const repo = Repository.init(base, false);
+      const crypt = repo.crypt();
+
+      expect(crypt.isEntireRepoMode()).toBe(false);
+      const repoId = crypt.initEntireRepo();
+      expect(typeof repoId).toBe("string");
+      expect(repoId).toContain(":id:");
+      expect(crypt.isEntireRepoMode()).toBe(true);
+      expect(crypt.mode()).toBe(CryptoMode.EntireRepo);
+
+      // Manifest creation, serialization, encryption and decryption
+      const manifest = {
+        refs: [{ objectId: "1234567890123456789012345678901234567890", name: "refs/heads/main" }],
+        packs: [{ hashType: "SHA256", packId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }],
+        keep: [{ hashType: "SHA256", packId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", count: 1 }],
+        repoId,
+        extensions: ["extn comment"],
+      };
+
+      const serialized = serializeManifest(manifest);
+      expect(serialized).toContain("1234567890123456789012345678901234567890 refs/heads/main");
+      expect(serialized).toContain("pack :SHA256:");
+
+      const parsed = parseManifest(serialized);
+      expect(parsed.refs.length).toBe(1);
+      expect(parsed.refs[0].name).toBe("refs/heads/main");
+      expect(parsed.packs.length).toBe(1);
+
+      const encManifest = crypt.encryptManifest(manifest);
+      expect(SymmetricCryptoKey.isEncrypted(encManifest)).toBe(true);
+
+      const decManifest = crypt.decryptManifest(encManifest);
+      expect(decManifest.refs).toEqual(manifest.refs);
+      expect(decManifest.packs).toEqual(manifest.packs);
+
+      // Packfile encryption and decryption
+      const rawPack = Buffer.from("git packfile object store bytes payload");
+      const encPack = crypt.encryptPack(rawPack);
+
+      expect(typeof encPack.packId).toBe("string");
+      expect(encPack.packId.length).toBe(64); // SHA256 hex length
+      expect(encPack.hashType).toBe("SHA256");
+
+      const decPack = crypt.decryptPack(
+        encPack.encryptedBytes,
+        encPack.hashType,
+        encPack.packId,
+        encPack.packKey,
+      );
+      expect(decPack).toEqual(rawPack);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("Hybrid / Layered Mode: partial (git-crypt) on top of full repo encryption (gcrypt)", () => {
+    const base = mkdtempSync(join(tmpdir(), "hybrid-repo-"));
+    try {
+      const repo = Repository.init(base, false);
+      const crypt = repo.crypt();
+
+      // Initialize default Hybrid mode
+      crypt.init();
+      expect(crypt.mode()).toBe(CryptoMode.Hybrid);
+
+      // Initialize full repo encryption on top
+      crypt.initEntireRepo();
+      expect(crypt.mode()).toBe(CryptoMode.Hybrid);
+      expect(crypt.isEntireRepoMode()).toBe(true);
+
+      // Partial mode file encryption still works
+      const sensitiveBlob = Buffer.from("secret file content inside worktree");
+      const encBlob = crypt.encrypt(sensitiveBlob);
+      expect(crypt.isEncrypted(encBlob)).toBe(true);
+      expect(crypt.decrypt(encBlob)).toEqual(sensitiveBlob);
+
+      // Full repo encryption manifest/pack operations also work simultaneously
+      const manifest = {
+        refs: [{ objectId: "9999999999999999999999999999999999999999", name: "refs/heads/master" }],
+        packs: [],
+        keep: [],
+        repoId: "hybrid-repo-id",
+        extensions: [],
+      };
+      const encMani = crypt.encryptManifest(manifest);
+      const decMani = crypt.decryptManifest(encMani);
+      expect(decMani.refs[0].name).toBe("refs/heads/master");
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

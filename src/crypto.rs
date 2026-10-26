@@ -86,6 +86,153 @@ pub const NONCE_SIZE: usize = 12;
 /// Magic header identifying crypt-encrypted payloads.
 const MAGIC_HEADER: &[u8] = b"GITCRYPT";
 
+/// Repository encryption mode.
+#[napi]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CryptoMode {
+    /// File-level clean/smudge filter encryption (git-crypt partial mode).
+    Filter = 0,
+    /// Entire repository packfile & manifest encryption (git-remote-gcrypt mode).
+    EntireRepo = 1,
+    /// Layered/Hybrid mode: partial file filtering (git-crypt) + entire repository encryption (gcrypt).
+    Hybrid = 2,
+}
+
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManifestRef {
+    pub object_id: String,
+    pub name: String,
+}
+
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManifestPack {
+    pub hash_type: String,
+    pub pack_id: String,
+    pub key: String,
+}
+
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManifestKeep {
+    pub hash_type: String,
+    pub pack_id: String,
+    pub count: u32,
+}
+
+/// Representation of a git-remote-gcrypt compatible repository manifest.
+#[napi(object)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoManifest {
+    pub refs: Vec<ManifestRef>,
+    pub packs: Vec<ManifestPack>,
+    pub keep: Vec<ManifestKeep>,
+    pub repo_id: String,
+    pub extensions: Vec<String>,
+}
+
+/// Serialize a RepoManifest object into standard gcrypt manifest format.
+#[napi]
+pub fn serialize_manifest(manifest: RepoManifest) -> String {
+    let mut lines = Vec::new();
+
+    // 1. Refs list: <hex40> <ref_name>
+    for r in &manifest.refs {
+        lines.push(format!("{} {}", r.object_id, r.name));
+    }
+
+    // 2. Pack list: pack :<hashtype>:<pack_id> <key>
+    for p in &manifest.packs {
+        let ht = if p.hash_type.is_empty() { "SHA256" } else { &p.hash_type };
+        lines.push(format!("pack :{ht}:{} {}", p.pack_id, p.key));
+    }
+
+    // 3. Keep list: keep :<hashtype>:<pack_id> <count>
+    for k in &manifest.keep {
+        let ht = if k.hash_type.is_empty() { "SHA256" } else { &k.hash_type };
+        lines.push(format!("keep :{ht}:{} {}", k.pack_id, k.count));
+    }
+
+    // 4. Repo ID: repo <repo_id>
+    if !manifest.repo_id.is_empty() {
+        if manifest.repo_id.starts_with("repo ") {
+            lines.push(manifest.repo_id.clone());
+        } else {
+            lines.push(format!("repo {}", manifest.repo_id));
+        }
+    }
+
+    // 5. Extensions: extn <ext>
+    for e in &manifest.extensions {
+        lines.push(format!("extn {e}"));
+    }
+
+    lines.join("\n")
+}
+
+/// Parse a manifest string in standard gcrypt format.
+#[napi]
+pub fn parse_manifest(text: String) -> Result<RepoManifest> {
+    let mut manifest = RepoManifest::default();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        if parts[0] == "pack" && parts.len() >= 3 {
+            let pack_spec = parts[1];
+            let key = parts[2..].join(" ");
+            let sub: Vec<&str> = pack_spec.split(':').collect();
+            if sub.len() >= 3 {
+                manifest.packs.push(ManifestPack {
+                    hash_type: sub[1].to_string(),
+                    pack_id: sub[2].to_string(),
+                    key,
+                });
+            }
+        } else if parts[0] == "keep" && parts.len() >= 3 {
+            let keep_spec = parts[1];
+            let count: u32 = parts[2].parse().unwrap_or(1);
+            let sub: Vec<&str> = keep_spec.split(':').collect();
+            if sub.len() >= 3 {
+                manifest.keep.push(ManifestKeep {
+                    hash_type: sub[1].to_string(),
+                    pack_id: sub[2].to_string(),
+                    count,
+                });
+            }
+        } else if parts[0] == "repo" && parts.len() >= 2 {
+            manifest.repo_id = parts[1..].join(" ");
+        } else if parts[0] == "extn" && parts.len() >= 2 {
+            manifest.extensions.push(parts[1..].join(" "));
+        } else if parts.len() == 2 && (parts[0].len() == 40 || parts[0].len() == 64) && parts[0].chars().all(|c| c.is_ascii_hexdigit()) {
+            manifest.refs.push(ManifestRef {
+                object_id: parts[0].to_string(),
+                name: parts[1].to_string(),
+            });
+        }
+    }
+
+    Ok(manifest)
+}
+
+/// Result of encrypting a packfile for full repo mode.
+#[napi(object)]
+pub struct EncryptedPackResult {
+    pub pack_id: String,
+    pub hash_type: String,
+    pub pack_key: String,
+    pub encrypted_bytes: Buffer,
+}
+
 /// A symmetric ChaCha20-Poly1305 key. Exposed to JS as the `SymmetricCryptoKey` class.
 #[napi(js_name = "SymmetricCryptoKey")]
 #[derive(Clone)]
@@ -123,13 +270,19 @@ impl SymmetricCryptoKey {
         Ok(Self { key })
     }
 
-    /// Borrow the raw key bytes.
+    /// Borrow the raw key bytes in Rust.
     pub fn as_bytes(&self) -> &[u8] {
         &self.key
     }
 
+    /// Borrow the raw key bytes as a Buffer for JS.
+    #[napi(js_name = "asBytes")]
+    pub fn napi_as_bytes(&self) -> Buffer {
+        Buffer::from(self.key.to_vec())
+    }
+
     /// Encrypt `plaintext` into `MAGIC_HEADER || nonce || ciphertext+tag` (ChaCha20-Poly1305).
-    pub fn encrypt(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
+    pub fn encrypt_raw(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
         use rand::RngCore as _;
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -149,8 +302,15 @@ impl SymmetricCryptoKey {
         Ok(result)
     }
 
-    /// Decrypt a payload produced by [`SymmetricCryptoKey::encrypt`].
-    pub fn decrypt(&self, ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
+    /// Encrypt `plaintext` Buffer into `MAGIC_HEADER || nonce || ciphertext+tag` (ChaCha20-Poly1305).
+    #[napi]
+    pub fn encrypt(&self, plaintext: Buffer) -> Result<Buffer> {
+        let out = self.encrypt_raw(plaintext.as_ref())?;
+        Ok(Buffer::from(out))
+    }
+
+    /// Decrypt a payload produced by [`SymmetricCryptoKey::encrypt_raw`].
+    pub fn decrypt_raw(&self, ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
         let min_size = MAGIC_HEADER.len() + NONCE_SIZE;
         if ciphertext.len() < min_size {
             return Err(CryptoError::Crypto("ciphertext too short".into()));
@@ -168,9 +328,22 @@ impl SymmetricCryptoKey {
             .map_err(|_| CryptoError::Crypto("decryption failed (wrong key or tampered)".into()))
     }
 
+    /// Decrypt a payload produced by [`SymmetricCryptoKey::encrypt`].
+    #[napi]
+    pub fn decrypt(&self, ciphertext: Buffer) -> Result<Buffer> {
+        let out = self.decrypt_raw(ciphertext.as_ref())?;
+        Ok(Buffer::from(out))
+    }
+
     /// Whether `data` carries the crypt magic header.
-    pub fn is_encrypted(data: &[u8]) -> bool {
+    pub fn is_encrypted_raw(data: &[u8]) -> bool {
         data.len() >= MAGIC_HEADER.len() && &data[..MAGIC_HEADER.len()] == MAGIC_HEADER
+    }
+
+    /// Whether `data` carries the crypt magic header.
+    #[napi(js_name = "isEncrypted")]
+    pub fn is_encrypted(data: Buffer) -> bool {
+        Self::is_encrypted_raw(data.as_ref())
     }
 }
 
@@ -780,6 +953,38 @@ impl Crypto {
 
 #[napi]
 impl Crypto {
+    /// Active crypto mode for the repository (filter, entire_repo, or hybrid).
+    #[napi]
+    pub fn mode(&self) -> CryptoMode {
+        let config_path = self.config_path();
+        let mut has_filter = false;
+        let mut has_entire_repo = false;
+
+        if config_path.exists() {
+            if let Ok(config) = gix::config::File::from_path_no_includes(
+                config_path,
+                gix::config::Source::Local,
+            ) {
+                if config.string("filter.crypto.clean").is_some()
+                    || config.string("filter.git-crypt.clean").is_some()
+                {
+                    has_filter = true;
+                }
+                if let Some(val) = config.string("gcrypt.mode") {
+                    if val == "entire_repo" {
+                        has_entire_repo = true;
+                    }
+                }
+            }
+        }
+
+        match (has_filter, has_entire_repo) {
+            (true, true) => CryptoMode::Hybrid,
+            (false, true) => CryptoMode::EntireRepo,
+            _ => CryptoMode::Filter,
+        }
+    }
+
     /// Whether the repository has been initialized for crypt.
     #[napi]
     pub fn is_initialized(&self) -> bool {
@@ -806,19 +1011,65 @@ impl Crypto {
         Ok(km.generate_key()?)
     }
 
-    /// Initialize crypt: create the key directory, generate a key, and configure filters.
-    /// Idempotent — a no-op if already initialized. `opts` overrides the filter name/commands
-    /// (defaults to the built-in `crypto` filter).
+    /// Initialize crypt: create key directory, generate a key, set gcrypt.mode = entire_repo,
+    /// and configure git-crypt filter drivers.
+    /// Both full repo encryption (git-remote-gcrypt) and partial worktree encryption (git-crypt)
+    /// are applied by default (Hybrid mode).
     #[napi]
-    pub fn init(&self, opts: Option<CryptFilterOptions>) -> Result<()> {
+    pub fn init(&self, opts: Option<CryptFilterOptions>) -> Result<String> {
         let km = self.key_manager();
-        if km.is_initialized() {
-            return Ok(());
+        if !km.is_initialized() {
+            km.init_dirs()?;
+            let _key = km.generate_key()?;
         }
-        km.init_dirs()?;
-        let _key = km.generate_key()?;
+
         self.configure_filters(&opts.unwrap_or_default().resolve())?;
-        Ok(())
+
+        let config_path = self.config_path();
+        let mut config = if config_path.exists() {
+            gix::config::File::from_path_no_includes(
+                config_path.clone(),
+                gix::config::Source::Local,
+            )
+            .map_err(|e| CryptoError::Git(e.to_string()))?
+        } else {
+            gix::config::File::new(gix::config::file::Metadata::from(
+                gix::config::Source::Local,
+            ))
+        };
+
+        config
+            .set_raw_value("gcrypt.mode", "entire_repo")
+            .map_err(|e| CryptoError::Git(e.to_string()))?;
+
+        let existing_id = config.string("gcrypt.id").map(|s| s.to_string());
+        let repo_id = match existing_id {
+            Some(id) if !id.is_empty() => id,
+            _ => format!(":id:{}", hex_lower(&SymmetricCryptoKey::generate_random().as_bytes()[..15])),
+        };
+
+        config
+            .set_raw_value("gcrypt.id", &repo_id)
+            .map_err(|e| CryptoError::Git(e.to_string()))?;
+
+        let mut file = std::fs::File::create(&config_path)?;
+        config.write_to(&mut file)?;
+
+        Ok(repo_id)
+    }
+
+    /// Initialize the repository for Entire Repository Encryption mode (gcrypt mode).
+    /// Alias for init() which sets up both full repository encryption and partial filter drivers.
+    #[napi]
+    pub fn init_entire_repo(&self, opts: Option<CryptFilterOptions>) -> Result<String> {
+        self.init(opts)
+    }
+
+    /// Whether repository is configured with Entire Repository Encryption enabled (entire_repo or hybrid).
+    #[napi]
+    pub fn is_entire_repo_mode(&self) -> bool {
+        let m = self.mode();
+        m == CryptoMode::EntireRepo || m == CryptoMode::Hybrid
     }
 
     /// Lock the repository by removing the `filter.<name>.*` config (encrypted files then
@@ -878,7 +1129,7 @@ impl Crypto {
     #[napi]
     pub fn encrypt(&self, data: Buffer) -> Result<Buffer> {
         let key = self.load_key()?;
-        let out = key.encrypt(data.as_ref())?;
+        let out = key.encrypt_raw(data.as_ref())?;
         Ok(Buffer::from(out))
     }
 
@@ -886,14 +1137,109 @@ impl Crypto {
     #[napi]
     pub fn decrypt(&self, data: Buffer) -> Result<Buffer> {
         let key = self.load_key()?;
-        let out = key.decrypt(data.as_ref())?;
+        let out = key.decrypt_raw(data.as_ref())?;
         Ok(Buffer::from(out))
     }
 
     /// Whether `data` carries the crypt magic header.
     #[napi]
     pub fn is_encrypted(&self, data: Buffer) -> bool {
-        SymmetricCryptoKey::is_encrypted(data.as_ref())
+        SymmetricCryptoKey::is_encrypted_raw(data.as_ref())
+    }
+
+    /// Encrypt a repo manifest payload using the repository key.
+    #[napi]
+    pub fn encrypt_manifest(&self, manifest: RepoManifest) -> Result<Buffer> {
+        let key = self.load_key()?;
+        let text = serialize_manifest(manifest);
+        let enc = key.encrypt_raw(text.as_bytes())?;
+        Ok(Buffer::from(enc))
+    }
+
+    /// Decrypt a repo manifest payload using the repository key.
+    #[napi]
+    pub fn decrypt_manifest(&self, ciphertext: Buffer) -> Result<RepoManifest> {
+        let key = self.load_key()?;
+        let dec = key.decrypt_raw(ciphertext.as_ref())?;
+        let text = String::from_utf8(dec)
+            .map_err(|e| napi::Error::from_reason(format!("manifest UTF-8 error: {e}")))?;
+        parse_manifest(text)
+    }
+
+    /// Encrypt a packfile buffer using a symmetric key (or a newly generated key).
+    /// Returns the SHA256 digest of the encrypted output as pack_id.
+    #[napi]
+    pub fn encrypt_pack(
+        &self,
+        pack_data: Buffer,
+        pack_key: Option<String>,
+    ) -> Result<EncryptedPackResult> {
+        use sha2::{Digest, Sha256};
+
+        let key = match pack_key {
+            Some(ref k) => {
+                let bytes = hex::decode(k).map_err(|e| napi::Error::from_reason(format!("invalid pack key hex: {e}")))?;
+                if bytes.len() < KEY_SIZE {
+                    return Err(napi::Error::from_reason(format!("pack key must be at least {KEY_SIZE} bytes")));
+                }
+                SymmetricCryptoKey::from_bytes(&bytes[..KEY_SIZE])?
+            }
+            None => SymmetricCryptoKey::generate_random(),
+        };
+
+        let encrypted = key.encrypt_raw(pack_data.as_ref())?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&encrypted);
+        let digest = hasher.finalize();
+        let pack_id = hex_lower(&digest);
+
+        let key_hex = hex_lower(key.as_bytes());
+
+        Ok(EncryptedPackResult {
+            pack_id,
+            hash_type: "SHA256".to_string(),
+            pack_key: key_hex,
+            encrypted_bytes: Buffer::from(encrypted),
+        })
+    }
+
+    /// Decrypt an encrypted packfile buffer using its pack key and verify its digest.
+    #[napi]
+    pub fn decrypt_pack(
+        &self,
+        encrypted_pack_data: Buffer,
+        hash_type: String,
+        expected_pack_id: String,
+        pack_key: String,
+    ) -> Result<Buffer> {
+        use sha2::{Digest, Sha256};
+
+        if hash_type != "SHA256" && hash_type != "sha256" {
+            return Err(napi::Error::from_reason(format!("unsupported hash type: {hash_type}")));
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(encrypted_pack_data.as_ref());
+        let digest = hasher.finalize();
+        let calculated_id = hex_lower(&digest);
+
+        if !calculated_id.eq_ignore_ascii_case(&expected_pack_id) {
+            return Err(CryptoError::Crypto(format!(
+                "packfile digest mismatch: expected {expected_pack_id}, got {calculated_id}"
+            )).into());
+        }
+
+        let key_bytes = hex::decode(&pack_key)
+            .map_err(|e| napi::Error::from_reason(format!("invalid pack key hex: {e}")))?;
+        if key_bytes.len() < KEY_SIZE {
+            return Err(napi::Error::from_reason(format!("pack key must be at least {KEY_SIZE} bytes")));
+        }
+
+        let key = SymmetricCryptoKey::from_bytes(&key_bytes[..KEY_SIZE])?;
+        let decrypted = key.decrypt_raw(encrypted_pack_data.as_ref())?;
+
+        Ok(Buffer::from(decrypted))
     }
 }
 
@@ -1252,11 +1598,11 @@ impl Crypto {
 pub fn clean_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if SymmetricCryptoKey::is_encrypted(&input) {
+    if SymmetricCryptoKey::is_encrypted_raw(&input) {
         io::stdout().write_all(&input)?;
         return Ok(());
     }
-    let encrypted = key.encrypt(&input)?;
+    let encrypted = key.encrypt_raw(&input)?;
     io::stdout().write_all(&encrypted)?;
     Ok(())
 }
@@ -1266,11 +1612,11 @@ pub fn clean_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
 pub fn smudge_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if !SymmetricCryptoKey::is_encrypted(&input) {
+    if !SymmetricCryptoKey::is_encrypted_raw(&input) {
         io::stdout().write_all(&input)?;
         return Ok(());
     }
-    let decrypted = key.decrypt(&input)?;
+    let decrypted = key.decrypt_raw(&input)?;
     io::stdout().write_all(&decrypted)?;
     Ok(())
 }
@@ -1280,7 +1626,7 @@ pub fn smudge_filter(key: &SymmetricCryptoKey) -> CryptoResult<()> {
 pub fn diff_filter() -> CryptoResult<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    if SymmetricCryptoKey::is_encrypted(&input) {
+    if SymmetricCryptoKey::is_encrypted_raw(&input) {
         writeln!(io::stdout(), "*** This file is encrypted with crypt ***")?;
     } else {
         io::stdout().write_all(&input)?;
@@ -4875,7 +5221,7 @@ pub fn check_if_blob_is_encrypted(object_id: &str) -> CryptoResult<bool> {
     if !output.status.success() {
         return Err(CryptoError::Git("'git cat-file' failed".to_string()));
     }
-    Ok(SymmetricCryptoKey::is_encrypted(&output.stdout))
+    Ok(SymmetricCryptoKey::is_encrypted_raw(&output.stdout))
 }
 
 pub fn check_if_file_is_encrypted(filename: &str) -> CryptoResult<bool> {
