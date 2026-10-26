@@ -567,4 +567,39 @@ describe("Gcrypt whole-repository encryption", () => {
     expect(k2.length).toBe(63);
     expect(k1.equals(k2)).toBe(false);
   });
+
+  test("stacking partial mode (git-crypt) on top of full repo encryption (git-remote-gcrypt)", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-stacked-crypto-test-"));
+    try {
+      const repo = Repository.init(tmpDir, false);
+      const crypt = repo.crypt();
+
+      // 1. Partial file encryption (git-crypt layer)
+      crypt.init();
+      expect(crypt.isInitialized()).toBe(true);
+
+      const secretFileContent = Buffer.from("confidential file data");
+      const partiallyEncrypted = crypt.encrypt(secretFileContent);
+      expect(crypt.isEncrypted(partiallyEncrypted)).toBe(true);
+      expect(crypt.decrypt(partiallyEncrypted)).toEqual(secretFileContent);
+
+      // 2. Full repository encryption (git-remote-gcrypt layer)
+      const repoId = ":id:stacked-repo-123";
+      const packKey = Gcrypt.generatePackKey();
+      const refEntry = "0000000000000000000000000000000000000000 refs/heads/master";
+      const packKeyEntry = `:SHA256:pack-hash ${packKey.toString("hex")}`;
+
+      const manifestContent = Gcrypt.formatManifest(repoId, [refEntry], [packKeyEntry]);
+      const manifest = Gcrypt.parseManifest(manifestContent);
+
+      expect(manifest.repoId).toBe(repoId);
+      expect(manifest.refs).toContain(refEntry);
+      expect(manifest.packKeys).toContain(packKeyEntry);
+
+      // 3. Verify partial decryption still works cleanly underneath the gcrypt manifest layer
+      expect(crypt.decrypt(partiallyEncrypted)).toEqual(secretFileContent);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

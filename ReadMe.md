@@ -38,4 +38,4 @@ npm run test
 `Repository` provides cryptographic primitives and GPG integration backed by `rPGP` (`pgp` crate) and native Rust crypto:
 
 - **GPG Subsystem (`src/gpg.rs`)**: Perform OpenPGP encryption, decryption, signing, and signature verification with `Context`, `Key`, `Data`, `VerificationResult`, and `Protocol`. Includes CLI utility functions for key lookup, listing secret keys, and file encryption/decryption.
-- **Crypto Subsystem (`src/crypto.rs`)**: Symmetric encryption (ChaCha20-Poly1305), SSH identity management, XMSS^MT stateful signatures, git-crypt filter configuration, and whole-repository `Gcrypt` encryption mode (`git-remote-gcrypt` spec).
+- **Crypto Subsystem (`src/crypto.rs`)**: Symmetric encryption (ChaCha20-Poly1305), SSH identity management, XMSS^MT stateful signatures, git-crypt filter configuration, and whole-repository `Gcrypt` encryption mode (`git-remote-gcrypt` spec) supporting stacked partial file encryption.
