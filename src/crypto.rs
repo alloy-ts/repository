@@ -4993,3 +4993,54 @@ pub fn encrypt_repo_key(
 }
 
 pub const GIT_CHECKOUT_BATCH_SIZE: usize = 500;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_git_crypt_partial_mode_layered_under_full_repo_encryption() {
+        // 1. Partial Mode (git-crypt): Encrypt specific file payload using a file-level symmetric key.
+        let file_key = SymmetricCryptoKey::generate_random();
+        let file_plaintext = b"sensitiv_file_content_for_git_crypt";
+
+        let git_crypt_encrypted = file_key.encrypt(file_plaintext).unwrap();
+        assert!(SymmetricCryptoKey::is_encrypted(&git_crypt_encrypted));
+
+        // 2. Full Repository Mode (git-remote-gcrypt): Encrypt entire packfile/repository state
+        // containing git-crypt encrypted files using transport repo key.
+        let repo_transport_key = SymmetricCryptoKey::generate_random();
+
+        // Simulate packing repository objects (including git-crypt blobs) into a remote pack/payload.
+        let full_repo_encrypted = repo_transport_key.encrypt(&git_crypt_encrypted).unwrap();
+        assert!(SymmetricCryptoKey::is_encrypted(&full_repo_encrypted));
+
+        // 3. Transport Decryption (git-remote-gcrypt fetch):
+        let decrypted_repo_pack = repo_transport_key.decrypt(&full_repo_encrypted).unwrap();
+        assert_eq!(decrypted_repo_pack, git_crypt_encrypted);
+        assert!(SymmetricCryptoKey::is_encrypted(&decrypted_repo_pack));
+
+        // 4. Filter Decryption (git-crypt smudge checkout):
+        let final_plaintext = file_key.decrypt(&decrypted_repo_pack).unwrap();
+        assert_eq!(final_plaintext, file_plaintext);
+    }
+
+    #[test]
+    fn test_validate_key_name() {
+        assert!(validate_key_name(None).is_ok());
+        assert!(validate_key_name(Some("valid_key-1.0")).is_ok());
+        assert!(validate_key_name(Some("invalid key!")).is_err());
+        assert!(validate_key_name(Some("")).is_err());
+    }
+
+    #[test]
+    fn test_attribute_name() {
+        assert_eq!(attribute_name(None), "git-crypt");
+        assert_eq!(attribute_name(Some("mykey")), "git-crypt-mykey");
+    }
+
+    #[test]
+    fn test_checkout_batch() {
+        assert!(git_checkout_batch(&[]));
+    }
+}

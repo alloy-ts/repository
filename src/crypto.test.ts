@@ -47,6 +47,30 @@ describe("SymmetricCryptoKey", () => {
 });
 
 describe("Crypto (repository-bound crypt handle)", () => {
+  test("git-crypt partial file mode layered under full repo transport encryption", () => {
+    // 1. Partial file encryption (git-crypt layer)
+    const fileKey = SymmetricCryptoKey.generateRandom();
+    const plaintext = Buffer.from("confidential document payload");
+    const partialEncryptedBlob = fileKey.encrypt(plaintext);
+
+    expect(SymmetricCryptoKey.isEncrypted(partialEncryptedBlob)).toBe(true);
+
+    // 2. Full repo transport encryption (git-remote-gcrypt layer)
+    const transportKey = SymmetricCryptoKey.generateRandom();
+    const fullRepoEncryptedPack = transportKey.encrypt(partialEncryptedBlob);
+
+    expect(SymmetricCryptoKey.isEncrypted(fullRepoEncryptedPack)).toBe(true);
+
+    // 3. Transport decryption on fetch (git-remote-gcrypt)
+    const decryptedPack = transportKey.decrypt(fullRepoEncryptedPack);
+    expect(decryptedPack).toEqual(partialEncryptedBlob);
+    expect(SymmetricCryptoKey.isEncrypted(decryptedPack)).toBe(true);
+
+    // 4. Filter decryption on checkout (git-crypt smudge filter)
+    const finalPlaintext = fileKey.decrypt(decryptedPack);
+    expect(finalPlaintext).toEqual(plaintext);
+  });
+
   test("repository.crypt() exposes crypt handle and manages state", () => {
     const base = mkdtempSync(join(tmpdir(), "crypt-repo-"));
     try {
