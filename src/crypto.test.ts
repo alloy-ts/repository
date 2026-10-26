@@ -518,6 +518,7 @@ describe("SymmetricCryptoKey & Crypto NAPI bindings", () => {
       crypt.init();
       expect(crypt.isInitialized()).toBe(true);
       expect(typeof crypt.keyDir()).toBe("string");
+      expect(fs.existsSync(path.join(tmpDir, ".git-crypt", "keys"))).toBe(true);
 
       const data = Buffer.from("secret file content");
       const enc = crypt.encrypt(data);

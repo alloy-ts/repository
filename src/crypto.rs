@@ -804,9 +804,10 @@ impl Crypto {
         Ok(km.generate_key()?)
     }
 
-    /// Initialize crypt: create the key directory, generate a key, and configure filters.
+    /// Initialize crypt: create the key directory, generate a key, configure filters,
+    /// and initialize the whole-repository gcrypt state directory by default.
     /// Idempotent — a no-op if already initialized. `opts` overrides the filter name/commands
-    /// (defaults to the built-in `crypto` filter).
+    /// (defaults to the built-in `crypto` filter + `gcrypt` stacked mode).
     #[napi]
     pub fn init(&self, opts: Option<CryptFilterOptions>) -> Result<()> {
         let km = self.key_manager();
@@ -816,6 +817,12 @@ impl Crypto {
         km.init_dirs()?;
         let _key = km.generate_key()?;
         self.configure_filters(&opts.unwrap_or_default().resolve())?;
+
+        // Initialize whole-repository gcrypt state directory by default (.git-crypt)
+        if let Ok(repo_state) = get_repo_state_path_from_repo(&self.gix()) {
+            let _ = std::fs::create_dir_all(repo_state.join("keys"));
+        }
+
         Ok(())
     }
 

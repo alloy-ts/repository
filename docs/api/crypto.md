@@ -38,7 +38,7 @@ Backed by `rPGP` (`pgp` crate), the GPG subsystem exposes standard OpenPGP struc
 
 Full-repository encryption mode compatible with `git-remote-gcrypt`:
 
-- **Stacking Support**: Partial file-level encryption (`Crypto` / `git-crypt`) can be stacked underneath whole-repository remote encryption (`Gcrypt` / `git-remote-gcrypt`).
+- **Default Stacked Initialization**: `Crypto.init()` automatically configures partial file-level encryption filters (`git-crypt`) and sets up the whole-repository state directory (`.git-crypt` for `git-remote-gcrypt`), making stacked encryption active by default.
 - **`Gcrypt.formatManifest(repoId, refs, packKeys)`**: Formats a raw manifest text block containing encrypted ref mapping and packfile key entries.
 - **`Gcrypt.parseManifest(content)`**: Parses raw manifest text into a `GcryptManifest` object (`repoId`, `refs`, `packKeys`, `keepList`, `extensions`).
 - **`Gcrypt.generatePackKey()`**: Generates random 63-byte packfile key material.
