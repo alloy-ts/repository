@@ -2175,7 +2175,7 @@ impl KeyManager {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = std::fs::File::create(&key_path)?;
-        file.write_all(key.as_bytes())?;
+        file.write_all(key.as_bytes().as_ref())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2202,7 +2202,7 @@ impl KeyManager {
     pub fn export_key(&self, output_path: &Path) -> crate::crypto::CryptoResult<()> {
         let key = self.load_key()?;
         let mut file = std::fs::File::create(output_path)?;
-        file.write_all(key.as_bytes())?;
+        file.write_all(key.as_bytes().as_ref())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

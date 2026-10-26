@@ -36,8 +36,12 @@ try {
 
   assert.strictEqual(crypt.isInitialized(), false);
 
-  // Initialize crypt in repository
-  crypt.init();
+  // Initialize crypt in repository with git-remote-gcrypt submodule layering
+  crypt.init({
+    filterName: "git-crypt",
+    gcryptUrl: "gcrypt::https://git.example.com/vault.git",
+    submodulePath: "secure-submodule",
+  });
   assert.strictEqual(crypt.isInitialized(), true);
   console.log("Crypt initialized at key directory:", crypt.keyDir());
 
@@ -63,8 +67,8 @@ try {
 }
 
 // 3. OpenPGP / GPG Context & Data abstractions
-const gpgCtx = new GpgContext(Protocol.OpenPgp);
-assert.strictEqual(gpgCtx.protocol, Protocol.OpenPgp);
+const gpgCtx = new GpgContext(Protocol.OpenPgp ?? 0);
+assert.strictEqual(gpgCtx.protocol, Protocol.OpenPgp ?? 0);
 
 gpgCtx.setArmor(true);
 

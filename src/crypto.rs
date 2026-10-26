@@ -124,12 +124,14 @@ impl SymmetricCryptoKey {
     }
 
     /// Borrow the raw key bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.key
+    #[napi]
+    pub fn as_bytes(&self) -> Buffer {
+        Buffer::from(self.key.to_vec())
     }
 
     /// Encrypt `plaintext` into `MAGIC_HEADER || nonce || ciphertext+tag` (ChaCha20-Poly1305).
-    pub fn encrypt(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
+    #[napi]
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Buffer> {
         use rand::RngCore as _;
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -140,35 +142,38 @@ impl SymmetricCryptoKey {
                 Nonce::<ChaCha20Poly1305>::from_slice(&nonce_bytes),
                 plaintext,
             )
-            .map_err(|_| CryptoError::Crypto("encryption failed".into()))?;
+            .map_err(|_| napi::Error::from_reason("encryption failed".to_string()))?;
 
         let mut result = Vec::with_capacity(MAGIC_HEADER.len() + NONCE_SIZE + ciphertext.len());
         result.extend_from_slice(MAGIC_HEADER);
         result.extend_from_slice(&nonce_bytes);
         result.extend_from_slice(&ciphertext);
-        Ok(result)
+        Ok(Buffer::from(result))
     }
 
     /// Decrypt a payload produced by [`SymmetricCryptoKey::encrypt`].
-    pub fn decrypt(&self, ciphertext: &[u8]) -> CryptoResult<Vec<u8>> {
+    #[napi]
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Buffer> {
         let min_size = MAGIC_HEADER.len() + NONCE_SIZE;
         if ciphertext.len() < min_size {
-            return Err(CryptoError::Crypto("ciphertext too short".into()));
+            return Err(napi::Error::from_reason("ciphertext too short".to_string()));
         }
         if &ciphertext[..MAGIC_HEADER.len()] != MAGIC_HEADER {
-            return Err(CryptoError::Crypto("invalid encrypted data format".into()));
+            return Err(napi::Error::from_reason("invalid encrypted data format".to_string()));
         }
 
         let data = &ciphertext[MAGIC_HEADER.len()..];
         let (nonce_bytes, enc) = data.split_at(NONCE_SIZE);
 
         let cipher = ChaCha20Poly1305::new(Key::<ChaCha20Poly1305>::from_slice(&self.key));
-        cipher
+        let plain = cipher
             .decrypt(Nonce::<ChaCha20Poly1305>::from_slice(nonce_bytes), enc)
-            .map_err(|_| CryptoError::Crypto("decryption failed (wrong key or tampered)".into()))
+            .map_err(|_| napi::Error::from_reason("decryption failed (wrong key or tampered)".to_string()))?;
+        Ok(Buffer::from(plain))
     }
 
     /// Whether `data` carries the crypt magic header.
+    #[napi]
     pub fn is_encrypted(data: &[u8]) -> bool {
         data.len() >= MAGIC_HEADER.len() && &data[..MAGIC_HEADER.len()] == MAGIC_HEADER
     }
@@ -5059,12 +5064,12 @@ mod tests {
 
         // 3. Transport Decryption (git-remote-gcrypt fetch):
         let decrypted_repo_pack = repo_transport_key.decrypt(&full_repo_encrypted).unwrap();
-        assert_eq!(decrypted_repo_pack, git_crypt_encrypted);
+        assert_eq!(decrypted_repo_pack.as_ref(), git_crypt_encrypted.as_ref());
         assert!(SymmetricCryptoKey::is_encrypted(&decrypted_repo_pack));
 
         // 4. Filter Decryption (git-crypt smudge checkout):
         let final_plaintext = file_key.decrypt(&decrypted_repo_pack).unwrap();
-        assert_eq!(final_plaintext, file_plaintext);
+        assert_eq!(final_plaintext.as_ref(), file_plaintext);
     }
 
     #[test]
