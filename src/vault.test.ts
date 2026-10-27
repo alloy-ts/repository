@@ -1,18 +1,11 @@
-import { describe, expect, test, afterAll } from "vite-plus/test";
-import {
-  Vault,
-  type VaultAccessProfile,
-  type VaultStructureBinding,
-} from "./main.ts";
+import { afterAll, describe, expect, test } from "vite-plus/test";
+import { Vault, type VaultAccessProfile, type VaultStructureBinding } from "./main.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 function tmpVaultPath(): string {
-  return path.join(
-    os.tmpdir(),
-    `vault-test-${Math.random().toString(36).slice(2)}.vault`,
-  );
+  return path.join(os.tmpdir(), `vault-test-${Math.random().toString(36).slice(2)}.vault`);
 }
 
 function pw(): Buffer {

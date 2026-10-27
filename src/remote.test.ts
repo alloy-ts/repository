@@ -14,7 +14,7 @@ beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-remote-"));
   cloneDir = join(base, "clone");
   try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
+    repo = await Repository.clone(realRoot, cloneDir);
   } catch {
     rmSync(cloneDir, { recursive: true, force: true });
     execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
@@ -149,9 +149,18 @@ describe("Remote.fetch", () => {
     const remote = repo.findRemote("origin");
     const outcome = await remote.fetch();
     // Against an up-to-date local clone no pack is received, but the call must
-    // complete and return the documented boolean flags.
+    // complete and return the documented flags.
+    expect(typeof outcome.status).toBe("string");
     expect(typeof outcome.packReceived).toBe("boolean");
+    expect(typeof outcome.dryRun).toBe("boolean");
     expect(typeof outcome.negotiated).toBe("boolean");
+    expect(Array.isArray(outcome.updatedRefs)).toBe(true);
+  });
+
+  test("fetch() defaultBranch() discovers the advertised HEAD target", async () => {
+    const remote = repo.findRemote("origin");
+    const branch = await remote.defaultBranch();
+    expect(typeof branch === "string" || branch === null).toBe(true);
   });
 });
 

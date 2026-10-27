@@ -1,118 +1,104 @@
-import { execSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Repository } from "../src/main.ts";
 
-// Revision APIs: resolving revision specifications (git rev-parse syntax),
-// walking commit history, and describing commits like `git describe`.
-// We build a small scratch repository so the describe output is deterministic.
+const repoPath = process.argv[2] ?? process.cwd();
 
-// ---------------------------------------------------------------------------
-// 0. Scratch repository: three commits, an annotated tag on the first one
-// ---------------------------------------------------------------------------
-const base = mkdtempSync(join(tmpdir(), "revision-demo-"));
-const repoPath = join(base, "scratch");
-execSync(`git init --quiet --initial-branch=main ${JSON.stringify(repoPath)}`, {
-  stdio: "ignore",
-});
-const git = (args: string) => execSync(`git ${args}`, { cwd: repoPath, stdio: "ignore" });
-git("config user.email revision@example.com");
-git("config user.name Revision Example");
+const short = (id: string) => id.slice(0, 8);
 
-const commit = (file: string, message: string) => {
-  writeFileSync(join(repoPath, file), `${file}\n`);
-  git(`add ${file}`);
-  git(`commit --quiet -m ${JSON.stringify(message)}`);
-};
+function main() {
+  console.log(`Opening repository at: ${repoPath}`);
+  const repo = Repository.open(repoPath);
+  const head = repo.headId();
 
-commit("seed.txt", "seed");
-git("tag -a v1.0.0 -m v1.0.0");
-commit("second.txt", "second");
-commit("third.txt", "third");
+  // ---------------------------------------------------------------------------
+  // Resolving specs: everything git's rev-parse accepts — object ids, HEAD,
+  // branch/tag names, and `~`/`^`/`^{}` navigation.
+  // ---------------------------------------------------------------------------
+  console.log("\n=== Rev-parse ===");
+  console.log(`revParseSingle("HEAD")      -> ${short(repo.revParseSingle("HEAD"))}`);
+  console.log(
+    `revParseSingle("HEAD~1")    -> ${
+      repo.headCommit().parentIds[0]
+        ? short(repo.revParseSingle("HEAD~1"))
+        : "(root commit, no parent)"
+    }`,
+  );
+  console.log(`revParseHex("HEAD^{tree}")  -> ${short(repo.revParseHex("HEAD^{tree}"))}`);
 
-const repo = Repository.open(repoPath);
-const head = repo.headId();
+  // revParse reports the spec's structure, not just its result.
+  console.log(`revParse("HEAD")            -> ${JSON.stringify(repo.revParse("HEAD"))}`);
+  const parent = repo.headCommit().parentIds[0];
+  if (parent) {
+    console.log(`revParse("HEAD~1..HEAD")    -> ${JSON.stringify(repo.revParse("HEAD~1..HEAD"))}`);
+  }
+  console.log(`revParse("^HEAD")           -> kind=${repo.revParse("^HEAD").kind}`);
 
-// ---------------------------------------------------------------------------
-// 1. Resolving specs to ids
-// ---------------------------------------------------------------------------
-console.log("=== revParseSingle / revParseHex ===");
-console.log(`HEAD        -> ${repo.revParseSingle("HEAD")}`);
-console.log(`HEAD~2      -> ${repo.revParseSingle("HEAD~2")}`);
-console.log(`v1.0.0      -> ${repo.revParseSingle("v1.0.0").slice(0, 8)}…`);
-console.log(`v1.0.0^{commit} (peeled) -> ${repo.revParseHex("v1.0.0^{commit}").slice(0, 8)}…`);
-console.log(`hash == HEAD: ${repo.revParseHex("HEAD") === head}`);
+  // revParseExt also tells you which reference provided the resolution.
+  const ext = repo.revParseExt("HEAD");
+  console.log(`revParseExt("HEAD")         -> id=${short(ext.id)} ref=${ext.referenceName}`);
+  const byOid = repo.revParseExt(head);
+  console.log(`revParseExt(<head id>)      -> ref=${byOid.referenceName ?? "null"}`);
 
-// ---------------------------------------------------------------------------
-// 2. Spec structure: kinds, ranges, merges, exclusions
-// ---------------------------------------------------------------------------
-console.log("\n=== revParse ===");
-const single = repo.revParse("HEAD");
-console.log(
-  `HEAD: kind=${single.kind} id=${single.id?.slice(0, 8)}… from=${single.from} to=${single.to}`,
-);
+  // ---------------------------------------------------------------------------
+  // Rev-walk: one-shot traversal of the commit graph. Tips may be any spec;
+  // options add sorting, reversal, first-parent simplification, exclusions,
+  // reference globs, and ranges.
+  // ---------------------------------------------------------------------------
+  console.log("\n=== Rev-walk ===");
+  const all = repo.revWalk(["HEAD"]);
+  console.log(`revWalk(["HEAD"])           -> ${all.length} commit(s), tip ${short(all[0])}`);
 
-const range = repo.revParse("HEAD~1..HEAD");
-console.log(
-  `HEAD~1..HEAD: kind=${range.kind} from=${range.from?.slice(0, 8)}… to=${range.to?.slice(0, 8)}…`,
-);
+  if (parent) {
+    const viaExclude = repo.revWalk(["HEAD"], { exclude: [parent] });
+    const viaRange = repo.revWalk([], { range: `${parent}..HEAD` });
+    console.log(`exclude ["${short(parent)}"]  -> ${viaExclude.length} commit(s) after the parent`);
+    console.log(
+      `range "${short(parent)}..HEAD" -> same list: ${
+        JSON.stringify(viaRange) === JSON.stringify(viaExclude)
+      }`,
+    );
+    const symmetric = repo.revWalk([], { range: `${parent}...HEAD` });
+    console.log(
+      `symmetric "...":            -> ${symmetric.length} commit(s) reachable from either side, not both`,
+    );
+  }
 
-const merge = repo.revParse("main...HEAD~1");
-console.log(
-  `main...HEAD~1: kind=${merge.kind} from=${merge.from?.slice(0, 8)}… to=${merge.to?.slice(0, 8)}…`,
-);
+  // A glob pushes every matching reference as a tip; "refs/" and "/*" are implied.
+  const tagTips = repo.revWalk([], { glob: "refs/tags/*" });
+  console.log(`glob "tags/*"               -> ${tagTips.length} tag tip(s)`);
 
-const exclude = repo.revParse("^HEAD~1");
-console.log(`^HEAD~1: kind=${exclude.kind} id=${exclude.id?.slice(0, 8)}…`);
+  console.log(
+    `sort + reverse              -> newest-first: ${
+      repo.revWalk(["HEAD"], { sort: "time-newest", reverse: true })[0] === all[all.length - 1]
+    }`,
+  );
+  const firstParent = repo.revWalk(["HEAD"], { firstParent: true });
+  console.log(`firstParent: true           -> ${firstParent.length} of ${all.length} commit(s)`);
 
-const parents = repo.revParse("HEAD^@");
-console.log(`HEAD^@: kind=${parents.kind} id=${parents.id?.slice(0, 8)}…`);
+  try {
+    repo.revWalk(["HEAD"], { sort: "topo" });
+  } catch (e) {
+    console.log(`invalid sort rejected:      -> ${(e as Error).message.split("\n")[0]}`);
+  }
 
-// ---------------------------------------------------------------------------
-// 3. Walking history
-// ---------------------------------------------------------------------------
-console.log("\n=== revWalk ===");
-const seedCommit = repo.revParseHex("v1.0.0^{commit}"); // peel the tag to its commit
-const defaultWalk = repo.revWalk([head]);
-console.log(
-  `breadth-first: ${defaultWalk.length} commit(s), tip first: ${defaultWalk[0] === head}`,
-);
+  // ---------------------------------------------------------------------------
+  // Describe: `git describe` — the closest tag or branch containing a commit.
+  // ---------------------------------------------------------------------------
+  console.log("\n=== Describe ===");
+  const describeTarget = parent ?? head;
+  const described = repo.describe(describeTarget, {
+    names: "allTags",
+    idAsFallback: true,
+  });
+  if (described) {
+    console.log(`describe(${short(describeTarget)}) ->`);
+    console.log(`  name: ${described.name ?? "(none)"} depth: ${described.depth}`);
+    console.log(`  format: ${described.format} (exact: ${described.exactMatch})`);
+    console.log(`  commitsSeen: ${described.commitsSeen}`);
+  }
+  // Without idAsFallback a commit with no candidate name yields null.
+  console.log(
+    `describe(maxCandidates: 0)  -> ${repo.describe(describeTarget, { maxCandidates: 0 })}`,
+  );
+}
 
-const chronological = repo.revWalk([head], { sort: "time-oldest" });
-console.log(
-  `time-oldest: oldest is the seed commit: ${
-    chronological[chronological.length - 1] === seedCommit
-  }`,
-);
-
-const byTime = repo.revWalk([head], { sort: "time-newest" });
-console.log(`time-newest: newest first: ${byTime[0] === head}`);
-
-console.log(`firstParent: ${repo.revWalk([head], { firstParent: true }).length} commit(s)`);
-console.log(`reverse: ${repo.revWalk([head], { reverse: true })[0] === seedCommit}`);
-
-// ---------------------------------------------------------------------------
-// 4. Describing commits
-// ---------------------------------------------------------------------------
-console.log("\n=== describe ===");
-const tagged = seedCommit;
-const exact = repo.describe(tagged, { names: "allTags" });
-console.log(
-  `describe(tag): name=${exact?.name} depth=${exact?.depth} format=${exact?.format} exactMatch=${exact?.exactMatch}`,
-);
-
-const ahead = repo.describe(head, { names: "allTags" });
-console.log(`describe(HEAD): name=${ahead?.name} depth=${ahead?.depth} format=${ahead?.format}`);
-
-// Candidate selection: branches count too when allRefs is used.
-const viaBranch = repo.describe(head, { names: "allRefs" });
-console.log(`describe(HEAD, allRefs): name=${viaBranch?.name} exactMatch=${viaBranch?.exactMatch}`);
-
-// Deterministic fallback paths: with maxCandidates 0 nothing can be named.
-const fallback = repo.describe(head, { maxCandidates: 0, idAsFallback: true });
-console.log(`fallback: name=${fallback?.name} format=${fallback?.format} depth=${fallback?.depth}`);
-console.log(`no fallback (null): ${repo.describe(head, { maxCandidates: 0 }) === null}`);
-
-rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-console.log("\nrevision example complete.");
+main();
