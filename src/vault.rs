@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::error::RepositoryResult;
 use chrono::{DateTime, Utc};
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
@@ -79,11 +80,11 @@ impl RbacProfile {
 
 mod crypto {
     use super::{SafeError, SafeResult};
-    use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use chacha20poly1305::XChaCha20Poly1305;
     use chacha20poly1305::aead;
     use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-    use chacha20poly1305::XChaCha20Poly1305;
     use hkdf::Hkdf;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -140,8 +141,8 @@ mod crypto {
     }
 
     fn aead_encrypt(key: &[u8; 32], pt: &[u8], aad: &[u8]) -> SafeResult<(Vec<u8>, Vec<u8>)> {
-        let cipher = XChaCha20Poly1305::new_from_slice(key)
-            .map_err(|_| SafeError::DecryptionFailed)?;
+        let cipher =
+            XChaCha20Poly1305::new_from_slice(key).map_err(|_| SafeError::DecryptionFailed)?;
         let nonce: [u8; 24] = rand::random();
         let nonce_ga = chacha20poly1305::XNonce::from_slice(&nonce);
         let mut buf = pt.to_vec();
@@ -152,8 +153,8 @@ mod crypto {
     }
 
     fn aead_decrypt(key: &[u8; 32], nonce: &[u8], ct: &[u8], aad: &[u8]) -> SafeResult<Vec<u8>> {
-        let cipher = XChaCha20Poly1305::new_from_slice(key)
-            .map_err(|_| SafeError::DecryptionFailed)?;
+        let cipher =
+            XChaCha20Poly1305::new_from_slice(key).map_err(|_| SafeError::DecryptionFailed)?;
         let nonce_ga = chacha20poly1305::XNonce::from_slice(nonce);
         let mut buf = ct.to_vec();
         cipher
@@ -180,11 +181,13 @@ mod crypto {
         t_cost: u32,
         p_cost: u32,
     ) -> SafeResult<VaultKey> {
-        let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(32))
-            .map_err(|e| SafeError::InvalidVault {
+        let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(32)).map_err(|e| {
+            SafeError::InvalidVault {
                 reason: format!("argon2 params: {e}"),
-            })?;
-        let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+            }
+        })?;
+        let argon2 =
+            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let mut out = [0u8; 32];
         argon2
             .hash_password_into(password, salt, &mut out)
@@ -209,8 +212,7 @@ mod crypto {
     }
 
     pub fn mac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
         mac.update(data);
         let result = mac.finalize().into_bytes();
         let mut out = [0u8; 32];
@@ -733,10 +735,11 @@ fn acquire_lock(path: &Path) -> SafeResult<LockGuard> {
         std::fs::create_dir_all(parent)?;
     }
     for _ in 0..2 {
-        let contents = serde_json::to_string(&LockFileContents::new())
-            .map_err(|e| SafeError::InvalidVault {
+        let contents = serde_json::to_string(&LockFileContents::new()).map_err(|e| {
+            SafeError::InvalidVault {
                 reason: format!("lock serialize: {e}"),
-            })?;
+            }
+        })?;
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1243,8 +1246,8 @@ impl Vault {
         self.file.integrity = Some(crypto::encode_b64(&Self::integrity_tag(
             &self.file, &self.key,
         )?));
-        let json = serde_json::to_string_pretty(&self.file)
-            .map_err(|e| SafeError::InvalidVault {
+        let json =
+            serde_json::to_string_pretty(&self.file).map_err(|e| SafeError::InvalidVault {
                 reason: format!("serialize vault: {e}"),
             })?;
         let tmp = self.path.with_extension("vault.tmp");
@@ -1497,12 +1500,7 @@ impl Vault {
 
     /// Insert or update a secret.
     #[instrument(skip(self, value, tags, key))]
-    pub fn set(
-        &mut self,
-        key: &str,
-        value: &str,
-        tags: HashMap<String, String>,
-    ) -> SafeResult<()> {
+    pub fn set(&mut self, key: &str, value: &str, tags: HashMap<String, String>) -> SafeResult<()> {
         self.ensure_write_allowed()?;
         validate_secret_key(key)?;
         if self.binding == StructureBinding::Legacy {
@@ -2292,7 +2290,10 @@ mod ssh_keys {
         }
     }
 
-    pub fn ssh_ed25519_seed(identity_content: &str, passphrase: Option<&str>) -> CryptoResult<[u8; 32]> {
+    pub fn ssh_ed25519_seed(
+        identity_content: &str,
+        passphrase: Option<&str>,
+    ) -> CryptoResult<[u8; 32]> {
         let privkey = if let Some(pw) = passphrase {
             PrivateKey::from_openssh(identity_content.trim())
                 .and_then(|k| k.decrypt(pw))
@@ -2411,7 +2412,10 @@ impl IdentityManager {
         key: &crate::crypto::SymmetricCryptoKey,
         recipient: &str,
     ) -> crate::crypto::CryptoResult<Vec<u8>> {
-        use ssh_keys::{aead_seal, derive_aead_key, ed25519_to_x25519_public, ssh_ed25519_public_bytes, MAGIC, NONCE_SIZE};
+        use ssh_keys::{
+            MAGIC, NONCE_SIZE, aead_seal, derive_aead_key, ed25519_to_x25519_public,
+            ssh_ed25519_public_bytes,
+        };
         let recipient_pk = ssh_ed25519_public_bytes(recipient)?;
         let x25519_pk = ed25519_to_x25519_public(&recipient_pk)?;
 
@@ -2446,12 +2450,17 @@ impl IdentityManager {
         identity_content: &str,
         passphrase: Option<&str>,
     ) -> crate::crypto::CryptoResult<crate::crypto::SymmetricCryptoKey> {
-        use ssh_keys::{aead_open, derive_aead_key, ed25519_seed_to_x25519_scalar, ssh_ed25519_seed, MAGIC, NONCE_SIZE};
+        use ssh_keys::{
+            MAGIC, NONCE_SIZE, aead_open, derive_aead_key, ed25519_seed_to_x25519_scalar,
+            ssh_ed25519_seed,
+        };
         if encrypted.len() < 8 + 32 + NONCE_SIZE {
             return Err(crate::crypto::CryptoError::Ssh("envelope too short".into()));
         }
         if &encrypted[..8] != MAGIC {
-            return Err(crate::crypto::CryptoError::Ssh("invalid envelope magic".into()));
+            return Err(crate::crypto::CryptoError::Ssh(
+                "invalid envelope magic".into(),
+            ));
         }
         let (_, rest) = encrypted.split_at(8);
         let (epk_bytes, rest) = rest.split_at(32);
@@ -2755,11 +2764,12 @@ impl KeyManagerHandle {
     /// Import a key file as the default key.
     #[napi]
     pub fn import_key(&self, input_path: String) -> napi::Result<()> {
-        self.inner.save_key(&crate::crypto::SymmetricCryptoKey::from_bytes(
-            std::fs::read(&input_path)
-                .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?
-                .as_slice(),
-        )?)?;
+        self.inner
+            .save_key(&crate::crypto::SymmetricCryptoKey::from_bytes(
+                std::fs::read(&input_path)
+                    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?
+                    .as_slice(),
+            )?)?;
         Ok(())
     }
 
@@ -2914,9 +2924,9 @@ impl KvVault {
 /// Tests for the self-contained `Vault` implementation.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::crypto;
     use super::snapshot;
+    use super::*;
     use tempfile::tempdir;
 
     fn pw() -> &'static [u8] {
@@ -3436,8 +3446,7 @@ mod tests {
             let mut v = Vault::create(&path, pw()).unwrap();
             v.set("TOKEN", "old-compromised-token", HashMap::new())
                 .unwrap();
-            v.set("TOKEN", "new-rotated-token", HashMap::new())
-                .unwrap();
+            v.set("TOKEN", "new-rotated-token", HashMap::new()).unwrap();
         }
 
         edit_vault_json(&path, |v| {

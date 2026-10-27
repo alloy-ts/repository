@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  SymmetricCryptoKey,
-  Repository,
-  Protocol,
-  GpgData,
   GpgContext,
+  GpgData,
   gpgGetExecutable,
   gpgNthColumn,
+  Protocol,
+  Repository,
+  SymmetricCryptoKey,
 } from "../src/main.ts";
 
 // 1. SymmetricCryptoKey: ChaCha20-Poly1305 symmetric encryption
@@ -67,8 +67,19 @@ try {
 
   // Manifest management in Entire Repo / Hybrid Mode
   const manifest = {
-    refs: [{ objectId: "1234567890123456789012345678901234567890", name: "refs/heads/main" }],
-    packs: [{ hashType: "SHA256", packId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }],
+    refs: [
+      {
+        objectId: "1234567890123456789012345678901234567890",
+        name: "refs/heads/main",
+      },
+    ],
+    packs: [
+      {
+        hashType: "SHA256",
+        packId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
+    ],
     keep: [],
     repoId: fullRepoId,
     extensions: ["extn comment"],
@@ -85,7 +96,12 @@ try {
   const encPack = crypt.encryptPack(packfileBytes);
   assert.strictEqual(encPack.hashType, "SHA256");
 
-  const decPack = crypt.decryptPack(encPack.encryptedBytes, encPack.hashType, encPack.packId, encPack.packKey);
+  const decPack = crypt.decryptPack(
+    encPack.encryptedBytes,
+    encPack.hashType,
+    encPack.packId,
+    encPack.packKey,
+  );
   assert.deepEqual(decPack, packfileBytes);
 
   console.log("Entire Repo / Hybrid Mode manifest & packfile encryption passed.");
@@ -103,14 +119,17 @@ const data = GpgData.fromBytes(Buffer.from("Payload for OpenPGP processing"));
 assert.strictEqual(data.isArmored, false);
 assert.deepEqual(data.bytes(), Buffer.from("Payload for OpenPGP processing"));
 
-const armoredData = GpgData.fromArmoredString("-----BEGIN PGP MESSAGE-----\n\nhello\n-----END PGP MESSAGE-----");
+const armoredData = GpgData.fromArmoredString(
+  "-----BEGIN PGP MESSAGE-----\n\nhello\n-----END PGP MESSAGE-----",
+);
 assert.strictEqual(armoredData.isArmored, true);
 
 // GPG CLI utilities
 const gpgExe = gpgGetExecutable();
 assert.ok(typeof gpgExe === "string");
 
-const sampleLine = "uid:u::::1395975462::AB97D6E3E5D8789988CA55E5F77D9E7397D05229::John Smith <jsmith@example.com>:";
+const sampleLine =
+  "uid:u::::1395975462::AB97D6E3E5D8789988CA55E5F77D9E7397D05229::John Smith <jsmith@example.com>:";
 const uidCol = gpgNthColumn(sampleLine, 9);
 assert.strictEqual(uidCol, "John Smith <jsmith@example.com>");
 

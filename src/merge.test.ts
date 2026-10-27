@@ -252,6 +252,27 @@ describe("Repository merge (src/merge.rs)", () => {
     expect(text).toContain("<<<<<<< our");
     expect(text).toContain("=======");
     expect(text).toContain(">>>>>>> their");
+
+    // (2) raw triple content for the unresolved conflict, and (3) per-hunk lines.
+    expect(c.baseContent).not.toBeNull();
+    expect(c.leftContent).not.toBeNull();
+    expect(c.rightContent).not.toBeNull();
+    expect(c.hunks.length).toBeGreaterThanOrEqual(1);
+    const hunk = c.hunks[0]!;
+    expect(Array.isArray(hunk.leftLines)).toBe(true);
+    expect(Array.isArray(hunk.rightLines)).toBe(true);
+    expect(Array.isArray(hunk.baseLines)).toBe(true);
+    expect(hunk.leftLines.join("\n")).toContain("MAIN");
+    expect(hunk.rightLines.join("\n")).toContain("FEATURE");
+
+    // (1) aggregate stats are present and numeric.
+    const s = outcome.stats;
+    expect(typeof s.added).toBe("number");
+    expect(typeof s.removed).toBe("number");
+    expect(typeof s.modified).toBe("number");
+    expect(typeof s.unchanged).toBe("number");
+    expect(typeof s.conflicted).toBe("number");
+    expect(s.conflicted).toBeGreaterThanOrEqual(1);
   });
 
   test("mergeTrees() honours custom labels", () => {
@@ -338,9 +359,9 @@ describe("Repository merge (src/merge.rs)", () => {
 
   test("mergeBlobs() merges non-conflicting changes", () => {
     const result = mergeBlobs(
-      Buffer.from("OURS\nline2\nline3\n"),
-      Buffer.from("line1\nline2\nline3\n"),
-      Buffer.from("line1\nline2\nTHEIRS\n"),
+      { content: Buffer.from("OURS\nline2\nline3\n") },
+      { content: Buffer.from("line1\nline2\nline3\n") },
+      { content: Buffer.from("line1\nline2\nTHEIRS\n") },
       { ancestorLabel: "base", ourLabel: "our", theirLabel: "their" },
     );
     expect(result.resolution).toBe("complete");
@@ -352,9 +373,9 @@ describe("Repository merge (src/merge.rs)", () => {
 
   test("mergeBlobs() keeps conflict markers for conflicting changes", () => {
     const result = mergeBlobs(
-      Buffer.from("MAIN\n"),
-      Buffer.from("BASE\n"),
-      Buffer.from("FEATURE\n"),
+      { content: Buffer.from("MAIN\n") },
+      { content: Buffer.from("BASE\n") },
+      { content: Buffer.from("FEATURE\n") },
       { ourLabel: "our", theirLabel: "their" },
     );
     expect(result.resolution).toBe("conflict");
@@ -366,9 +387,9 @@ describe("Repository merge (src/merge.rs)", () => {
 
   test("mergeBlobs() honours resolveWith ours", () => {
     const result = mergeBlobs(
-      Buffer.from("MAIN\n"),
-      Buffer.from("BASE\n"),
-      Buffer.from("FEATURE\n"),
+      { content: Buffer.from("MAIN\n") },
+      { content: Buffer.from("BASE\n") },
+      { content: Buffer.from("FEATURE\n") },
       {
         resolveWith: "ours",
       },
@@ -380,9 +401,9 @@ describe("Repository merge (src/merge.rs)", () => {
 
   test("mergeBlobs() honours diff3 style", () => {
     const result = mergeBlobs(
-      Buffer.from("MAIN\n"),
-      Buffer.from("BASE\n"),
-      Buffer.from("FEATURE\n"),
+      { content: Buffer.from("MAIN\n") },
+      { content: Buffer.from("BASE\n") },
+      { content: Buffer.from("FEATURE\n") },
       {
         style: "diff3",
       },
@@ -391,5 +412,25 @@ describe("Repository merge (src/merge.rs)", () => {
     const text = result.data.toString();
     expect(text).toContain("|||||||");
     expect(text).toContain("BASE");
+  });
+
+  test("mergeBlobs() reports path and mode from inputs", () => {
+    const result = mergeBlobs(
+      { content: Buffer.from("MAIN\n"), path: "src/a.txt", mode: "100755" },
+      { content: Buffer.from("BASE\n"), path: "src/a.txt" },
+      { content: Buffer.from("FEATURE\n"), path: "src/a.txt" },
+    );
+    expect(result.path).toBe("src/a.txt");
+    expect(result.mode).toBe("100755");
+  });
+
+  test("mergeBlobs() falls back to path as conflict label", () => {
+    const result = mergeBlobs(
+      { content: Buffer.from("MAIN\n"), path: "a.txt" },
+      { content: Buffer.from("BASE\n") },
+      { content: Buffer.from("FEATURE\n") },
+    );
+    const text = result.data.toString();
+    expect(text).toContain("<<<<<<< a.txt");
   });
 });

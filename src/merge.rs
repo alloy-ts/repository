@@ -1,6 +1,8 @@
-use napi::Result;
-use napi::bindgen_prelude::Buffer;
+use crate::error::RepositoryResult;
+use crate::error::RepositoryResult as Result;
+use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
+use std::collections::HashMap;
 
 use gix::bstr::BStr;
 use gix::diff::tree_with_rewrites::Change;
@@ -9,6 +11,7 @@ use gix::merge::tree::{Resolution, ResolutionFailure, TreatAsUnresolved, apply_i
 
 use gix_imara_diff as imara_diff;
 
+use crate::checkout::git_merge;
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::Repository;
 
@@ -66,6 +69,15 @@ pub struct MergeOptions {
     pub tree_favor: Option<String>,
     /// Enable rename/copy tracking (`gix_diff::Rewrites::default()`).
     pub rewrites: Option<bool>,
+    /// Similarity (0-100) needed to consider a file renamed; like `git diff -M`.
+    /// Only applied when `rewrites` is enabled.
+    pub rename_threshold: Option<f64>,
+    /// Maximum number of files considered for fuzzy rename/copy tracking
+    /// (like `git`'s `diff.renameLimit`); `0` means unlimited.
+    /// Only applied when `rewrites` is enabled.
+    pub rename_limit: Option<u32>,
+    /// Also detect copies, not just renames. Only applied when `rewrites` is enabled.
+    pub find_copies: Option<bool>,
     /// `"git"`, `"forcedResolution"` or `"undecidable"` — abort the merge at
     /// the first conflict considered unresolved under that criterion.
     pub fail_on_conflict: Option<String>,
@@ -107,6 +119,18 @@ pub struct MergeConflictEntry {
     pub id: String,
 }
 
+/// A contiguous conflicting region extracted from a merged blob's conflict
+/// markers, for building a custom conflict UI. `baseLines` is populated only
+/// when the conflict markers include a base section (the `diff3` / `zealousDiff3`
+/// styles); otherwise it is empty.
+#[derive(Clone)]
+#[napi(object)]
+pub struct ConflictHunk {
+    pub base_lines: Vec<String>,
+    pub left_lines: Vec<String>,
+    pub right_lines: Vec<String>,
+}
+
 /// A conflict encountered during a tree merge, including auto-resolved ones.
 #[derive(Clone)]
 #[napi(object)]
@@ -139,6 +163,16 @@ pub struct MergeConflict {
     pub our_entry: Option<MergeConflictEntry>,
     /// Stage 3 (theirs) index entry, if present.
     pub their_entry: Option<MergeConflictEntry>,
+    /// Raw blob content of the ancestor (stage 1) side, when this conflict is
+    /// unresolved and the ancestor entry is present. `null` otherwise.
+    pub base_content: Option<Buffer>,
+    /// Raw blob content of the "our" (stage 2) side, when unresolved and present.
+    pub left_content: Option<Buffer>,
+    /// Raw blob content of the "their" (stage 3) side, when unresolved and present.
+    pub right_content: Option<Buffer>,
+    /// Conflict regions parsed from the merged blob's markers, for building a
+    /// custom conflict UI. Empty when there is no content-merge marker output.
+    pub hunks: Vec<ConflictHunk>,
 }
 
 /// The result of a merge operation.
@@ -157,15 +191,34 @@ pub struct MergeOutcome {
     pub failed_on_first_unresolved_conflict: bool,
     /// Details for every conflict, in the order they were encountered.
     pub conflict_details: Vec<MergeConflict>,
+    /// Aggregate change + conflict counts for the merge, relative to the merge
+    /// base (added/removed/modified/unchanged) plus the unresolved-conflict count.
+    pub stats: MergeStats,
 }
 
-struct OwnedLabels {
+/// Aggregate counts summarizing a tree merge result, relative to the merge base.
+#[derive(Clone)]
+#[napi(object)]
+pub struct MergeStats {
+    /// Files present in the merged tree but not in the base tree.
+    pub added: f64,
+    /// Files present in the base tree but not in the merged tree.
+    pub removed: f64,
+    /// Files present in both trees with a different object id.
+    pub modified: f64,
+    /// Files present in both trees with the same object id.
+    pub unchanged: f64,
+    /// Conflicts that still need manual resolution (git criteria).
+    pub conflicted: f64,
+}
+
+pub(crate) struct OwnedLabels {
     ancestor: String,
     current: String,
     other: String,
 }
 
-fn owned_labels(options: Option<&MergeOptions>) -> OwnedLabels {
+pub(crate) fn owned_labels(options: Option<&MergeOptions>) -> OwnedLabels {
     let default = |o: Option<&MergeOptions>| match o {
         Some(o) => (
             o.ancestor_label
@@ -185,7 +238,7 @@ fn owned_labels(options: Option<&MergeOptions>) -> OwnedLabels {
 }
 
 impl OwnedLabels {
-    fn borrowed(&self) -> text::Labels<'_> {
+    pub(crate) fn borrowed(&self) -> text::Labels<'_> {
         text::Labels {
             ancestor: Some(self.ancestor.as_bytes().into()),
             current: Some(self.current.as_bytes().into()),
@@ -212,14 +265,24 @@ fn parse_treat_as_unresolved(what: &str, s: &str) -> napi::Result<TreatAsUnresol
 ///
 /// Uses the plumbing-level options for `marker_size_multiplier`, which the
 /// facade wrapper cannot express (its `inner` field is private).
-fn build_tree_options(
+pub(crate) fn build_tree_options(
     what: &str,
     options: Option<&MergeOptions>,
 ) -> napi::Result<gix::merge::tree::Options> {
     let mut facade = gix::merge::tree::Options::default();
     if let Some(o) = options {
         if let Some(rewrites) = o.rewrites {
-            facade = facade.with_rewrites(rewrites.then(gix::diff::Rewrites::default));
+            let mut rw = gix::diff::Rewrites::default();
+            if let Some(threshold) = o.rename_threshold {
+                rw.percentage = Some((threshold / 100.0).clamp(0.0, 1.0) as f32);
+            }
+            if let Some(limit) = o.rename_limit {
+                rw.limit = limit as usize;
+            }
+            if let Some(find_copies) = o.find_copies {
+                rw.copies = find_copies.then(gix::diff::rewrites::Copies::default);
+            }
+            facade = facade.with_rewrites(rewrites.then_some(rw));
         }
         if let Some(fail_on_conflict) = o.fail_on_conflict.as_deref() {
             let how = parse_treat_as_unresolved(what, fail_on_conflict)?;
@@ -346,7 +409,11 @@ fn failure_kind(failure: &ResolutionFailure) -> &'static str {
     }
 }
 
-fn conflict_to_dto(conflict: &gix::merge::tree::Conflict, how: TreatAsUnresolved) -> MergeConflict {
+pub(crate) fn conflict_to_dto(
+    r: &gix::Repository,
+    conflict: &gix::merge::tree::Conflict,
+    how: TreatAsUnresolved,
+) -> MergeConflict {
     let (ours, theirs) = conflict.changes_in_resolution();
     let [base, our, their] = conflict.entries();
     let entry_dto = |entry: &Option<gix::merge::plumbing::tree::ConflictIndexEntry>| {
@@ -355,6 +422,18 @@ fn conflict_to_dto(conflict: &gix::merge::tree::Conflict, how: TreatAsUnresolved
             id: e.id.to_string(),
         })
     };
+    // Raw triple content for unresolved conflicts (stage 1/2/3 blobs).
+    let read_blob =
+        |entry: &Option<gix::merge::plumbing::tree::ConflictIndexEntry>| -> Option<Buffer> {
+            entry.as_ref().and_then(|e| {
+                r.find_object(e.id)
+                    .ok()
+                    .map(|o| Buffer::from(o.detach().data))
+            })
+        };
+    let base_content = read_blob(&base);
+    let left_content = read_blob(&our);
+    let right_content = read_blob(&their);
 
     let resolution;
     let mut final_location = None;
@@ -399,14 +478,17 @@ fn conflict_to_dto(conflict: &gix::merge::tree::Conflict, how: TreatAsUnresolved
         }
     }
     let merged_blob = conflict.content_merge();
-    let (merged_blob_id, merged_blob_resolution) = merged_blob
-        .map(|merged| {
+    let (merged_blob_id, merged_blob_resolution, hunks) = match merged_blob {
+        Some(merged) => {
+            let id = merged.merged_blob_id;
             (
-                merged.merged_blob_id.to_string(),
-                blob_resolution_string(&merged.resolution).to_string(),
+                Some(id.to_string()),
+                Some(blob_resolution_string(&merged.resolution).to_string()),
+                build_hunks(r, &id),
             )
-        })
-        .unzip();
+        }
+        None => (None, None, Vec::new()),
+    };
 
     MergeConflict {
         unresolved: conflict.is_unresolved(how),
@@ -421,13 +503,19 @@ fn conflict_to_dto(conflict: &gix::merge::tree::Conflict, how: TreatAsUnresolved
         base_entry: entry_dto(&base),
         our_entry: entry_dto(&our),
         their_entry: entry_dto(&their),
+        base_content,
+        left_content,
+        right_content,
+        hunks,
     }
 }
 
 /// Convert a merge outcome into the JS-facing [`MergeOutcome`], writing the
 /// unwritten editor tree into the object database first.
-fn merge_outcome_to_dto(
+pub(crate) fn merge_outcome_to_dto(
+    r: &gix::Repository,
     outcome: &mut gix::merge::tree::Outcome<'_>,
+    base_tree: Option<&gix::ObjectId>,
     what: &str,
 ) -> napi::Result<MergeOutcome> {
     // The standard (git) criteria for what still needs manual resolution.
@@ -435,36 +523,207 @@ fn merge_outcome_to_dto(
     let conflict_details = outcome
         .conflicts
         .iter()
-        .map(|c| conflict_to_dto(c, how))
+        .map(|c| conflict_to_dto(r, c, how))
         .collect();
+    let tree_id = outcome.tree.write().map_err(|e| err(what, e))?;
+    let tree_obj_id: gix::ObjectId = (*tree_id).to_owned();
+    let conflicted = outcome
+        .conflicts
+        .iter()
+        .filter(|c| c.is_unresolved(how))
+        .count() as f64;
+    let stats = match base_tree {
+        Some(base) => compute_merge_stats(r, base, &tree_obj_id, conflicted)?,
+        None => MergeStats {
+            added: 0.0,
+            removed: 0.0,
+            modified: 0.0,
+            unchanged: 0.0,
+            conflicted,
+        },
+    };
     Ok(MergeOutcome {
-        tree_id: outcome.tree.write().map_err(|e| err(what, e))?.to_string(),
+        tree_id: tree_obj_id.to_string(),
         conflicts: !outcome.conflicts.is_empty(),
         has_unresolved_conflicts: outcome.has_unresolved_conflicts(how),
         failed_on_first_unresolved_conflict: outcome.failed_on_first_unresolved_conflict,
         conflict_details,
+        stats,
     })
+}
+
+/// Flatten `tree_id` into `path -> object id` (recursing into subtrees).
+fn collect_tree_entries(
+    r: &gix::Repository,
+    tree_id: &gix::ObjectId,
+) -> napi::Result<HashMap<String, gix::ObjectId>> {
+    let mut map = HashMap::new();
+    fn recurse(
+        r: &gix::Repository,
+        map: &mut HashMap<String, gix::ObjectId>,
+        prefix: &str,
+        tree: &gix::Tree,
+    ) -> napi::Result<()> {
+        for entry in tree.iter() {
+            let name = entry.filename().to_string_lossy().into_owned();
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+            match entry.mode() {
+                gix::object::tree::EntryMode::Tree => {
+                    let sub = r.find_tree(entry.id()).map_err(|e| err("find_tree", e))?;
+                    recurse(r, map, &path, &sub)?;
+                }
+                _ => {
+                    map.insert(path, entry.id());
+                }
+            }
+        }
+        Ok(())
+    }
+    let tree = r.find_tree(*tree_id).map_err(|e| err("find_tree", e))?;
+    recurse(r, &mut map, "", &tree)?;
+    Ok(map)
+}
+
+/// Aggregate base-relative change counts for a merge result, plus the unresolved
+/// conflict count.
+fn compute_merge_stats(
+    r: &gix::Repository,
+    base_tree: &gix::ObjectId,
+    merged_tree: &gix::ObjectId,
+    conflicted: f64,
+) -> napi::Result<MergeStats> {
+    let base = collect_tree_entries(r, base_tree)?;
+    let merged = collect_tree_entries(r, merged_tree)?;
+    let mut added = 0u64;
+    let mut removed = 0u64;
+    let mut modified = 0u64;
+    let mut unchanged = 0u64;
+    for (path, mid) in &merged {
+        match base.get(path) {
+            Some(bid) if bid == mid => unchanged += 1,
+            Some(_) => modified += 1,
+            None => added += 1,
+        }
+    }
+    for path in base.keys() {
+        if !merged.contains_key(path) {
+            removed += 1;
+        }
+    }
+    Ok(MergeStats {
+        added: added as f64,
+        removed: removed as f64,
+        modified: modified as f64,
+        unchanged: unchanged as f64,
+        conflicted,
+    })
+}
+
+/// Read the merged blob and parse its conflict markers into per-hunk line arrays
+/// suitable for a custom conflict UI. Returns an empty list when there is no
+/// marker output.
+fn build_hunks(r: &gix::Repository, blob_id: &gix::ObjectId) -> Vec<ConflictHunk> {
+    match r.find_object(*blob_id) {
+        Ok(o) => parse_conflict_hunks(&String::from_utf8_lossy(&o.detach().data)),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Scan `text` for nested `<<<<<<<` / `>>>>>>>` conflict blocks (honouring the
+/// `=======` and optional `|||||||` base separators) and return one [`ConflictHunk`]
+/// per block with the base/our/their line sets.
+fn parse_conflict_hunks(text: &str) -> Vec<ConflictHunk> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut hunks = Vec::new();
+    let mut i = 0;
+    #[derive(PartialEq)]
+    enum Section {
+        Base,
+        Ours,
+        Theirs,
+    }
+    while i < lines.len() {
+        let line = lines[i];
+        if line.starts_with("<<<<<<<") {
+            let mut base = Vec::new();
+            let mut ours = Vec::new();
+            let mut theirs = Vec::new();
+            let mut section = Section::Ours;
+            let mut depth = 1;
+            i += 1;
+            while i < lines.len() {
+                let l = lines[i];
+                if l.starts_with("<<<<<<<") {
+                    depth += 1;
+                    section = Section::Ours;
+                    ours.push(l);
+                } else if l.starts_with(">>>>>>>") {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                    theirs.push(l);
+                } else if l.starts_with("|||||||") {
+                    section = Section::Base;
+                } else if l.starts_with("=======") {
+                    section = Section::Theirs;
+                } else {
+                    match section {
+                        Section::Base => base.push(l),
+                        Section::Ours => ours.push(l),
+                        Section::Theirs => theirs.push(l),
+                    }
+                }
+                i += 1;
+            }
+            hunks.push(ConflictHunk {
+                base_lines: base,
+                left_lines: ours,
+                right_lines: theirs,
+            });
+        } else {
+            i += 1;
+        }
+    }
+    hunks
+}
+
+/// Resolve a revision specification to an object id, accepting anything
+/// `git rev-parse` does — commit ids, `HEAD`, branch or tag names,
+/// `~`/`^`/`^{}` expressions. (Unlike `parse_oid`, this also accepts refs and
+/// ancestry operators, matching the CLI `git merge-base`.)
+fn resolve_rev(r: &gix::Repository, spec: &str, what: &str) -> napi::Result<gix::ObjectId> {
+    r.rev_parse_single(spec)
+        .map(|id| id.detach())
+        .map_err(|e| err(what, e))
 }
 
 #[napi]
 impl Repository {
     /// The merge base of two commits, if any.
     #[napi]
-    pub fn merge_base(&self, one: String, two: String) -> Result<Option<String>> {
+    pub fn merge_base(&self, one: String, two: String) -> napi::Result<Option<String>> {
         let r = thread_local(&self.inner);
-        let base = r
-            .merge_base(parse_oid(&one)?, parse_oid(&two)?)
-            .map_err(|e| err("merge_base", e))?;
+        let what = "merge_base";
+        let one = resolve_rev(&r, &one, what)?;
+        let two = resolve_rev(&r, &two, what)?;
+        let base = r.merge_base(one, two).map_err(|e| err(what, e))?;
         Ok(base.map(|id| id.to_string()))
     }
 
     /// The (octopus) merge base of multiple commits, if any.
     #[napi]
-    pub fn merge_base_octopus(&self, commits: Vec<String>) -> Result<Option<String>> {
+    pub fn merge_base_octopus(&self, commits: Vec<String>) -> napi::Result<Option<String>> {
         let r = thread_local(&self.inner);
+        let what = "merge_base_octopus";
         let ids: Vec<gix::ObjectId> = commits
             .iter()
-            .map(|c| parse_oid(c))
+            .map(|c| resolve_rev(&r, c, what))
             .collect::<Result<Vec<_>>>()?;
         let base = r
             .merge_base_octopus(ids)
@@ -474,30 +733,34 @@ impl Repository {
 
     /// The merge base of two commits, building the revision graph on demand (uses the commit-graph if enabled).
     #[napi]
-    pub fn merge_base_with_graph(&self, one: String, two: String) -> Result<Option<String>> {
+    pub fn merge_base_with_graph(&self, one: String, two: String) -> napi::Result<Option<String>> {
         let r = thread_local(&self.inner);
+        let what = "merge_base_with_graph";
+        let one = resolve_rev(&r, &one, what)?;
+        let two = resolve_rev(&r, &two, what)?;
         let cache = r
             .commit_graph_if_enabled()
             .map_err(|e| err("commit_graph_if_enabled", e))?;
         let mut graph = r.revision_graph(cache.as_ref());
         let base = r
-            .merge_base_with_graph(parse_oid(&one)?, parse_oid(&two)?, &mut graph)
-            .map_err(|e| err("merge_base_with_graph", e))?;
+            .merge_base_with_graph(one, two, &mut graph)
+            .map_err(|e| err(what, e))?;
         Ok(base.map(|id| id.to_string()))
     }
 
     /// All merge bases between `one` and the `others` commits.
     #[napi]
-    pub fn merge_bases_many(&self, one: String, others: Vec<String>) -> Result<Vec<String>> {
+    pub fn merge_bases_many(&self, one: String, others: Vec<String>) -> napi::Result<Vec<String>> {
         let r = thread_local(&self.inner);
-        let one_id = parse_oid(&one)?;
+        let what = "merge_bases_many";
+        let one_id = resolve_rev(&r, &one, what)?;
         let others_ids: Vec<gix::ObjectId> = others
             .iter()
-            .map(|o| parse_oid(o))
+            .map(|o| resolve_rev(&r, o, what))
             .collect::<Result<Vec<_>>>()?;
         let bases = r
             .merge_bases_many(one_id, &others_ids)
-            .map_err(|e| err("merge_bases_many", e))?;
+            .map_err(|e| err(what, e))?;
         Ok(bases.into_iter().map(|id| id.to_string()).collect())
     }
 
@@ -507,12 +770,13 @@ impl Repository {
         &self,
         one: String,
         others: Vec<String>,
-    ) -> Result<Vec<String>> {
+    ) -> napi::Result<Vec<String>> {
         let r = thread_local(&self.inner);
-        let one_id = parse_oid(&one)?;
+        let what = "merge_bases_many_with_graph";
+        let one_id = resolve_rev(&r, &one, what)?;
         let others_ids: Vec<gix::ObjectId> = others
             .iter()
-            .map(|o| parse_oid(o))
+            .map(|o| resolve_rev(&r, o, what))
             .collect::<Result<Vec<_>>>()?;
         let cache = r
             .commit_graph_if_enabled()
@@ -520,17 +784,21 @@ impl Repository {
         let mut graph = r.revision_graph(cache.as_ref());
         let bases = r
             .merge_bases_many_with_graph(one_id, &others_ids, &mut graph)
-            .map_err(|e| err("merge_bases_many_with_graph", e))?;
+            .map_err(|e| err(what, e))?;
         Ok(bases.into_iter().map(|id| id.to_string()).collect())
     }
 
     /// The (octopus) merge base of multiple commits, using an explicit revision graph.
     #[napi]
-    pub fn merge_base_octopus_with_graph(&self, commits: Vec<String>) -> Result<Option<String>> {
+    pub fn merge_base_octopus_with_graph(
+        &self,
+        commits: Vec<String>,
+    ) -> napi::Result<Option<String>> {
         let r = thread_local(&self.inner);
+        let what = "merge_base_octopus_with_graph";
         let ids: Vec<gix::ObjectId> = commits
             .iter()
-            .map(|c| parse_oid(c))
+            .map(|c| resolve_rev(&r, c, what))
             .collect::<Result<Vec<_>>>()?;
         let cache = r
             .commit_graph_if_enabled()
@@ -544,7 +812,7 @@ impl Repository {
 
     /// The blob-merge options resolved from configuration (diff algorithm, conflict handling).
     #[napi]
-    pub fn blob_merge_options(&self) -> Result<BlobMergeOptionsSummary> {
+    pub fn blob_merge_options(&self) -> napi::Result<BlobMergeOptionsSummary> {
         let r = thread_local(&self.inner);
         let opts = r
             .blob_merge_options()
@@ -558,7 +826,7 @@ impl Repository {
 
     /// Resolved options used for three-way tree merges, as driven by configuration.
     #[napi]
-    pub fn tree_merge_options(&self) -> Result<TreeMergeOptionsSummary> {
+    pub fn tree_merge_options(&self) -> napi::Result<TreeMergeOptionsSummary> {
         let r = thread_local(&self.inner);
         // gix's `merge::tree::Options` wrapper keeps its fields private, so read the
         // plumbing-level options through the provided conversion.
@@ -577,7 +845,10 @@ impl Repository {
 
     /// Recursively merge multiple merge-bases into one virtual merge base commit.
     #[napi]
-    pub fn virtual_merge_base(&self, merge_bases: Vec<String>) -> Result<VirtualMergeBaseOutcome> {
+    pub fn virtual_merge_base(
+        &self,
+        merge_bases: Vec<String>,
+    ) -> napi::Result<VirtualMergeBaseOutcome> {
         let r = thread_local(&self.inner);
         let ids: Vec<gix::ObjectId> = merge_bases
             .iter()
@@ -605,7 +876,7 @@ impl Repository {
     pub fn virtual_merge_base_with_graph(
         &self,
         merge_bases: Vec<String>,
-    ) -> Result<VirtualMergeBaseOutcome> {
+    ) -> napi::Result<VirtualMergeBaseOutcome> {
         let r = thread_local(&self.inner);
         let ids: Vec<gix::ObjectId> = merge_bases
             .iter()
@@ -644,7 +915,7 @@ impl Repository {
         their_tree: String,
         ancestor_tree: String,
         options: Option<MergeOptions>,
-    ) -> Result<MergeOutcome> {
+    ) -> napi::Result<MergeOutcome> {
         let r = thread_local(&self.inner);
         let ours = parse_oid(&our_tree)?;
         let theirs = parse_oid(&their_tree)?;
@@ -654,7 +925,7 @@ impl Repository {
         let mut outcome = r
             .merge_trees(ancestor, ours, theirs, owned.borrowed(), tree_options)
             .map_err(|e| err("merge_trees", e))?;
-        merge_outcome_to_dto(&mut outcome, "merge_tree_write")
+        merge_outcome_to_dto(&r, &mut outcome, Some(&ancestor), "merge_tree_write")
     }
 
     /// Merge two commits and return the merged tree ID and conflict status.
@@ -664,7 +935,7 @@ impl Repository {
         our_commit: String,
         their_commit: String,
         options: Option<MergeOptions>,
-    ) -> Result<MergeOutcome> {
+    ) -> napi::Result<MergeOutcome> {
         let r = thread_local(&self.inner);
         let ours = parse_oid(&our_commit)?;
         let theirs = parse_oid(&their_commit)?;
@@ -673,7 +944,69 @@ impl Repository {
         let mut outcome = r
             .merge_commits(ours, theirs, owned.borrowed(), commit_options)
             .map_err(|e| err("merge_commits", e))?;
-        merge_outcome_to_dto(&mut outcome.tree_merge, "merge_commit_write")
+        let base_tree = match r.merge_base(ours, theirs) {
+            Ok(Some(id)) => r
+                .find_commit(id)
+                .ok()
+                .and_then(|c| c.tree_id().ok().map(|t| t.detach())),
+            _ => None,
+        };
+        merge_outcome_to_dto(
+            &r,
+            &mut outcome.tree_merge,
+            base_tree.as_ref(),
+            "merge_commit_write",
+        )
+    }
+
+    /// Perform a `git merge` of one or more commits into `HEAD`, materializing the
+    /// result into the working tree and index (like `git merge`). The repository is
+    /// left in a *merging state* (`MERGE_HEAD`, …) so the caller must follow up with
+    /// a commit or clear the state. On conflicts, conflict markers are written to the
+    /// working tree and the index holds the unmerged stages (1/2/3); the merge is
+    /// left uncommitted.
+    pub fn merge(
+        &self,
+        commit: Either<String, Vec<String>>,
+        options: Option<MergeOptions>,
+    ) -> napi::Result<MergeOutcome> {
+        let r = thread_local(&self.inner);
+        let commits = match commit {
+            Either::A(one) => vec![one],
+            Either::B(many) => many,
+        };
+        if commits.is_empty() {
+            return Err(err_str("merge", "no commits given to merge"));
+        }
+        // "our" side is the current HEAD.
+        let head_id = self.head_id()?;
+        let ours = parse_oid(&head_id)?;
+        // gix only performs a two-way merge; use the first listed commit as "their".
+        // `rev_parse_single` accepts both object ids and ref names.
+        let their_id = self.rev_parse_single(commits[0].clone())?;
+        let theirs = parse_oid(&their_id)?;
+        let owned = owned_labels(options.as_ref());
+        let commit_options = build_commit_options("merge", options.as_ref())?;
+        let mut outcome = r
+            .merge_commits(ours, theirs, owned.borrowed(), commit_options)
+            .map_err(|e| err("merge_commits", e))?;
+        let base_tree = match r.merge_base(ours, theirs) {
+            Ok(Some(id)) => r
+                .find_commit(id)
+                .ok()
+                .and_then(|c| c.tree_id().ok().map(|t| t.detach())),
+            _ => None,
+        };
+        let merged = merge_outcome_to_dto(
+            &r,
+            &mut outcome.tree_merge,
+            base_tree.as_ref(),
+            "merge_write",
+        )?;
+        // Materialize into the working tree + index. `no_ff = false` so git may
+        // fast-forward when able; a conflict exit (1) is expected, not an error.
+        git_merge(&r, &commits, false)?;
+        Ok(merged)
     }
 
     /// Merge two trees as in [`merge_trees`](Self::merge_trees), then apply the
@@ -695,7 +1028,7 @@ impl Repository {
         unresolved: Option<String>,
         removal_mode: Option<String>,
         write: Option<bool>,
-    ) -> Result<ApplyMergeConflictsOutcome> {
+    ) -> napi::Result<ApplyMergeConflictsOutcome> {
         let what = "apply_merge_conflicts_to_index";
         let r = thread_local(&self.inner);
         let ours = parse_oid(&our_tree)?;
@@ -750,6 +1083,19 @@ pub struct ApplyMergeConflictsOutcome {
     pub tree_id: String,
 }
 
+/// One side of a standalone three-way content merge.
+#[napi(object)]
+pub struct MergeFileInput {
+    /// The file content for this side.
+    pub content: Buffer,
+    /// Repository-relative path of this side. Used as the conflict-marker label
+    /// when no explicit label is given, and as the basis for the result path.
+    pub path: Option<String>,
+    /// Tree entry mode in octal (e.g. `"100644"`, `"100755"`). Used to derive
+    /// the result mode; when omitted the result mode is left unset.
+    pub mode: Option<String>,
+}
+
 /// Options for the standalone three-way blob content merge.
 #[derive(Default)]
 #[napi(object)]
@@ -778,18 +1124,26 @@ pub struct BlobMergeResult {
     pub data: Buffer,
     /// `"complete"`, `"completeWithAutoResolvedConflict"` or `"conflict"`.
     pub resolution: String,
+    /// The path the merged file should use: the first non-null path among the
+    /// three inputs (ours, then theirs, then ancestor).
+    pub path: Option<String>,
+    /// The resulting entry mode in octal, taken from the first side (ours, then
+    /// theirs) that provided one.
+    pub mode: Option<String>,
 }
 
 /// Perform a standalone three-way text merge of blob contents, without
 /// involving a repository. `ours`, `base` and `theirs` are the file contents
-/// of each side. This is the builtin text merge driver.
+/// of each side; each may carry a `path` (used for conflict-marker labels and
+/// the result path) and a `mode` (used for the result mode). This is the
+/// builtin text merge driver.
 #[napi]
 pub fn merge_blobs(
-    ours: Buffer,
-    base: Buffer,
-    theirs: Buffer,
+    ours: MergeFileInput,
+    base: MergeFileInput,
+    theirs: MergeFileInput,
     options: Option<BlobMergeOptions>,
-) -> Result<BlobMergeResult> {
+) -> napi::Result<BlobMergeResult> {
     let what = "merge_blobs";
     let options = options.unwrap_or_default();
     let conflict = match options.resolve_with.as_deref() {
@@ -835,9 +1189,21 @@ pub fn merge_blobs(
         }
     };
     let labels = text::Labels {
-        ancestor: options.ancestor_label.as_deref().map(BStr::new),
-        current: options.our_label.as_deref().map(BStr::new),
-        other: options.their_label.as_deref().map(BStr::new),
+        ancestor: options
+            .ancestor_label
+            .as_deref()
+            .or(base.path.as_deref())
+            .map(BStr::new),
+        current: options
+            .our_label
+            .as_deref()
+            .or(ours.path.as_deref())
+            .map(BStr::new),
+        other: options
+            .their_label
+            .as_deref()
+            .or(theirs.path.as_deref())
+            .map(BStr::new),
     };
     let mut out = Vec::new();
     // The merge itself tokenizes all three inputs; the initial content is unused.
@@ -846,16 +1212,24 @@ pub fn merge_blobs(
         &mut out,
         &mut input,
         labels,
-        ours.as_ref(),
-        base.as_ref(),
-        theirs.as_ref(),
+        ours.content.as_ref(),
+        base.content.as_ref(),
+        theirs.content.as_ref(),
         text::Options {
             diff_algorithm,
             conflict,
         },
     );
+    let result_path = ours
+        .path
+        .clone()
+        .or(theirs.path.clone())
+        .or(base.path.clone());
+    let result_mode = ours.mode.clone().or(theirs.mode.clone());
     Ok(BlobMergeResult {
         data: Buffer::from(out),
         resolution: blob_resolution_string(&resolution).into(),
+        path: result_path,
+        mode: result_mode,
     })
 }

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Algorithm, diff, Repository } from "./main.ts";
@@ -107,7 +107,7 @@ describe("Repository.diffTreeToTree", () => {
     expect(changes.length).toBeGreaterThan(0);
     for (const c of changes) {
       expect(c.kind).toBe("Added");
-      expect(c.oldId).toBe(null);
+      expect(c.oldId).toBeUndefined();
       expect(typeof c.newId).toBe("string");
     }
   });
@@ -131,7 +131,136 @@ describe("Repository.diffTreeToTree", () => {
     for (const c of changes) {
       expect(c.kind).toBe("Deleted");
       expect(typeof c.oldId).toBe("string");
-      expect(c.newId).toBe(null);
+      expect(c.newId).toBeUndefined();
     }
+  });
+
+  test("rename detection maps a move to a Renamed change with source location", () => {
+    const blob = repo.writeBlob(Buffer.from("same content\n"));
+    const t1 = repo.writeTree([{ path: "a.txt", id: blob, mode: "100644" }]);
+    const t2 = repo.writeTree([{ path: "b.txt", id: blob, mode: "100644" }]);
+
+    const renamed = repo.diffTreeToTree(t1, t2, {
+      trackRenames: "Custom",
+      renameThreshold: 50,
+    });
+    expect(renamed.length).toBe(1);
+    expect(renamed[0].kind).toBe("Renamed");
+    expect(renamed[0].sourceLocation).toBe("a.txt");
+    expect(renamed[0].path).toBe("b.txt");
+
+    // Disabled rename tracking reports the raw delete+add pair instead.
+    const split = repo.diffTreeToTree(t1, t2, { trackRenames: "Disabled" });
+    expect(split.map((c) => c.kind).sort()).toEqual(["Added", "Deleted"]);
+  });
+
+  test("sync and async diffTreeToTree agree", async () => {
+    const t1 = writeTree("hello\n");
+    const t2 = writeTree("hello world\n");
+    const syncChanges = repo.diffTreeToTree(t1, t2);
+    const asyncChanges = await repo.diffTreeToTreeAsync(t1, t2);
+    expect(asyncChanges).toEqual(syncChanges);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Repository.diffTreeToIndex (tree-vs-index diff via gix status)
+// ---------------------------------------------------------------------------
+
+describe("Repository.diffTreeToIndex", () => {
+  function writeTree2(files: { path: string; content: string }[]): string {
+    const entries = files.map((f) => ({
+      path: f.path,
+      id: repo.writeBlob(Buffer.from(f.content)),
+      mode: "100644",
+    }));
+    return repo.writeTree(entries);
+  }
+
+  test("a tree entry missing from the (empty) index is reported as Deleted", () => {
+    const tree = writeTree2([{ path: "only.txt", content: "x\n" }]);
+    const changes = repo.diffTreeToIndex(tree);
+    expect(changes.length).toBe(1);
+    expect(changes[0].kind).toBe("Deleted");
+    expect(changes[0].path).toBe("only.txt");
+    expect(typeof changes[0].oldId).toBe("string");
+    expect(changes[0].newId).toBeUndefined();
+  });
+
+  test("pathspec limits which entries are compared", () => {
+    const tree = writeTree2([
+      { path: "keep.txt", content: "k\n" },
+      { path: "skip.txt", content: "s\n" },
+    ]);
+    const changes = repo.diffTreeToIndex(tree, { pathspec: ["keep.txt"] });
+    expect(changes.length).toBe(1);
+    expect(changes[0].path).toBe("keep.txt");
+  });
+
+  test("sync and async diffTreeToIndex agree", async () => {
+    const tree = writeTree2([{ path: "f.txt", content: "v\n" }]);
+    const syncChanges = repo.diffTreeToIndex(tree);
+    const asyncChanges = await repo.diffTreeToIndexAsync(tree);
+    expect(asyncChanges).toEqual(syncChanges);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Repository.diffIndexToWorkdir / diffTreeToWorkdir (worktree diffs)
+// ---------------------------------------------------------------------------
+
+describe("Repository.diffIndexToWorkdir", () => {
+  test("an untracked working-tree file is reported as Added", () => {
+    writeFileSync(join(base, "repo", "untracked.txt"), "u\n");
+    const changes = repo.diffIndexToWorkdir();
+    const untracked = changes.filter((c) => c.path === "untracked.txt");
+    expect(untracked.length).toBe(1);
+    expect(untracked[0].kind).toBe("Added");
+    expect(untracked[0].entryMode).toBe("100644");
+  });
+
+  test("untracked: 'none' omits untracked files", () => {
+    const changes = repo.diffIndexToWorkdir({ untracked: "None" });
+    expect(changes.filter((c) => c.path === "untracked.txt")).toEqual([]);
+  });
+
+  test("sync and async diffIndexToWorkdir agree", async () => {
+    const syncChanges = repo.diffIndexToWorkdir();
+    const asyncChanges = await repo.diffIndexToWorkdirAsync();
+    expect(asyncChanges).toEqual(syncChanges);
+  });
+});
+
+describe("Repository.diffTreeToWorkdir", () => {
+  test("combines the tree-to-index and index-to-worktree halves", () => {
+    // Tree contains tracked.txt; the index is empty and the worktree has untracked.txt.
+    const blob = repo.writeBlob(Buffer.from("tracked\n"));
+    const tree = repo.writeTree([
+      {
+        path: "tracked.txt",
+        id: blob,
+        mode: "100644",
+      },
+    ]);
+    const changes = repo.diffTreeToWorkdir(tree);
+
+    const deleted = changes.find((c) => c.path === "tracked.txt");
+    expect(deleted?.kind).toBe("Deleted");
+    const added = changes.find((c) => c.path === "untracked.txt");
+    expect(added?.kind).toBe("Added");
+  });
+
+  test("sync and async diffTreeToWorkdir agree", async () => {
+    const blob = repo.writeBlob(Buffer.from("tracked2\n"));
+    const tree = repo.writeTree([
+      {
+        path: "tracked2.txt",
+        id: blob,
+        mode: "100644",
+      },
+    ]);
+    const syncChanges = repo.diffTreeToWorkdir(tree);
+    const asyncChanges = await repo.diffTreeToWorkdirAsync(tree);
+    expect(asyncChanges).toEqual(syncChanges);
   });
 });

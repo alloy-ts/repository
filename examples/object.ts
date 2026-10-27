@@ -1,4 +1,16 @@
-import { Repository } from "../src/main.ts";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  Oid,
+  oidFormat,
+  oidFromBytes,
+  oidIsValid,
+  oidIsZero,
+  oidToBytes,
+  oidZero,
+  Repository,
+} from "../src/main.ts";
 
 const repoPath = process.argv[2] ?? process.cwd();
 
@@ -173,6 +185,109 @@ function main() {
       repo.writeObject(raw.kind, raw.data) === tree.id
     }`,
   );
+
+  // ---------------------------------------------------------------------------
+  // Oid: a first-class object id. Repository methods still take hex strings;
+  // `oid.hex` (or `String(oid)`) bridges the two worlds. The oid* helpers are
+  // free functions — no repository needed.
+  // ---------------------------------------------------------------------------
+  console.log("\n=== Oid ===");
+  const oid = new Oid(head.id);
+  console.log(`new Oid(headId).hex        -> ${oid.hex}`);
+  console.log(`String(oid)                -> ${String(oid)}`);
+  console.log(`JSON.stringify(oid)        -> ${JSON.stringify(oid)}`);
+  console.log(`oid.format()               -> ${oid.format()}`);
+  console.log(
+    `oid.isZero()               -> ${oid.isZero()}; Oid.zero("sha256").hex.length = ${
+      Oid.zero("sha256").hex.length
+    }`,
+  );
+  console.log(
+    `oid.toBytes().length       -> ${oid.toBytes().length}; fromBytes round-trip = ${Oid.fromBytes(
+      oid.toBytes(),
+    ).equals(oid)}`,
+  );
+  console.log(`oid.compare(Oid.zero())    -> ${oid.compare(Oid.zero())}`);
+  console.log(
+    `oidIsValid(headId)         -> ${oidIsValid(head.id)}; oidIsValid(7-char prefix) = ${oidIsValid(
+      head.id.slice(0, 7),
+    )}`,
+  );
+  console.log(
+    `oidFormat(headId)          -> ${oidFormat(head.id)}; oidIsZero(oidZero()) = ${oidIsZero(
+      oidZero(),
+    )}`,
+  );
+  console.log(
+    `oidToBytes(headId).length  -> ${oidToBytes(head.id).length}; oidFromBytes round-trip = ${
+      oidFromBytes(oidToBytes(head.id)) === head.id
+    }`,
+  );
+
+  // ---------------------------------------------------------------------------
+  // Peeling: `git rev-parse <rev>^{}` at the object level. peelToKind("any")
+  // (== peelToEnd()) follows tag chains only, so a tag on a commit yields that
+  // commit — never its tree. peelToCommit/peelToTree/peelToBlob go as far as
+  // needed, and peelToTag() stops on the first tag object.
+  // ---------------------------------------------------------------------------
+  console.log("\n=== Peeling ===");
+  const tagObject = repo.findObject(tagId);
+  console.log(`tag ${short(tagId)} kind=${tagObject.kind}`);
+  console.log(`  peelToKind("commit") -> ${short(tagObject.peelToKind("commit").id)}`);
+  console.log(`  peelToKind("any")    -> ${short(tagObject.peelToKind("any").id)}`);
+  console.log(`  peelToEnd()          -> ${short(tagObject.peelToEnd().id)}`);
+  console.log(`  peelToTree()         -> ${short(tagObject.peelToTree().id)}`);
+  console.log(`  peelToTag()          -> ${short(tagObject.peelToTag().id)}`);
+  const blobTagId = repo.writeTag({
+    name: "examples-object-blob-tag",
+    target: blobId,
+    targetKind: "blob",
+    message: "A tag pointing at a blob, written by examples/object.ts\n",
+  });
+  console.log(
+    `  peelToBlob() through a blob tag -> ${short(
+      repo.findObject(blobTagId).peelToBlob().id,
+    )} (== ${short(blobId)})`,
+  );
+  try {
+    repo.findObject(blobId).peelToCommit();
+  } catch (e) {
+    console.log(`  peelToCommit() on a blob rejected: ${(e as Error).message.split("\n")[0]}`);
+  }
+
+  // shortId() abbreviates like `git_object_short_id`: core.abbrev-aware, extended
+  // until unambiguous, falling back to the full id. describe() is `git describe`
+  // and requires a commit-ish.
+  console.log(`  shortId()            -> ${tagObject.shortId()} (of ${short(tagId)})`);
+  console.log(
+    `  describe(commit)     -> ${
+      repo.findObject(commitId).describe({ idAsFallback: true })?.format
+    }`,
+  );
+  try {
+    repo.findObject(blobId).describe();
+  } catch (e) {
+    console.log(`  describe() on a blob rejected: ${(e as Error).message.split("\n")[0]}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // computeHashFile: libgit2's Oid::hash_file — hash a file without writing it.
+  // ---------------------------------------------------------------------------
+  console.log("\n=== computeHashFile ===");
+  const hashMe = join(tmpdir(), "repository-examples-hash-me.txt");
+  const hashMeData = "hashed straight from a file; the object database never sees it\n";
+  writeFileSync(hashMe, hashMeData);
+  const fileId = repo.computeHashFile("blob", hashMe);
+  console.log(`computeHashFile("blob", file) -> ${short(fileId)}`);
+  console.log(
+    `  matches computeHash()  -> ${repo.computeHash("blob", Buffer.from(hashMeData)) === fileId}`,
+  );
+  console.log(`  written to the ODB?    -> ${repo.objectExists(fileId)} (should be false)`);
+  try {
+    repo.computeHashFile("blob", join(tmpdir(), "repository-examples-missing.txt"));
+  } catch (e) {
+    console.log(`  missing file rejected: ${(e as Error).message.split("\n")[0]}`);
+  }
 }
 
 main();
