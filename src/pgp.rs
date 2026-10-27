@@ -2,19 +2,20 @@ use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::rc::Rc;
 
+use crate::error::RepositoryResult;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
+use sequoia_openpgp::Fingerprint;
 use sequoia_openpgp::cert::Cert;
 use sequoia_openpgp::crypto::{KeyPair, Password, SessionKey};
+use sequoia_openpgp::parse::Parse;
 use sequoia_openpgp::parse::stream::{
-    DecryptorBuilder, DecryptionHelper, MessageLayer, MessageStructure, VerificationError,
+    DecryptionHelper, DecryptorBuilder, MessageLayer, MessageStructure, VerificationError,
     VerificationHelper,
 };
-use sequoia_openpgp::parse::Parse;
 use sequoia_openpgp::policy::StandardPolicy;
 use sequoia_openpgp::serialize::stream::{Encryptor2, LiteralWriter, Message, Recipient, Signer};
 use sequoia_openpgp::types::SymmetricAlgorithm;
-use sequoia_openpgp::Fingerprint;
 
 #[derive(Debug)]
 pub enum PgpError {
@@ -61,7 +62,7 @@ impl std::fmt::Display for PgpError {
     }
 }
 
-fn parse_certs(buffers: &[Buffer]) -> Result<Vec<Cert>, PgpError> {
+fn parse_certs(buffers: &[Buffer]) -> napi::Result<Vec<Cert>, PgpError> {
     let mut certs = Vec::with_capacity(buffers.len());
     for b in buffers {
         certs.push(Cert::from_bytes(b).map_err(PgpError::from)?);
@@ -70,7 +71,7 @@ fn parse_certs(buffers: &[Buffer]) -> Result<Vec<Cert>, PgpError> {
 }
 
 /// Symmetric encrypt `plaintext` under `pass` (mirrors `gpg -c --passphrase`).
-pub fn symmetric_encrypt(pass: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, PgpError> {
+pub fn symmetric_encrypt(pass: &[u8], plaintext: &[u8]) -> napi::Result<Vec<u8>, PgpError> {
     let password = Password::from(pass);
     let mut sink: Vec<u8> = Vec::new();
     {
@@ -86,7 +87,7 @@ pub fn symmetric_encrypt(pass: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, PgpEr
 }
 
 /// Symmetric decrypt `ciphertext` with `pass` (mirrors `gpg -d --passphrase`).
-pub fn symmetric_decrypt(pass: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, PgpError> {
+pub fn symmetric_decrypt(pass: &[u8], ciphertext: &[u8]) -> napi::Result<Vec<u8>, PgpError> {
     let password = Password::from(pass);
     let signers = Rc::new(RefCell::new(Vec::new()));
     let helper = DecryptHelper {
@@ -112,7 +113,7 @@ pub fn public_encrypt(
     recipients: &[Cert],
     sign_key: Option<&Cert>,
     plaintext: &[u8],
-) -> Result<Vec<u8>, PgpError> {
+) -> napi::Result<Vec<u8>, PgpError> {
     let policy = StandardPolicy::new();
 
     // Collect recipient keys (transport/storage encryption capable).
@@ -196,15 +197,11 @@ impl VerificationHelper for DecryptHelper {
             }
         }
         if !self.accept.is_empty() {
-            let ok = found.iter().any(|fp| {
-                self.accept
-                    .iter()
-                    .any(|a| fp == a || fp.ends_with(a))
-            });
+            let ok = found
+                .iter()
+                .any(|fp| self.accept.iter().any(|a| fp == a || fp.ends_with(a)));
             if !ok {
-                return Err(anyhow::anyhow!(
-                    "no accepted signer found"
-                ));
+                return Err(anyhow::anyhow!("no accepted signer found"));
             }
         }
         self.signers.borrow_mut().extend(found);
@@ -226,17 +223,11 @@ impl DecryptionHelper for DecryptHelper {
         let policy = StandardPolicy::new();
         for pkesk in pkesks {
             for cert in &self.secret_keys {
-                for ka in cert
-                    .keys()
-                    .with_policy(&policy, None)
-                    .supported()
-                    .secret()
-                {
+                for ka in cert.keys().with_policy(&policy, None).supported().secret() {
                     if let Some(flags) = ka.key_flags() {
                         if flags.for_transport_encryption() || flags.for_storage_encryption() {
                             if let Ok(mut kp) = ka.key().clone().into_keypair() {
-                                if let Some((algo, session_key)) =
-                                    pkesk.decrypt(&mut kp, _sym_algo)
+                                if let Some((algo, session_key)) = pkesk.decrypt(&mut kp, _sym_algo)
                                 {
                                     if decrypt(algo, &session_key) {
                                         return Ok(Some(cert.fingerprint()));
@@ -270,11 +261,14 @@ pub fn private_decrypt(
     secret_keys: &[Cert],
     passwords: &[Vec<u8>],
     accept: &[String],
-) -> Result<(Vec<u8>, Vec<String>), PgpError> {
+) -> napi::Result<(Vec<u8>, Vec<String>), PgpError> {
     let policy = StandardPolicy::new();
     let signers = Rc::new(RefCell::new(Vec::new()));
     let helper = DecryptHelper {
-        passwords: passwords.iter().map(|p| Password::from(p.as_slice())).collect(),
+        passwords: passwords
+            .iter()
+            .map(|p| Password::from(p.as_slice()))
+            .collect(),
         secret_keys: secret_keys.to_vec(),
         accept: accept.to_vec(),
         signers: signers.clone(),
@@ -294,7 +288,7 @@ pub fn random_bytes(n: usize) -> Vec<u8> {
 }
 
 /// Hex digest of `data` for the named algorithm (mirrors `gpg --print-md`).
-pub fn hex_hash(algo: &str, data: &[u8]) -> Result<String, PgpError> {
+pub fn hex_hash(algo: &str, data: &[u8]) -> napi::Result<String, PgpError> {
     use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
     let upper = algo.to_ascii_uppercase();
     let out: Vec<u8> = match upper.as_str() {
@@ -336,10 +330,7 @@ pub struct Pgp;
 #[napi]
 impl Pgp {
     #[napi(js_name = "symmetricEncrypt")]
-    pub fn napi_symmetric_encrypt(
-        passphrase: Buffer,
-        plaintext: Buffer,
-    ) -> napi::Result<Buffer> {
+    pub fn napi_symmetric_encrypt(passphrase: Buffer, plaintext: Buffer) -> napi::Result<Buffer> {
         Ok(Buffer::from(symmetric_encrypt(
             passphrase.as_ref(),
             plaintext.as_ref(),
@@ -347,10 +338,7 @@ impl Pgp {
     }
 
     #[napi(js_name = "symmetricDecrypt")]
-    pub fn napi_symmetric_decrypt(
-        passphrase: Buffer,
-        ciphertext: Buffer,
-    ) -> napi::Result<Buffer> {
+    pub fn napi_symmetric_decrypt(passphrase: Buffer, ciphertext: Buffer) -> napi::Result<Buffer> {
         Ok(Buffer::from(symmetric_decrypt(
             passphrase.as_ref(),
             ciphertext.as_ref(),
@@ -455,10 +443,7 @@ mod tests {
         // Decrypt with alice's secret key; verify the signature.
         let (dec, signers) = private_decrypt(&ct, &[cert.clone()], &[], &[]).unwrap();
         assert_eq!(dec, pt);
-        assert!(
-            !signers.is_empty(),
-            "expected at least one verified signer"
-        );
+        assert!(!signers.is_empty(), "expected at least one verified signer");
 
         // accepted_signers restricting to alice's fingerprint must succeed.
         let fp = cert.fingerprint().to_hex();

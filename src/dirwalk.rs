@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use napi::Result;
+use crate::error::RepositoryResult as Result;
 use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
 use napi_derive::napi;
@@ -131,7 +131,7 @@ impl Task for DirwalkTask {
     type Output = DirwalkResult;
     type JsValue = DirwalkResult;
 
-    fn compute(&mut self) -> Result<DirwalkResult> {
+    fn compute(&mut self) -> napi::Result<DirwalkResult> {
         let r = thread_local(&self.repo);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -168,7 +168,7 @@ impl Task for DirwalkTask {
         })
     }
 
-    fn resolve(&mut self, _env: napi::Env, output: DirwalkResult) -> Result<DirwalkResult> {
+    fn resolve(&mut self, _env: napi::Env, output: DirwalkResult) -> napi::Result<DirwalkResult> {
         Ok(output)
     }
 }
@@ -231,7 +231,7 @@ impl Repository {
         &self,
         patterns: Vec<String>,
         options: Option<DirwalkOptions>,
-    ) -> Result<AsyncTask<DirwalkTask>> {
+    ) -> napi::Result<AsyncTask<DirwalkTask>> {
         Ok(AsyncTask::new(DirwalkTask {
             repo: Arc::clone(&self.inner),
             patterns,
