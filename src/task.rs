@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use napi::Env;
-use napi::Result;
+use crate::error::RepositoryResult as Result;
 use napi::Task;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
@@ -17,7 +17,7 @@ pub struct TaskOps {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
 }
 
-async fn run_git_cmd(repo: &Arc<gix::ThreadSafeRepository>, args: &[&str]) -> Result<String> {
+async fn run_git_cmd(repo: &Arc<gix::ThreadSafeRepository>, args: &[&str]) -> napi::Result<String> {
     let r = thread_local(repo);
     let cwd = r.workdir().map(|p| p.to_path_buf()).unwrap_or_else(|| r.path().to_path_buf());
     let git_bin = find_git().unwrap_or_else(|| std::path::PathBuf::from("git"));
@@ -52,7 +52,7 @@ impl TaskOps {
     /// Equivalent to `git checkout -b <name> <base>`. Errors if a branch
     /// named `name` already exists.
     #[napi]
-    pub async fn feature_branch(&self, name: String, base: String) -> Result<()> {
+    pub async fn feature_branch(&self, name: String, base: String) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         let full_branch_name = format!("refs/heads/{name}");
         if r.try_find_reference(&full_branch_name)
@@ -73,7 +73,7 @@ impl TaskOps {
     /// Equivalent to `git add -A` followed by `git commit -m <message>`.
     /// Errors if there is nothing to commit.
     #[napi]
-    pub async fn commit_all(&self, message: String) -> Result<()> {
+    pub async fn commit_all(&self, message: String) -> napi::Result<()> {
         run_git_cmd(&self.repo, &["add", "-A"]).await?;
         run_git_cmd(&self.repo, &["commit", "-m", &message]).await?;
         Ok(())
@@ -84,7 +84,7 @@ impl TaskOps {
     /// Equivalent to `git pull --rebase`. Errors if no upstream is configured
     /// or the rebase has conflicts.
     #[napi]
-    pub async fn sync(&self) -> Result<()> {
+    pub async fn sync(&self) -> napi::Result<()> {
         run_git_cmd(&self.repo, &["pull", "--rebase"]).await?;
         Ok(())
     }
@@ -95,7 +95,7 @@ impl TaskOps {
     /// but **not** committed — callers should follow up with
     /// [`commit_all`](Self::commit_all) or a raw commit to record them.
     #[napi]
-    pub async fn squash_merge(&self, branch: String) -> Result<()> {
+    pub async fn squash_merge(&self, branch: String) -> napi::Result<()> {
         run_git_cmd(&self.repo, &["merge", "--squash", &branch]).await?;
         Ok(())
     }
@@ -128,7 +128,7 @@ impl Task for StreamTask {
     type Output = Vec<StreamEntry>;
     type JsValue = Vec<StreamEntry>;
 
-    fn compute(&mut self) -> Result<Vec<StreamEntry>> {
+    fn compute(&mut self) -> napi::Result<Vec<StreamEntry>> {
         let r = thread_local(&self.repo);
         let id = parse_oid(&self.tree_id)?;
         let (mut stream, _index) = r
@@ -152,7 +152,7 @@ impl Task for StreamTask {
         Ok(out)
     }
 
-    fn resolve(&mut self, _env: Env, output: Vec<StreamEntry>) -> Result<Vec<StreamEntry>> {
+    fn resolve(&mut self, _env: Env, output: Vec<StreamEntry>) -> napi::Result<Vec<StreamEntry>> {
         Ok(output)
     }
 }
@@ -173,7 +173,7 @@ impl Task for StreamRawTask {
     type Output = Vec<u8>;
     type JsValue = Buffer;
 
-    fn compute(&mut self) -> Result<Vec<u8>> {
+    fn compute(&mut self) -> napi::Result<Vec<u8>> {
         let r = thread_local(&self.repo);
         let id = parse_oid(&self.tree_id)?;
         let (stream, _index) = r
@@ -185,7 +185,7 @@ impl Task for StreamRawTask {
         Ok(bytes)
     }
 
-    fn resolve(&mut self, _env: Env, output: Vec<u8>) -> Result<Buffer> {
+    fn resolve(&mut self, _env: Env, output: Vec<u8>) -> napi::Result<Buffer> {
         Ok(Buffer::from(output))
     }
 }
@@ -218,7 +218,7 @@ impl Task for AddWorktreeTask {
     type Output = Repository;
     type JsValue = Repository;
 
-    fn compute(&mut self) -> Result<Repository> {
+    fn compute(&mut self) -> napi::Result<Repository> {
         let r = thread_local(&self.repo);
         let head = match self.head_kind {
             WorktreeHeadKind::Detached => {
@@ -248,7 +248,7 @@ impl Task for AddWorktreeTask {
         })
     }
 
-    fn resolve(&mut self, _env: Env, output: Repository) -> Result<Repository> {
+    fn resolve(&mut self, _env: Env, output: Repository) -> napi::Result<Repository> {
         Ok(output)
     }
 }
@@ -274,7 +274,7 @@ impl Task for RemoveWorktreeTask {
     type Output = ();
     type JsValue = ();
 
-    fn compute(&mut self) -> Result<()> {
+    fn compute(&mut self) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         r.remove_worktree(
             std::path::Path::new(&self.target),
@@ -284,7 +284,7 @@ impl Task for RemoveWorktreeTask {
         .map_err(|e| err("remove_worktree", e))
     }
 
-    fn resolve(&mut self, _env: Env, output: ()) -> Result<()> {
+    fn resolve(&mut self, _env: Env, output: ()) -> napi::Result<()> {
         Ok(output)
     }
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use napi::Result;
+use crate::error::RepositoryResult as Result;
 use napi_derive::napi;
 
 use crate::error::{cached_namespace_get, cached_namespace_set, err, thread_local};
@@ -22,7 +22,7 @@ pub(crate) fn namespace_canonical(raw: &str) -> String {
 /// `foo` becomes `refs/namespaces/foo/`, and `foo/bar` is treated as two nested
 /// namespaces: `refs/namespaces/foo/refs/namespaces/bar/`.
 #[napi]
-pub fn namespace_expand(namespace: String) -> Result<String> {
+pub fn namespace_expand(namespace: String) -> napi::Result<String> {
     gix::refs::namespace::expand(namespace.as_str())
         .map(|n| String::from_utf8_lossy(n.as_bstr()).into_owned())
         .map_err(|e| err("namespace_expand", e))
@@ -43,7 +43,7 @@ impl Repository {
     /// Set the reference namespace and return the previously set one (if any), in
     /// canonical form.
     #[napi]
-    pub fn set_namespace(&self, ns: String) -> Result<Option<String>> {
+    pub fn set_namespace(&self, ns: String) -> napi::Result<Option<String>> {
         let key = Arc::as_ptr(&self.inner) as usize;
         let previous = cached_namespace_get(key).map(|raw| namespace_canonical(&raw));
         // Validate against gix (and derive the canonical form) before caching the
@@ -61,7 +61,7 @@ impl Repository {
     /// Clear the reference namespace and return the previously set one (if any), in
     /// canonical form.
     #[napi]
-    pub fn clear_namespace(&self) -> Result<Option<String>> {
+    pub fn clear_namespace(&self) -> napi::Result<Option<String>> {
         let key = Arc::as_ptr(&self.inner) as usize;
         let previous = cached_namespace_get(key).map(|raw| namespace_canonical(&raw));
         let mut r = thread_local(&self.inner);
@@ -81,7 +81,7 @@ impl Reference {
     /// expanded prefixes and arbitrary ref prefixes like `refs/heads/` are not
     /// namespace names and will not match.
     #[napi]
-    pub fn name_without_namespace(&self, namespace: String) -> Result<Option<String>> {
+    pub fn name_without_namespace(&self, namespace: String) -> napi::Result<Option<String>> {
         let namespace = gix::refs::namespace::expand(namespace.as_str())
             .map_err(|e| err("namespace_expand", e))?;
         let full_name =
