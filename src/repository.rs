@@ -1,20 +1,16 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use napi::Env;
-use napi::Result;
-use napi::Task;
-use napi::bindgen_prelude::{AsyncTask, Buffer, Either4, Function};
-use napi::threadsafe_function::ThreadsafeFunction;
+use crate::error::RepositoryResult as Result;
+use napi::bindgen_prelude::{Buffer, Either4};
 use napi_derive::napi;
 
 use crate::error::{
     cached_namespace_get, cached_namespace_set, err, err_str, parse_oid, thread_local,
 };
 use crate::object::kind_to_string;
-use crate::progress::{ProgressCallback, ProgressEvent};
 
-pub(crate) fn current_repo() -> Result<Arc<gix::ThreadSafeRepository>> {
+pub(crate) fn current_repo() -> napi::Result<Arc<gix::ThreadSafeRepository>> {
     for var in ["GIT_DIR", "REPO_DIR"] {
         if let Ok(p) = std::env::var(var) {
             if !p.is_empty() {
@@ -77,14 +73,6 @@ pub struct IndexEntry {
     pub flags: u32,
 }
 
-/// A single status item for working tree / index.
-#[derive(Clone)]
-#[napi(object)]
-pub struct StatusEntry {
-    pub path: String,
-    pub status: String,
-}
-
 /// Information about a git submodule.
 /// A git note attached to an object.
 #[derive(Clone)]
@@ -129,175 +117,25 @@ pub struct StatOptions {
     pub use_stdev: bool,
 }
 
-/// Checkout task running on libuv thread pool.
-pub struct CheckoutTask {
-    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
-    pub(crate) target: String,
-}
-
-impl Task for CheckoutTask {
-    type Output = String;
-    type JsValue = String;
-
-    fn compute(&mut self) -> Result<String> {
-        let r = thread_local(&self.repo);
-        let oid = parse_oid(&self.target)?;
-        let commit = r.find_commit(oid).map_err(|e| err("find_commit", e))?;
-        let tree_id = commit.tree_id().map_err(|e| err("tree_id", e))?;
-
-        let label = format!("checkout {}", self.target);
-        r.reference(
-            "HEAD",
-            oid,
-            gix::refs::transaction::PreviousValue::Any,
-            label,
-        )
-        .map_err(|e| err("checkout_head", e))?;
-
-        let mut file = r
-            .index_from_tree(&tree_id)
-            .map_err(|e| err("index_from_tree", e))?;
-        file.write(Default::default())
-            .map_err(|e| err("write_index", e))?;
-
-        Ok(oid.to_string())
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: String) -> Result<String> {
-        Ok(output)
-    }
-}
-
-/// Status computation task running on libuv thread pool.
-pub struct StatusTask {
-    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
-}
-
-impl Task for StatusTask {
-    type Output = Vec<StatusEntry>;
-    type JsValue = Vec<StatusEntry>;
-
-    fn compute(&mut self) -> Result<Vec<StatusEntry>> {
-        let r = thread_local(&self.repo);
-        let platform = r
-            .status(gix::progress::Discard)
-            .map_err(|e| err("status", e))?;
-        let mut out = Vec::new();
-        let iter = platform
-            .into_index_worktree_iter(Vec::<gix::bstr::BString>::new())
-            .map_err(|e| err("status iter", e))?;
-        for item in iter {
-            let item = item.map_err(|e| err("status item", e))?;
-            let path = lossy(item.rela_path());
-            let status = format!("{item:?}");
-            out.push(StatusEntry { path, status });
-        }
-        Ok(out)
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Vec<StatusEntry>) -> Result<Vec<StatusEntry>> {
-        Ok(output)
-    }
-}
-
-/// Blocking clone work, executed on the libuv thread pool by [`AsyncTask`].
-pub struct CloneTask {
-    url: String,
-    path: String,
-    bare: bool,
-    progress: Option<Arc<ThreadsafeFunction<ProgressEvent, ()>>>,
-}
-
-impl Task for CloneTask {
-    type Output = Repository;
-    type JsValue = Repository;
-
-    fn compute(&mut self) -> Result<Repository> {
-        if std::env::var_os("GIT_COMMITTER_NAME").is_none() {
-            unsafe { std::env::set_var("GIT_COMMITTER_NAME", "gitoxide") };
-        }
-        if std::env::var_os("GIT_COMMITTER_EMAIL").is_none() {
-            unsafe { std::env::set_var("GIT_COMMITTER_EMAIL", "gitoxide@localhost") };
-        }
-        if std::env::var_os("GIT_AUTHOR_NAME").is_none() {
-            unsafe { std::env::set_var("GIT_AUTHOR_NAME", "gitoxide") };
-        }
-        if std::env::var_os("GIT_AUTHOR_EMAIL").is_none() {
-            unsafe { std::env::set_var("GIT_AUTHOR_EMAIL", "gitoxide@localhost") };
-        }
-
-        let url = self.url.clone();
-        let path = self.path.clone();
-        let bare = self.bare;
-
-        // Try a gix-native clone first.
-        let gix_repo = (|| {
-            let mut prepare = if bare {
-                gix::prepare_clone_bare(url.as_str(), &path)
-            } else {
-                gix::prepare_clone(url.as_str(), &path)
-            }
-            .ok()?;
-            let interrupt = AtomicBool::new(false);
-            let progress = ProgressCallback::new(self.progress.clone());
-            let (repo, _outcome) = prepare.fetch_only(progress, &interrupt).ok()?;
-            Some(repo.into())
-        })();
-
-        if let Some(repo) = gix_repo {
-            return Ok(Repository {
-                inner: Arc::new(repo),
-            });
-        }
-
-        // Fallback: shell out to the system `git` binary. This is robust to environments
-        // where git is not on PATH (we probe well-known absolute locations) and to gix
-        // ref-update edge cases on local clones.
-        if let Some(git) = find_git() {
-            let _ = std::fs::remove_dir_all(&path);
-            let mut cmd = std::process::Command::new(&git);
-            cmd.arg("clone").arg("--local");
-            if bare {
-                cmd.arg("--bare");
-            }
-            cmd.arg(&url).arg(&path);
-            match cmd.output() {
-                Ok(out) if out.status.success() => {
-                    let ts = gix::ThreadSafeRepository::open(&path)
-                        .map_err(|e| napi::Error::from_reason(format!("open: {e}")))?;
-                    return Ok(Repository {
-                        inner: Arc::new(ts),
-                    });
-                }
-                Ok(out) => {
-                    return Err(napi::Error::from_reason(format!(
-                        "git clone failed: {}",
-                        String::from_utf8_lossy(&out.stderr)
-                    )));
-                }
-                Err(e) => {
-                    return Err(napi::Error::from_reason(format!(
-                        "failed to spawn git at {}: {e}",
-                        git.display()
-                    )));
-                }
-            }
-        }
-
-        Err(napi::Error::from_reason(
-            "clone failed (gix unavailable) and no system git binary was found",
-        ))
-    }
-
-    fn resolve(&mut self, _env: napi::Env, output: Repository) -> Result<Repository> {
-        Ok(output)
-    }
-}
-
 /// The primary handle to a git repository, exposed to TypeScript as a class.
 ///
 /// Internally wraps `Arc<gix::ThreadSafeRepository>` so it can be shared and offloaded to worker
 /// threads for async network operations, while sync methods obtain a cheap thread-local view.
+///
+/// This is a *handle-based* API (open a `Repository` once, then call methods on it) rather than
+/// the stateless, path-per-call style some git2 wrappers use. The equivalents of common
+/// path-based helpers are:
+///
+/// | Path-based helper | `Repository` method (sync unless noted) |
+/// |---|---|
+/// | `is_repo(dir)` | `Repository.isRepo(dir)` (static) |
+/// | `is_dirty(dir)` | `repo.isDirty()` (async Task) |
+/// | `get_current_hash(dir)` | `repo.headId()` |
+/// | `rev_as_hash(dir, rev)` | `repo.revToHash(rev)` / `repo.revParse(rev)` |
+/// | `clone_repo(url, dir)` | `Repository.clone(url, dir?)` (async) / `Cloner` |
+/// | `checkout(hash, dir)` | `repo.checkout(rev, opts?)` (async) |
+/// | `fetch()` | `repo.fetch(remoteName?, opts?)` (async) / `Remote.fetch` |
+/// | `credentials_callback` | `GitAuthenticator` passed via `auth` option |
 #[napi]
 pub struct Repository {
     pub(crate) inner: Arc<gix::ThreadSafeRepository>,
@@ -423,7 +261,7 @@ impl Repository {
     /// without it, one is discovered by walking up from the current directory
     /// (like [`Repository::discover`]).
     #[napi(constructor)]
-    pub fn new(path: Option<String>) -> Result<Repository> {
+    pub fn new(path: Option<String>) -> napi::Result<Repository> {
         match path {
             Some(p) => Self::open(p),
             None => Self::discover(None),
@@ -432,7 +270,7 @@ impl Repository {
 
     /// Discover a repository by walking up from `path` (or the current directory if omitted).
     #[napi]
-    pub fn discover(path: Option<String>) -> Result<Repository> {
+    pub fn discover(path: Option<String>) -> napi::Result<Repository> {
         let p = path.unwrap_or_else(|| ".".to_string());
         let r = gix::discover(p).map_err(|e| err("discover", e))?;
         Ok(Repository {
@@ -444,7 +282,7 @@ impl Repository {
     pub fn discover_with_environment_overrides(
         directory: Option<String>,
         trust_map: Option<TrustMapping>,
-    ) -> Result<Repository> {
+    ) -> napi::Result<Repository> {
         let p = directory.unwrap_or_else(|| ".".to_string());
         let ts = match trust_map {
             Some(tm) => gix::ThreadSafeRepository::discover_with_environment_overrides_opts(
@@ -475,7 +313,7 @@ impl Repository {
     pub fn open_with_environment_overrides(
         directory: Option<String>,
         trust_map: Option<TrustMapping>,
-    ) -> Result<Repository> {
+    ) -> napi::Result<Repository> {
         let p = directory.unwrap_or_else(|| ".".to_string());
         let ts = match trust_map {
             Some(tm) => gix::ThreadSafeRepository::open_with_environment_overrides(
@@ -492,45 +330,26 @@ impl Repository {
         })
     }
 
-    /// Clone a repository from `url` into `path`.
-    ///
-    /// Async: the (blocking) network transfer runs on a libuv worker thread and resolves a
-    /// `Promise<Repository>`.
-    #[napi(ts_return_type = "Promise<Repository>")]
-    pub fn clone(
-        url: String,
-        path: String,
-        bare: Option<bool>,
-        _env: Env,
-        progress: Option<Function<ProgressEvent, ()>>,
-    ) -> Result<AsyncTask<CloneTask>> {
-        let tsfn = match progress {
-            Some(f) => {
-                let builder = f.build_threadsafe_function::<ProgressEvent>();
-                Some(Arc::new(builder.callee_handled().build()?))
-            }
-            None => None,
-        };
-        Ok(AsyncTask::new(CloneTask {
-            url,
-            path,
-            bare: bare.unwrap_or(false),
-            progress: tsfn,
-        }))
-    }
-
     /// Open the repository at `path` (expands `path/.git` for worktrees).
     #[napi]
-    pub fn open(path: String) -> Result<Repository> {
+    pub fn open(path: String) -> napi::Result<Repository> {
         let ts = gix::ThreadSafeRepository::open(path).map_err(|e| err("open", e))?;
         Ok(Repository {
             inner: Arc::new(ts),
         })
     }
 
+    /// Whether `path` is a git repository (opens exactly that location; like the
+    /// reference's `is_repo(dir)`). Returns `false` instead of throwing when the
+    /// path is not a repository or cannot be opened.
+    #[napi]
+    pub fn is_repo(path: String) -> bool {
+        gix::ThreadSafeRepository::open(path).is_ok()
+    }
+
     /// Open a repository with the given `options` (trust, config overrides, strict/lossy config, …).
     #[napi]
-    pub fn open_opts(path: String, options: OpenOptions) -> Result<Repository> {
+    pub fn open_opts(path: String, options: OpenOptions) -> napi::Result<Repository> {
         let ts = gix::ThreadSafeRepository::open_opts(path, to_gix_open_options(options))
             .map_err(|e| err("open_opts", e))?;
         Ok(Repository {
@@ -540,7 +359,7 @@ impl Repository {
 
     /// Initialize a repository with the given `options` (`bare`, `destinationMustBeEmpty`, open options).
     #[napi]
-    pub fn init_opts(path: String, options: InitOptions) -> Result<Repository> {
+    pub fn init_opts(path: String, options: InitOptions) -> napi::Result<Repository> {
         let kind = if options.bare.unwrap_or(false) {
             gix::create::Kind::Bare
         } else {
@@ -560,7 +379,7 @@ impl Repository {
 
     /// Initialize a repository at `path`. Pass `bare: true` for a bare repository.
     #[napi]
-    pub fn init(path: String, bare: Option<bool>) -> Result<Repository> {
+    pub fn init(path: String, bare: Option<bool>) -> napi::Result<Repository> {
         let r = if bare.unwrap_or(false) {
             gix::init_bare(path)
         } else {
@@ -581,7 +400,7 @@ impl Repository {
 
     /// Reset HEAD, index, and optionally working tree to target.
     #[napi]
-    pub fn reset(&self, target: String, hard: Option<bool>) -> Result<()> {
+    pub fn reset(&self, target: String, hard: Option<bool>) -> napi::Result<()> {
         let r = thread_local(&self.inner);
         let oid = parse_oid(&target)?;
         let commit = r.find_commit(oid).map_err(|e| err("find_commit", e))?;
@@ -614,7 +433,7 @@ impl Repository {
 
     /// Return the main repository if this is a linked worktree.
     #[napi]
-    pub fn main_repository(&self) -> Result<Repository> {
+    pub fn main_repository(&self) -> napi::Result<Repository> {
         let r = thread_local(&self.inner);
         let main_repo = r.main_repo().map_err(|e| err("main_repo", e))?;
         Ok(Repository {
@@ -648,7 +467,7 @@ impl Repository {
     /// Filesystem capabilities as configured for this repository, e.g. whether the
     /// executable bit and symlinks are honored, and how unicode/case are treated.
     #[napi]
-    pub fn filesystem_options(&self) -> Result<FsCapabilities> {
+    pub fn filesystem_options(&self) -> napi::Result<FsCapabilities> {
         let r = thread_local(&self.inner);
         let caps = r
             .filesystem_options()
@@ -663,7 +482,7 @@ impl Repository {
 
     /// How stat information is compared when checking index entries for up-to-dateness.
     #[napi]
-    pub fn stat_options(&self) -> Result<StatOptions> {
+    pub fn stat_options(&self) -> napi::Result<StatOptions> {
         let r = thread_local(&self.inner);
         let opts = r.stat_options().map_err(|e| err("stat_options", e))?;
         Ok(StatOptions {
@@ -702,23 +521,6 @@ impl Repository {
         format!("{:?}", r.object_hash())
     }
 
-    /// Compute working tree status asynchronously.
-    #[napi(ts_return_type = "Promise<Vec<StatusEntry>>")]
-    pub fn status(&self) -> Result<AsyncTask<StatusTask>> {
-        Ok(AsyncTask::new(StatusTask {
-            repo: Arc::clone(&self.inner),
-        }))
-    }
-
-    /// Checkout a target commit asynchronously.
-    #[napi(ts_return_type = "Promise<String>")]
-    pub fn checkout(&self, target: String) -> Result<AsyncTask<CheckoutTask>> {
-        Ok(AsyncTask::new(CheckoutTask {
-            repo: Arc::clone(&self.inner),
-            target,
-        }))
-    }
-
     /// The operation currently in progress (e.g. `Merge`, `Rebase`, `CherryPick`), or `null`.
     #[napi]
     pub fn state(&self) -> Option<String> {
@@ -752,7 +554,7 @@ impl Repository {
 
     /// The directory the git binary was installed to (used for exec-path lookups).
     #[napi]
-    pub fn install_dir(&self) -> Result<String> {
+    pub fn install_dir(&self) -> napi::Result<String> {
         let r = thread_local(&self.inner);
         r.install_dir()
             .map(|p| p.display().to_string())
@@ -761,7 +563,7 @@ impl Repository {
 
     /// The relative path between the working tree and the current working dir, or `null`.
     #[napi]
-    pub fn prefix(&self) -> Result<Option<String>> {
+    pub fn prefix(&self) -> napi::Result<Option<String>> {
         let r = thread_local(&self.inner);
         Ok(r.prefix()
             .map_err(|e| err("prefix", e))?
@@ -770,7 +572,7 @@ impl Repository {
 
     /// Normalize `path` into a repository-relative Git path with slash separators.
     #[napi]
-    pub fn normalize_path(&self, path: String) -> Result<String> {
+    pub fn normalize_path(&self, path: String) -> napi::Result<String> {
         let r = thread_local(&self.inner);
         let normalized = r
             .normalize_path(path.as_str())
@@ -796,7 +598,7 @@ impl Repository {
 
     /// Replace the working tree directory (validated to exist), returning the previous one.
     #[napi]
-    pub fn set_workdir(&self, workdir: Option<String>) -> Result<Option<String>> {
+    pub fn set_workdir(&self, workdir: Option<String>) -> napi::Result<Option<String>> {
         let mut r = thread_local(&self.inner);
         let previous = r
             .set_workdir(workdir.map(std::path::PathBuf::from))
@@ -804,64 +606,9 @@ impl Repository {
         Ok(previous.map(|p| p.display().to_string()))
     }
 
-    /// Read commit history (a "git log") starting at `rev` (or HEAD).
-    ///
-    /// Returns commit summaries in reverse-chronological order. `limit` caps the number of
-    /// commits; `firstParent` restricts the walk to first-parent history. This resolves the
-    /// whole range in one call (no per-commit round-trips).
-    #[napi]
-    pub fn log(
-        &self,
-        rev: Option<String>,
-        limit: Option<f64>,
-        first_parent: Option<bool>,
-    ) -> Result<Vec<LogEntry>> {
-        let r = thread_local(&self.inner);
-        let tip: gix::ObjectId = match &rev {
-            Some(s) => r
-                .rev_parse_single(s.as_str())
-                .map_err(|e| err("rev_parse_single", e))?
-                .into(),
-            None => r.head_id().map_err(|e| err("head_id", e))?.into(),
-        };
-        let limit = limit.map(|l| l as usize);
-        let mut out = Vec::new();
-
-        if first_parent.unwrap_or(false) {
-            let mut current = Some(tip);
-            while let Some(id) = current {
-                let (entry, parents) = log_summary(&r, id)?;
-                out.push(entry);
-                if let Some(l) = limit {
-                    if out.len() >= l {
-                        break;
-                    }
-                }
-                current = parents
-                    .into_iter()
-                    .next()
-                    .map(|p| parse_oid(&p))
-                    .transpose()?;
-            }
-        } else {
-            let platform = r.rev_walk([tip]);
-            for id in platform.all().map_err(|e| err("rev_walk", e))? {
-                let id = id.map_err(|e| err("rev_walk item", e))?;
-                let (entry, _parents) = log_summary(&r, id.id)?;
-                out.push(entry);
-                if let Some(l) = limit {
-                    if out.len() >= l {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-
     /// Return true if `ancestor` is an ancestor of (or equal to) `descendant`.
     #[napi]
-    pub fn is_ancestor(&self, ancestor: String, descendant: String) -> Result<bool> {
+    pub fn is_ancestor(&self, ancestor: String, descendant: String) -> napi::Result<bool> {
         let r = thread_local(&self.inner);
         let ancestor_oid = parse_oid(&ancestor)?;
         let descendant_oid = parse_oid(&descendant)?;
@@ -874,14 +621,14 @@ impl Repository {
 
     /// True if this repository is a shallow clone.
     #[napi]
-    pub fn is_shallow(&self) -> Result<bool> {
+    pub fn is_shallow(&self) -> napi::Result<bool> {
         let r = thread_local(&self.inner);
         r.is_shallow().map_err(|e| err("is_shallow", e))
     }
 
     /// Path to the `shallow` file (may not exist if not a shallow clone).
     #[napi]
-    pub fn shallow_file(&self) -> Result<String> {
+    pub fn shallow_file(&self) -> napi::Result<String> {
         let r = thread_local(&self.inner);
         let path = r.shallow_file().map_err(|e| err("shallow_file", e))?;
         Ok(path.to_string_lossy().into_owned())
@@ -889,7 +636,7 @@ impl Repository {
 
     /// List the shallow boundary commits, or `null` if the repo is not shallow.
     #[napi]
-    pub fn shallow_commits(&self) -> Result<Option<Vec<String>>> {
+    pub fn shallow_commits(&self) -> napi::Result<Option<Vec<String>>> {
         let r = thread_local(&self.inner);
         let path = r.shallow_file().map_err(|e| err("shallow_file", e))?;
         if !path.exists() {
@@ -911,14 +658,6 @@ impl Repository {
         Ok(Some(ids))
     }
 
-    /// Compute the index↔worktree status (same underlying computation as [`status`](Self::status)).
-    #[napi]
-    pub fn index_worktree(&self) -> Result<AsyncTask<StatusTask>> {
-        Ok(AsyncTask::new(StatusTask {
-            repo: self.inner.clone(),
-        }))
-    }
-
     /// Print an object's content, type, or size — a TypeScript port of `git cat-file`.
     ///
     /// `spec` is resolved like `git rev-parse`: an object id, a ref or ref-like name
@@ -932,12 +671,113 @@ impl Repository {
     ///
     /// `repo.catFile(...)` throws if `spec` cannot be resolved; use `mode: "exists"` to probe
     /// without raising.
+    /// Whether the repository has no commits yet (HEAD cannot resolve to a commit object).
+    ///
+    /// Mirrors git2's `git_repository_is_empty`.
+    #[napi]
+    pub fn is_empty(&self) -> napi::Result<bool> {
+        let r = thread_local(&self.inner);
+        match r.head_commit() {
+            Ok(_) => Ok(false),
+            Err(_) => Ok(true),
+        }
+    }
+
+    /// Read the in-progress commit message (`.git/COMMIT_EDITMSG`), or `null` when none is
+    /// pending. Mirrors git2's `git_repository_message`.
+    #[napi]
+    pub fn message(&self) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let p = r.git_dir().join("COMMIT_EDITMSG");
+        match std::fs::read_to_string(&p) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(err("message", e)),
+        }
+    }
+
+    /// Remove the in-progress commit message file. Mirrors git2's
+    /// `git_repository_message_remove`.
+    #[napi]
+    pub fn remove_message(&self) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let p = r.git_dir().join("COMMIT_EDITMSG");
+        match std::fs::remove_file(&p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(err("remove_message", e)),
+        }
+    }
+
+    /// Disambiguate an abbreviated object id prefix to a full object id, or `null` if no unique
+    /// object matches. Mirrors git2's `git_object_id_by_prefix` / `find_object_by_prefix`.
+    #[napi]
+    pub fn find_object_by_prefix(&self, prefix: String) -> napi::Result<Option<String>> {
+        Ok(self.rev_parse_single(prefix).ok())
+    }
+
+    /// Like [`find_object_by_prefix`](Self::find_object_by_prefix), but only returns the id when
+    /// the resolved object is a commit.
+    #[napi]
+    pub fn find_commit_by_prefix(&self, prefix: String) -> napi::Result<Option<String>> {
+        self.find_object_by_prefix_of_kind(prefix, gix::object::Kind::Commit)
+    }
+
+    /// Like [`find_object_by_prefix`](Self::find_object_by_prefix), but only returns the id when
+    /// the resolved object is a tag.
+    #[napi]
+    pub fn find_tag_by_prefix(&self, prefix: String) -> napi::Result<Option<String>> {
+        self.find_object_by_prefix_of_kind(prefix, gix::object::Kind::Tag)
+    }
+
+    /// Resolve `spec` to a full object id string, or `null` if it cannot be resolved.
+    ///
+    /// Thin, non-throwing convenience over [`rev_parse_single`](Self::rev_parse_single)
+    /// for the common "rev → hash" case (mirrors the reference's `rev_as_hash`). Unlike
+    /// `rev_parse_single`, this returns `null` rather than throwing on an unresolvable spec.
+    #[napi]
+    pub fn rev_to_hash(&self, spec: String) -> napi::Result<Option<String>> {
+        Ok(self.rev_parse_single(spec).ok())
+    }
+
+    fn find_object_by_prefix_of_kind(
+        &self,
+        prefix: String,
+        want: gix::object::Kind,
+    ) -> napi::Result<Option<String>> {
+        let id = match self.rev_parse_single(prefix) {
+            Ok(id) => id,
+            Err(_) => return Ok(None),
+        };
+        let r = thread_local(&self.inner);
+        let oid = parse_oid(&id)?;
+        match r.find_object(oid) {
+            Ok(obj) if obj.kind == want => Ok(Some(id)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Perform a mixed reset: move HEAD and reset the index to the target's tree while leaving the
+    /// working tree untouched. This is git2's `reset_default` (equivalent to `reset(target, false)`).
+    #[napi]
+    pub fn reset_default(&self, target: String) -> napi::Result<()> {
+        self.reset(target, Some(false))
+    }
+
+    /// Open the repository named by the `GIT_DIR` (or `REPO_DIR`) environment variable, falling
+    /// back to discovery of the current directory. Mirrors git2's `git_repository_open_from_env`.
+    #[napi]
+    pub fn open_from_env() -> napi::Result<Repository> {
+        let ts = current_repo()?;
+        Ok(Repository { inner: ts })
+    }
+
     #[napi]
     pub fn cat_file(
         &self,
         spec: String,
         options: Option<CatFileOptions>,
-    ) -> Result<Either4<Buffer, String, f64, bool>> {
+    ) -> napi::Result<Either4<Buffer, String, f64, bool>> {
         let r = thread_local(&self.inner);
         let mode = options
             .and_then(|o| o.mode)
@@ -976,59 +816,4 @@ impl Repository {
             other => Err(err_str("cat_file", format!("invalid mode '{other}'"))),
         }
     }
-}
-
-/// A single commit summary returned by [`Repository::log`].
-#[derive(Clone)]
-#[napi(object)]
-pub struct LogEntry {
-    pub id: String,
-    /// Full commit message.
-    pub message: String,
-    /// First line (subject) of the message.
-    pub subject: String,
-    pub author_name: String,
-    pub author_email: String,
-    /// Authoring time, unix seconds.
-    pub author_time: i64,
-    pub committer_name: String,
-    pub committer_email: String,
-    /// Committing time, unix seconds.
-    pub committer_time: i64,
-    pub parent_ids: Vec<String>,
-    pub tree_id: String,
-    pub signature: Option<String>,
-}
-
-/// Decode a commit into owned data for [`LogEntry`], returning the entry plus its parent ids.
-fn log_summary(r: &gix::Repository, id: gix::ObjectId) -> Result<(LogEntry, Vec<String>)> {
-    let commit = r.find_commit(id).map_err(|e| err("find_commit", e))?;
-    let c = commit.decode().map_err(|e| err("decode commit", e))?;
-    let author = c.author().map_err(|e| err("author", e))?;
-    let committer = c.committer().map_err(|e| err("committer", e))?;
-    let at = author.time().map_err(|e| err("author time", e))?;
-    let ct = committer.time().map_err(|e| err("committer time", e))?;
-    let full = lossy(c.message);
-    let subject = full.split('\n').next().unwrap_or("").to_string();
-    let parent_ids: Vec<String> = c.parents().map(|p| p.to_string()).collect();
-    let signature = c
-        .extra_headers()
-        .find("gpgsig")
-        .or_else(|| c.extra_headers().find("gpgsig-sha256"))
-        .map(|v| lossy(v));
-    let entry = LogEntry {
-        id: id.to_string(),
-        message: full,
-        subject,
-        author_name: lossy(author.name),
-        author_email: lossy(author.email),
-        author_time: at.seconds,
-        committer_name: lossy(committer.name),
-        committer_email: lossy(committer.email),
-        committer_time: ct.seconds,
-        parent_ids: parent_ids.clone(),
-        tree_id: c.tree().to_string(),
-        signature,
-    };
-    Ok((entry, parent_ids))
 }

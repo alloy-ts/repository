@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use napi::Result;
+use crate::error::RepositoryResult;
 use napi::bindgen_prelude::{Buffer, ClassInstance, Either};
 use napi_derive::napi;
 
+use crate::blob::{Blob, build_blob};
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::object::{Object, build_object};
 use crate::replace::{ReplaceOptions, ReplaceResult};
@@ -22,7 +23,7 @@ pub(crate) fn mode_string(kind: gix::object::tree::EntryKind) -> String {
 }
 
 /// Parse a mode string into a git tree entry kind, rejecting anything else.
-pub(crate) fn mode_to_entry_kind(mode: &str) -> Result<gix::objs::tree::EntryKind> {
+pub(crate) fn mode_to_entry_kind(mode: &str) -> napi::Result<gix::objs::tree::EntryKind> {
     match mode {
         "100644" => Ok(gix::objs::tree::EntryKind::Blob),
         "100755" => Ok(gix::objs::tree::EntryKind::BlobExecutable),
@@ -146,7 +147,7 @@ impl Entry {
     /// `new Tree([entry])` / `Tree.fromEntries([entry])`, which create intermediate
     /// trees for paths containing `/`.
     #[napi(constructor)]
-    pub fn new(opts: EntryOpts) -> Result<Self> {
+    pub fn new(opts: EntryOpts) -> napi::Result<Self> {
         let inner = match opts.repo.as_ref() {
             Some(r) => Arc::clone(&r.inner),
             None => crate::repository::current_repo()?,
@@ -195,7 +196,7 @@ impl Entry {
     /// carries a repository. Repository-backed operations (`asTree`, `replace`) throw
     /// on a detached entry.
     #[napi(factory)]
-    pub fn detached(mode: String, filename: String, id: String) -> Result<Self> {
+    pub fn detached(mode: String, filename: String, id: String) -> napi::Result<Self> {
         Ok(Entry {
             repo: None,
             tree_id: None,
@@ -237,7 +238,7 @@ impl Entry {
     /// Throws for a detached entry ([`Entry::detached`]), which has no repository to
     /// resolve against.
     #[napi]
-    pub fn object(&self) -> Result<Object> {
+    pub fn object(&self) -> napi::Result<Object> {
         let repo = self.require_repo("object")?;
         build_object(repo, self.id)
     }
@@ -253,12 +254,25 @@ impl Entry {
     /// Throws for a detached entry ([`Entry::detached`]), which has no repository to
     /// resolve against.
     #[napi]
-    pub fn as_tree(&self) -> Result<Option<Tree>> {
+    pub fn as_tree(&self) -> napi::Result<Option<Tree>> {
         if !self.is_tree() {
             return Ok(None);
         }
         let repo = self.require_repo("as_tree")?;
         build_tree(repo, self.id).map(Some)
+    }
+
+    /// If this entry is a blob, resolve it as a [`Blob`]; otherwise `null`.
+    ///
+    /// Throws for a detached entry ([`Entry::detached`]), which has no repository to
+    /// resolve against.
+    #[napi]
+    pub fn to_blob(&self) -> napi::Result<Option<Blob>> {
+        if self.is_tree() {
+            return Ok(None);
+        }
+        let repo = self.require_repo("to_blob")?;
+        Ok(Some(build_blob(repo, self.id)))
     }
 
     /// Replace this entry's target object, recording a new revision in the versioned
@@ -278,7 +292,7 @@ impl Entry {
         &self,
         content: Either<Buffer, String>,
         options: Option<ReplaceOptions>,
-    ) -> Result<ReplaceResult> {
+    ) -> napi::Result<ReplaceResult> {
         let repo = Repository {
             inner: Arc::clone(self.require_repo("replace")?),
         };
@@ -286,7 +300,7 @@ impl Entry {
     }
 
     /// Return this entry's repository handle, throwing if the entry is detached.
-    fn require_repo(&self, what: &str) -> Result<&Arc<gix::ThreadSafeRepository>> {
+    fn require_repo(&self, what: &str) -> napi::Result<&Arc<gix::ThreadSafeRepository>> {
         self.repo.as_ref().ok_or_else(|| {
             err_str(
                 what,

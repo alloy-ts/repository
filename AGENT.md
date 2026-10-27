@@ -1,14 +1,16 @@
-
-Unlike defining modules in Node.js, we don't need to explicitly register exports like `module.exports.xxx = xxx`.
+Unlike defining modules in Node.js, we don't need to explicitly register exports
+like `module.exports.xxx = xxx`.
 
 The `#[napi]` macro will automatically generate module registering code for you.
-This auto registering idea was inspired by [node-bindgen](https://github.com/infinyon/node-bindgen).
+This auto registering idea was inspired by
+[node-bindgen](https://github.com/infinyon/node-bindgen).
 
 :::
 
 ## `Function`
 
-Exporting a function is incredibly simple. Just decorate a normal rust function with `#[napi]`:
+Exporting a function is incredibly simple. Just decorate a normal rust function
+with `#[napi]`:
 
 **lib.rs**
 
@@ -31,7 +33,7 @@ pub const DEFAULT_COST: u32 = 12;
 **index.d.ts**
 
 ```ts
-export const DEFAULT_COST: number
+export const DEFAULT_COST: number;
 ```
 
 ## `Class`
@@ -73,7 +75,8 @@ pub enum Kind {
 
 ## `exports` object
 
-You can use the `#[napi(module_exports)]` attribute to access the `exports` object.
+You can use the `#[napi(module_exports)]` attribute to access the `exports`
+object.
 
 **lib.rs**
 
@@ -91,12 +94,22 @@ pub fn exports(mut export: Object) -> Result<()> {
 
 ## Namespaces
 
-For larger addons you can group related exports into nested JavaScript module objects instead of flattening everything onto the root `exports`. There are two ways:
+For larger addons you can group related exports into nested JavaScript module
+objects instead of flattening everything onto the root `exports`. There are two
+ways:
 
-- `#[napi] mod name { ... }` — export an inline Rust module as a namespace. Every child item that also carries `#[napi]` is exported inside it (nested napi modules are not supported). Add `#[napi(js_name = "...")]` on the `mod` to rename the namespace object.
-- `#[napi(namespace = "...")]` on individual functions, classes, impl blocks, enums, consts, and type aliases — registers that item under `exports.<namespace>`; apply the same namespace to a class and its `impl` blocks. See [`namespace` in the attributes reference](/docs/concepts/napi-attributes#naming-and-exports).
+- `#[napi] mod name { ... }` — export an inline Rust module as a namespace.
+  Every child item that also carries `#[napi]` is exported inside it (nested
+  napi modules are not supported). Add `#[napi(js_name = "...")]` on the `mod`
+  to rename the namespace object.
+- `#[napi(namespace = "...")]` on individual functions, classes, impl blocks,
+  enums, consts, and type aliases — registers that item under
+  `exports.<namespace>`; apply the same namespace to a class and its `impl`
+  blocks. See
+  [`namespace` in the attributes reference](/docs/concepts/napi-attributes#naming-and-exports).
 
-The canonical example is [`examples/napi/src/js_mod.rs`](https://github.com/napi-rs/napi-rs/blob/main/examples/napi/src/js_mod.rs):
+The canonical example is
+[`examples/napi/src/js_mod.rs`](https://github.com/napi-rs/napi-rs/blob/main/examples/napi/src/js_mod.rs):
 
 **lib.rs**
 
@@ -147,12 +160,12 @@ The members are reached through the namespace objects on the package exports:
 **index.ts**
 
 ```ts
-import { xxh2, xxh3 } from './index.js'
+import { xxh2, xxh3 } from "./index.js";
 
-xxh3.xxh3_64(Buffer.from('hello')) // function renamed with js_name
-console.log(xxh3.ALIGNMENT) // 16
-const hasher = new xxh3.Xxh3() // classes live inside the namespace too
-xxh2.xxh2Plus(1, 2) // 3
+xxh3.xxh3_64(Buffer.from("hello")); // function renamed with js_name
+console.log(xxh3.ALIGNMENT); // 16
+const hasher = new xxh3.Xxh3(); // classes live inside the namespace too
+xxh2.xxh2Plus(1, 2); // 3
 ```
 
 And the generated `.d.ts` mirrors the nesting with `export declare namespace`:
@@ -161,14 +174,14 @@ And the generated `.d.ts` mirrors the nesting with `export declare namespace`:
 
 ```ts
 export declare namespace xxh2 {
-  export function xxh2Plus(a: number, b: number): number
+  export function xxh2Plus(a: number, b: number): number;
 }
 
 export declare namespace xxh3 {
   export class Xxh3 {
-    constructor()
+    constructor();
   }
-  export const ALIGNMENT: number
-  export function xxh3_64(input: Buffer): bigint
+  export const ALIGNMENT: number;
+  export function xxh3_64(input: Buffer): bigint;
 }
 ```

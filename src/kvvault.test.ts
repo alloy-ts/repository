@@ -1,14 +1,11 @@
-import { describe, expect, test, afterAll } from "vite-plus/test";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 import { KvVault } from "./main.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 function tmpKvPath(): string {
-  return path.join(
-    os.tmpdir(),
-    `kvvault-test-${Math.random().toString(36).slice(2)}`,
-  );
+  return path.join(os.tmpdir(), `kvvault-test-${Math.random().toString(36).slice(2)}`);
 }
 
 const createdPaths: string[] = [];
