@@ -31,7 +31,7 @@ beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-replace-"));
   cloneDir = join(base, "clone");
   try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
+    repo = await Repository.clone(realRoot, cloneDir);
   } catch {
     execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
       stdio: "ignore",
@@ -42,13 +42,20 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  rmSync(base, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 200,
+  });
 });
 
 describe("Repository replace / try_replace (draft)", () => {
   test("replace() records a Revision and catFile returns the latest content", () => {
     const id = repo.writeBlob(Buffer.from("original-contents"));
-    const out = repo.replace(id, Buffer.from("replaced-contents"), { message: "v1" });
+    const out = repo.replace(id, Buffer.from("replaced-contents"), {
+      message: "v1",
+    });
 
     expect(out.replacementId.length).toBe(40);
     expect(out.reference).toBe(`refs/replace/${id}`);
@@ -135,7 +142,9 @@ describe("Repository replace / try_replace (draft)", () => {
     const id = repo.writeBlob(Buffer.from("obj-original"));
     // `find_object` returns the kinded `GitObject` wrapper, which carries a `replace`.
     const obj = repo.find_object(id);
-    const out = obj.replace(Buffer.from("obj-replaced"), { message: "via-object" });
+    const out = obj.replace(Buffer.from("obj-replaced"), {
+      message: "via-object",
+    });
     expect(out?.replacementId.length).toBe(40);
     expect(out?.manifest.id).toBe(id);
     expect(out?.manifest.revisions.length).toBe(1);
@@ -150,10 +159,18 @@ describe("Repository replace / try_replace (draft)", () => {
   test("Entry.replace delegates to the repository replace API", () => {
     const id = repo.writeBlob(Buffer.from("entry-original"));
     // Put the blob in a tree so it can be resolved as an `Entry`.
-    const treeId = repo.writeTree([{ path: "nested/file.txt", mode: "100644", id }]);
+    const treeId = repo.writeTree([
+      {
+        path: "nested/file.txt",
+        mode: "100644",
+        id,
+      },
+    ]);
     const entry = repo.findTree(treeId).entryByPath("nested/file.txt")!;
     expect(entry).not.toBeNull();
-    const out = entry.replace(Buffer.from("entry-replaced"), { message: "via-entry" });
+    const out = entry.replace(Buffer.from("entry-replaced"), {
+      message: "via-entry",
+    });
     expect(out.replacementId.length).toBe(40);
     // Reading the original id follows the replacement.
     expect((repo.catFile(id) as Buffer).toString("utf8")).toBe("entry-replaced");
@@ -166,15 +183,25 @@ describe("Repository replace / try_replace (draft)", () => {
 describe("replace per object type", () => {
   test("blob: replace records a blob revision and follows through", () => {
     const id = repo.writeBlob(Buffer.from("blob-original"));
-    const out = repo.replace(id, Buffer.from("blob-replaced"), { message: "blob" });
+    const out = repo.replace(id, Buffer.from("blob-replaced"), {
+      message: "blob",
+    });
     expect(out.manifest.type).toBe("blob");
     expect((repo.catFile(id) as Buffer).toString("utf8")).toBe("blob-replaced");
   });
 
   test("tree: replace records a tree revision with commit provenance", () => {
     const blobId = repo.writeBlob(Buffer.from("tree-blob"));
-    const treeId = repo.writeTree([{ path: "f.txt", mode: "100644", id: blobId }]);
-    const out = repo.replace(treeId, repo.catFile(treeId) as Buffer, { message: "tree" });
+    const treeId = repo.writeTree([
+      {
+        path: "f.txt",
+        mode: "100644",
+        id: blobId,
+      },
+    ]);
+    const out = repo.replace(treeId, repo.catFile(treeId) as Buffer, {
+      message: "tree",
+    });
     // The replacement object stays a tree (same type as the original).
     expect(out.manifest.type).toBe("tree");
     expect(out.manifest.revisions.length).toBe(1);
@@ -219,7 +246,9 @@ describe("entry-type replace carries commit provenance", () => {
     // Use a real tracked file so entry detection (committed in HEAD/default-branch tree) applies.
     const entry = repo.findTree(treeId).entryByPath("Cargo.toml")!;
     expect(entry).not.toBeNull();
-    const out = entry.replace(Buffer.from("entry-replaced-body"), { force: true });
+    const out = entry.replace(Buffer.from("entry-replaced-body"), {
+      force: true,
+    });
     expect(out.manifest.type).toBe("entry");
     expect(out.manifest.path).toBe("Cargo.toml");
 

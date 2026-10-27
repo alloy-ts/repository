@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { describe, expect, test } from "vite-plus/test";
+import { afterAll, describe, expect, test } from "vite-plus/test";
 
-import { PackEntry } from "./main.ts";
+import { Pack, PackEntry, Repository } from "./main.ts";
 
 // Build a minimal, valid pack containing a single base object of the given git type.
 // A pack is: "PACK" + version (4 bytes, 2) + object count (4 bytes, 1) + object entries + 20-byte SHA1 trailer.
@@ -106,5 +109,97 @@ describe("PackEntry / PackEntryHeader (src/pack.rs)", () => {
       const pack = buildPack(Buffer.from("hi"), 3);
       expect(() => PackEntry.fromBytes(pack, 9999, "sha1")).toThrow();
     });
+  });
+});
+
+// The builder only reads objects, so it can run against this repository directly.
+const repoRoot = process.cwd();
+const tmpDirs: string[] = [];
+
+function makeTmpDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "pack-build-"));
+  tmpDirs.push(dir);
+  return dir;
+}
+
+afterAll(() => {
+  for (const dir of tmpDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+describe("Pack builder (src/pack.rs)", () => {
+  test("addCommit + toBuffer produces a valid, non-empty pack", async () => {
+    const repo = Repository.open(repoRoot);
+    const pack = Pack.build(repo);
+    pack.addCommit(repo.headId());
+
+    const result = await pack.toBuffer();
+
+    expect(result.data.subarray(0, 4).toString()).toBe("PACK");
+    expect(result.objectCount).toBeGreaterThan(1); // commit + its tree contents
+    expect(result.packHash).toMatch(/^[0-9a-f]{40}$/);
+    expect(result.bytesWritten).toBe(result.data.length);
+  });
+
+  test("addObject / addObjects insert objects as-is", async () => {
+    const repo = Repository.open(repoRoot);
+    const pack = Pack.build(repo);
+    pack.addObject(repo.headId());
+    const single = await pack.toBuffer();
+    expect(single.objectCount).toBe(1);
+
+    const other = Pack.build(repo);
+    other.addObjects([repo.headId()]);
+    expect((await other.toBuffer()).objectCount).toBe(1);
+  });
+
+  test("an empty plan yields the empty packfile", async () => {
+    const repo = Repository.open(repoRoot);
+    const result = await Pack.build(repo).toBuffer();
+
+    expect(result.objectCount).toBe(0);
+    expect(result.data.subarray(0, 4).toString()).toBe("PACK");
+    // 12-byte header + 20-byte sha1 trailer, no objects.
+    expect(result.data.length).toBe(32);
+  });
+
+  test("clear() empties the accumulated plan", async () => {
+    const repo = Repository.open(repoRoot);
+    const pack = Pack.build(repo);
+    pack.addCommit(repo.headId());
+    pack.clear();
+
+    expect((await pack.toBuffer()).objectCount).toBe(0);
+  });
+
+  test("writeToDirectory writes a .pack and its .idx", async () => {
+    const repo = Repository.open(repoRoot);
+    const dir = makeTmpDir();
+    const pack = Pack.build(repo);
+    pack.addCommit(repo.headId());
+
+    const result = await pack.writeToDirectory(dir);
+
+    expect(result.objectCount).toBeGreaterThan(1);
+    expect(result.packPath?.endsWith(".pack")).toBe(true);
+    expect(result.indexPath?.endsWith(".idx")).toBe(true);
+    expect(result.packHash).toMatch(/^[0-9a-f]{40}$/);
+    expect(existsSync(result.packPath!)).toBe(true);
+    expect(existsSync(result.indexPath!)).toBe(true);
+  });
+
+  test("accepts a progress callback and build options", async () => {
+    const repo = Repository.open(repoRoot);
+    const seen: unknown[] = [];
+    const pack = Pack.build(repo, { threads: 1, compressionLevel: 1 });
+    pack.addCommit(repo.headId());
+
+    // Progress delivery is best-effort; the operation must still complete.
+    const result = await pack.toBuffer((event) => {
+      seen.push(event);
+    });
+
+    expect(result.objectCount).toBeGreaterThan(1);
   });
 });

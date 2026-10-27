@@ -1,6 +1,12 @@
 import { describe, expect, test } from "vite-plus/test";
 
-import { RefPrefixes, refPrefixesFromSpecs, RefSpecOperation } from "./main.ts";
+import {
+  capabilitiesSupports,
+  parseCapabilities,
+  RefPrefixes,
+  refPrefixesFromSpecs,
+  RefSpecOperation,
+} from "./main.ts";
 
 describe("RefPrefixes (src/protocol.rs)", () => {
   test("new() starts empty and intoArgs() yields nothing", () => {
@@ -75,5 +81,22 @@ describe("refPrefixesFromSpecs (src/protocol.rs)", () => {
       .map((a) => a.replace(/^ref-prefix /, ""))
       .sort();
     expect(wired).toEqual(bare);
+  });
+});
+
+describe("Capabilities (src/protocol.rs)", () => {
+  test("parseCapabilities() splits the advertised capability line", () => {
+    const caps = parseCapabilities("agent=git/2.34.1 ls-refs=shallow fetch=wait-for-done");
+    expect(caps).toContain("agent");
+    expect(caps).toContain("ls-refs");
+    expect(caps).toContain("fetch");
+  });
+
+  test("capabilitiesSupports() reports present, negated, and absent features", () => {
+    // `unborn` is advertised as negated here; `ref-in-want` is absent entirely.
+    const line = "agent=git/2.34.1 fetch=wait-for-done -unborn";
+    expect(capabilitiesSupports(line, "fetch")).toBe(true);
+    expect(capabilitiesSupports(line, "unborn")).toBe(false);
+    expect(capabilitiesSupports(line, "ref-in-want")).toBeNull();
   });
 });

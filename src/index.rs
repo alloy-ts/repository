@@ -1,7 +1,11 @@
-use napi::Result;
+use crate::error::RepositoryResult as Result;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::{IndexEntry, IndexEntryInput, Repository};
@@ -118,7 +122,7 @@ impl From<IndexStatOptions> for gix::index::entry::stat::Options {
     }
 }
 
-fn entry_to_dto(file: &gix::index::File, e: &gix::index::Entry) -> IndexEntry {
+pub(crate) fn entry_to_dto(file: &gix::index::File, e: &gix::index::Entry) -> IndexEntry {
     IndexEntry {
         path: lossy(e.path(file)),
         mode: format!("{:?}", e.mode),
@@ -129,7 +133,7 @@ fn entry_to_dto(file: &gix::index::File, e: &gix::index::Entry) -> IndexEntry {
     }
 }
 
-fn stage_from_u32(stage: u32) -> Result<gix::index::entry::Stage> {
+fn stage_from_u32(stage: u32) -> napi::Result<gix::index::entry::Stage> {
     match stage {
         0 => Ok(gix::index::entry::Stage::Unconflicted),
         1 => Ok(gix::index::entry::Stage::Base),
@@ -154,6 +158,240 @@ fn string_to_index_mode(mode: &str) -> gix::index::entry::Mode {
         "160000" => gix::index::entry::Mode::COMMIT,
         _ => gix::index::entry::Mode::FILE,
     }
+}
+
+/// A merge conflict: the three sides of an entry sharing a path, any of which may be
+/// absent (for example a delete/modify conflict has no ancestor side).
+#[napi(object)]
+pub struct IndexConflict {
+    /// Stage 1 — the common ancestor side, or `null`.
+    pub ancestor: Option<IndexEntry>,
+    /// Stage 2 — our side, or `null`.
+    pub our: Option<IndexEntry>,
+    /// Stage 3 — their side, or `null`.
+    pub theirs: Option<IndexEntry>,
+}
+
+/// Push a single entry into an in-memory index, restoring the sorted invariant and
+/// dropping the (now-stale) tree-cache extension — mirrors `Repository.editIndex`.
+pub(crate) fn push_index_entry(
+    file: &mut gix::index::File,
+    entry: &IndexEntryInput,
+) -> napi::Result<()> {
+    let mode = string_to_index_mode(entry.mode.as_deref().unwrap_or("100644"));
+    let oid = parse_oid(&entry.id)?;
+    let path = gix::bstr::BString::from(entry.path.as_bytes());
+    file.dangerously_push_entry(
+        gix::index::entry::Stat::default(),
+        oid,
+        gix::index::entry::Flags::empty(),
+        mode,
+        path.as_ref(),
+    );
+    file.sort_entries();
+    file.remove_tree();
+    Ok(())
+}
+
+/// Recursively stage every file in `root`'s worktree into `index`, mirroring
+/// `git add -A`. Ignored files are staged too (matching git_spawn's
+/// `Commit::commit`, which calls `index.add_all(["*"], …)` with no ignore
+/// callback). `present` collects the git-style (forward-slash) paths that were
+/// staged so the caller can drop index entries no longer on disk.
+fn stage_dir(
+    root: &Path,
+    dir: &Path,
+    repo: &gix::Repository,
+    index: &mut gix::index::File,
+    present: &mut Vec<Vec<u8>>,
+) -> std::io::Result<()> {
+    // Clone the object store once; `into_arc` yields the store type gix exposes
+    // for writing blobs (the same call `add_from_buffer_to_index` uses).
+    let odb = repo
+        .objects
+        .clone()
+        .into_arc()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_name().as_os_str() == OsStr::new(".git") {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            stage_dir(root, &path, repo, index, present)?;
+        } else if meta.is_symlink() {
+            let target = std::fs::read_link(&path)?;
+            let data = target.to_string_lossy().into_owned().into_bytes();
+            let oid = gix::objs::Write::write_buf(&*odb, gix::object::Kind::Blob, &data)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let rel = relative_posix(root, &path);
+            push_index_entry(
+                index,
+                &IndexEntryInput {
+                    path: rel.clone(),
+                    id: oid.to_string(),
+                    mode: Some("120000".to_string()),
+                },
+            );
+            present.push(rel.into_bytes());
+        } else if meta.is_file() {
+            let data = std::fs::read(&path)?;
+            let oid = gix::objs::Write::write_buf(&*odb, gix::object::Kind::Blob, &data)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let mode = if meta.permissions().mode() & 0o111 != 0 {
+                "100755"
+            } else {
+                "100644"
+            };
+            let rel = relative_posix(root, &path);
+            push_index_entry(
+                index,
+                &IndexEntryInput {
+                    path: rel.clone(),
+                    id: oid.to_string(),
+                    mode: Some(mode.to_string()),
+                },
+            );
+            present.push(rel.into_bytes());
+        }
+        // Other file types (sockets, FIFOs, …) are skipped.
+    }
+    Ok(())
+}
+
+/// Relative path of `path` under `root`, using forward slashes (git path style).
+fn relative_posix(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Build a git tree object from a flat list of index entries `(path, mode, oid)` and
+/// write it (and any subtrees) to `odb`, returning the root tree id. Only stage-0
+/// entries feed the tree; callers must reject sparse indexes beforehand.
+fn write_tree_from_index_entries(
+    odb: &gix::OdbHandleArc,
+    entries: &[(Vec<u8>, gix::index::entry::Mode, gix::ObjectId)],
+) -> napi::Result<gix::ObjectId> {
+    let mut items: Vec<(Vec<&[u8]>, gix::index::entry::Mode, gix::ObjectId)> = entries
+        .iter()
+        .map(|(p, m, id)| (p.split(|&b| b == b'/').collect(), *m, *id))
+        .collect();
+    build_subtree(odb, &mut items)
+}
+
+/// Recursively assemble and write one tree level. `items` are entries whose first path
+/// component belongs at this level; the remainder of each path lives one level down.
+fn build_subtree(
+    odb: &gix::OdbHandleArc,
+    items: &mut [(Vec<&[u8]>, gix::index::entry::Mode, gix::ObjectId)],
+) -> napi::Result<gix::ObjectId> {
+    let mut leaves: Vec<(Vec<u8>, gix::index::entry::Mode, gix::ObjectId)> = Vec::new();
+    let mut groups: BTreeMap<Vec<u8>, Vec<(Vec<&[u8]>, gix::index::entry::Mode, gix::ObjectId)>> =
+        BTreeMap::new();
+    for (mut comps, mode, oid) in items.iter().cloned() {
+        let name = comps.remove(0);
+        if comps.is_empty() {
+            leaves.push((name.to_vec(), mode, oid));
+        } else {
+            groups
+                .entry(name.to_vec())
+                .or_default()
+                .push((comps, mode, oid));
+        }
+    }
+
+    let mut tree_entries: Vec<gix::objs::tree::Entry> = Vec::new();
+    for (name, mut children) in groups {
+        let subtree_oid = build_subtree(odb, &mut children)?;
+        tree_entries.push(gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Tree.into(),
+            filename: gix::bstr::BString::from(name),
+            oid: subtree_oid,
+        });
+    }
+    for (name, mode, oid) in leaves {
+        let tree_mode = match mode.to_tree_entry_mode() {
+            Some(m) => m,
+            None => continue,
+        };
+        tree_entries.push(gix::objs::tree::Entry {
+            mode: tree_mode,
+            filename: gix::bstr::BString::from(name),
+            oid,
+        });
+    }
+
+    // Git orders tree entries by name, but treats directory (tree) entries as if their
+    // name ended with `/`, so `a` sorts before `a/`, and `a/` before `a.txt`.
+    tree_entries.sort_by(|a, b| tree_sort_key(&a).cmp(&tree_sort_key(&b)));
+    let tree = gix::objs::Tree {
+        entries: tree_entries,
+    };
+    let mut buf = Vec::new();
+    gix::objs::WriteTo::write_to(&tree, &mut buf).map_err(|e| err("write_tree", e))?;
+    let oid = gix::objs::Write::write_buf(&*odb, gix::object::Kind::Tree, &buf)
+        .map_err(|e| err("write_tree", e))?;
+    Ok(oid)
+}
+
+/// Key used to sort tree entries the way git does (see `build_subtree`).
+fn tree_sort_key(e: &gix::objs::tree::Entry) -> Vec<u8> {
+    let mut k = e.filename.to_vec();
+    if e.mode == gix::objs::tree::EntryKind::Tree.into() {
+        k.push(b'/');
+    }
+    k
+}
+
+/// Simplified fnmatch matching for `removeAll`: a path matches a spec when it equals
+/// the spec, lives under a directory spec (`spec/`), or matches a `*` glob.
+fn pathspec_matches(path: &[u8], specs: &[String]) -> bool {
+    specs.iter().any(|s| spec_matches(path, s.as_bytes()))
+}
+
+fn spec_matches(path: &[u8], spec: &[u8]) -> bool {
+    if spec.is_empty() {
+        return true;
+    }
+    if spec == path {
+        return true;
+    }
+    if spec.last() == Some(&b'/') {
+        return path.starts_with(spec);
+    }
+    if path.len() > spec.len() && &path[..spec.len()] == spec && path[spec.len()] == b'/' {
+        return true;
+    }
+    if spec.contains(&b'*') {
+        return glob_match(spec, path);
+    }
+    false
+}
+
+/// Minimal glob: split the pattern on `*`, requiring each literal segment to appear in
+/// order in `text` (a trailing `*` is implicit).
+fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    let mut rest = text;
+    for (i, seg) in pattern.split(|&b| b == b'*').enumerate() {
+        if seg.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !rest.starts_with(seg) {
+                return false;
+            }
+            rest = &rest[seg.len()..];
+        } else if let Some(pos) = rest.windows(seg.len()).position(|w| w == seg) {
+            rest = &rest[pos + seg.len()..];
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 /// A git index (staging area), wrapping `gix_index::File`.
@@ -259,7 +497,11 @@ impl Index {
     /// Return the entry at `path` and `stage` (0 = unconflicted, 1 = base, 2 = ours,
     /// 3 = theirs); `null` when absent. Throws on a stage outside 0..=3.
     #[napi]
-    pub fn entry_by_path_and_stage(&self, path: String, stage: u32) -> Result<Option<IndexEntry>> {
+    pub fn entry_by_path_and_stage(
+        &self,
+        path: String,
+        stage: u32,
+    ) -> napi::Result<Option<IndexEntry>> {
         let stage = stage_from_u32(stage)?;
         Ok(self
             .inner
@@ -409,7 +651,7 @@ impl Index {
     /// that was actually written. With `skipHash`, the trailing checksum is zeroed
     /// (roughly 2x faster, at the cost of corruption detection — `index.skipHash`).
     #[napi]
-    pub fn write(&mut self, skip_hash: Option<bool>) -> Result<u32> {
+    pub fn write(&mut self, skip_hash: Option<bool>) -> napi::Result<u32> {
         let options = gix::index::write::Options {
             skip_hash: skip_hash.unwrap_or(false),
             ..Default::default()
@@ -430,7 +672,7 @@ impl Index {
     /// repositories, archives, and network transport). Returns the written version, the
     /// trailing checksum (absent when `skipHash`), and the encoded bytes.
     #[napi]
-    pub fn write_to_buffer(&self, skip_hash: Option<bool>) -> Result<IndexWriteOutcome> {
+    pub fn write_to_buffer(&self, skip_hash: Option<bool>) -> napi::Result<IndexWriteOutcome> {
         let options = gix::index::write::Options {
             skip_hash: skip_hash.unwrap_or(false),
             ..Default::default()
@@ -449,6 +691,203 @@ impl Index {
             checksum: (!hash.is_null()).then(|| hash.to_string()),
             data: Buffer::from(out),
         })
+    }
+
+    /// Return the entry at position `index` in the (sorted) entry list, or `null` if out
+    /// of bounds. Unlike `entries()`, this reads a single entry without cloning the
+    /// whole list — useful for very large indexes.
+    #[napi]
+    pub fn entry_at_index(&self, index: u32) -> Option<IndexEntry> {
+        self.inner
+            .entries()
+            .get(index as usize)
+            .map(|e| entry_to_dto(&self.inner, e))
+    }
+
+    /// Remove *all* entries, producing an empty in-memory index. The on-disk file is not
+    /// touched until `write()` is called.
+    #[napi]
+    pub fn clear(&mut self) {
+        let hash = self.inner.object_hash();
+        let path = self.inner.path().to_path_buf();
+        self.inner = gix::index::File::from_state(gix::index::State::new(hash), path);
+    }
+
+    /// Re-read the index from its file on disk, discarding any in-memory changes. With
+    /// `skipHash`, the on-disk checksum verification is skipped (faster, less safe).
+    #[napi]
+    pub fn read(&mut self, skip_hash: Option<bool>) -> napi::Result<()> {
+        let path = self.inner.path().to_path_buf();
+        let hash = self.inner.object_hash();
+        self.inner =
+            gix::index::File::at(path, hash, skip_hash.unwrap_or(false), Default::default())
+                .map_err(|e| err("read_index", e))?;
+        Ok(())
+    }
+
+    /// Remove the entry at `path` and `stage` (default stage 0 / unconflicted). A no-op
+    /// when no such entry exists.
+    #[napi]
+    pub fn remove(&mut self, path: String, stage: Option<u32>) -> napi::Result<()> {
+        let stage = stage_from_u32(stage.unwrap_or(0))?;
+        if let Some(i) = self.inner.entry_index_by_path_and_stage(bstr(&path), stage) {
+            self.inner.remove_entry_at_index(i);
+        }
+        Ok(())
+    }
+
+    /// Remove the entry (all stages) at `path`. A no-op when no such path exists.
+    #[napi]
+    pub fn remove_path(&mut self, path: String) -> napi::Result<()> {
+        for s in [0u32, 1, 2, 3] {
+            let stage = stage_from_u32(s)?;
+            while let Some(i) = self.inner.entry_index_by_path_and_stage(bstr(&path), stage) {
+                self.inner.remove_entry_at_index(i);
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove every entry whose path is `path` or lives directly underneath `path/`
+    /// (a directory removal). With `stage` set, only entries at that stage are removed;
+    /// otherwise every stage is removed.
+    #[napi]
+    pub fn remove_dir(&mut self, path: String, stage: Option<u32>) -> napi::Result<()> {
+        let want: Option<u32> = stage;
+        let mut prefix = path.as_bytes().to_vec();
+        if !prefix.is_empty() && prefix.last() != Some(&b'/') {
+            prefix.push(b'/');
+        }
+        let mut to_remove: Vec<usize> = Vec::new();
+        for (i, e) in self.inner.entries().iter().enumerate() {
+            if let Some(w) = want {
+                if e.stage() as u32 != w {
+                    continue;
+                }
+            }
+            let p = e.path(&self.inner);
+            if p.len() >= prefix.len() && &p[..prefix.len()] == prefix.as_slice() {
+                to_remove.push(i);
+            }
+        }
+        for i in to_remove.into_iter().rev() {
+            self.inner.remove_entry_at_index(i);
+        }
+        Ok(())
+    }
+
+    /// Remove every entry whose path matches one of `pathspecs`, returning the number
+    /// of entries removed. Matching is a simplified fnmatch: exact match, directory
+    /// prefix (`spec/`), or a single `*` wildcard per spec.
+    #[napi]
+    pub fn remove_all(&mut self, pathspecs: Vec<String>) -> napi::Result<u32> {
+        let mut to_remove: Vec<usize> = Vec::new();
+        for (i, e) in self.inner.entries().iter().enumerate() {
+            if pathspec_matches(e.path(&self.inner).as_ref(), &pathspecs) {
+                to_remove.push(i);
+            }
+        }
+        let removed = to_remove.len() as u32;
+        for i in to_remove.into_iter().rev() {
+            self.inner.remove_entry_at_index(i);
+        }
+        Ok(removed)
+    }
+
+    /// Whether the index contains any merge-conflict entries (stages 1–3).
+    #[napi]
+    pub fn has_conflicts(&self) -> bool {
+        self.inner.entries().iter().any(|e| e.stage() as u32 != 0)
+    }
+
+    /// All merge conflicts in the index, grouped by path. Each conflict exposes its
+    /// ancestor (stage 1), our (stage 2), and their (stage 3) sides, any of which may
+    /// be `null`.
+    #[napi]
+    pub fn conflicts(&self) -> Vec<IndexConflict> {
+        let mut map: BTreeMap<String, IndexConflict> = BTreeMap::new();
+        for e in self.inner.entries() {
+            let s = e.stage() as u32;
+            if s == 0 {
+                continue;
+            }
+            let path = lossy(e.path(&self.inner));
+            let dto = entry_to_dto(&self.inner, e);
+            let conflict = map.entry(path).or_insert(IndexConflict {
+                ancestor: None,
+                our: None,
+                theirs: None,
+            });
+            match s {
+                1 => conflict.ancestor = Some(dto),
+                2 => conflict.our = Some(dto),
+                3 => conflict.theirs = Some(dto),
+                _ => {}
+            }
+        }
+        map.into_values().collect()
+    }
+
+    /// Return the conflict at `path` (its three stages), or `null` when the path is not
+    /// in conflict.
+    #[napi]
+    pub fn conflict_get(&self, path: String) -> Option<IndexConflict> {
+        let mut conflict = IndexConflict {
+            ancestor: None,
+            our: None,
+            theirs: None,
+        };
+        for s in [1u32, 2, 3] {
+            let stage = stage_from_u32(s).ok()?;
+            if let Some(e) = self.inner.entry_by_path_and_stage(bstr(&path), stage) {
+                let dto = entry_to_dto(&self.inner, e);
+                match s {
+                    1 => conflict.ancestor = Some(dto),
+                    2 => conflict.our = Some(dto),
+                    3 => conflict.theirs = Some(dto),
+                    _ => {}
+                }
+            }
+        }
+        if conflict.ancestor.is_none() && conflict.our.is_none() && conflict.theirs.is_none() {
+            None
+        } else {
+            Some(conflict)
+        }
+    }
+
+    /// Remove the conflict entries (stages 1–3) at `path`, keeping any stage-0 entry. A
+    /// no-op when the path is not in conflict.
+    #[napi]
+    pub fn conflict_remove(&mut self, path: String) -> napi::Result<()> {
+        for s in [1u32, 2, 3] {
+            let stage = match stage_from_u32(s) {
+                Ok(st) => st,
+                Err(_) => continue,
+            };
+            while let Some(i) = self.inner.entry_index_by_path_and_stage(bstr(&path), stage) {
+                self.inner.remove_entry_at_index(i);
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the position of the first entry whose path has `prefix` as a leading path
+    /// component (i.e. `prefix == path`, or `path` starts with `prefix/`), or `null`
+    /// when nothing matches. Mirrors libgit2's `git_index_find_prefix`.
+    #[napi]
+    pub fn find_prefix(&self, prefix: String) -> Option<u32> {
+        let pre = prefix.as_bytes();
+        if pre.is_empty() {
+            return Some(0);
+        }
+        for (i, e) in self.inner.entries().iter().enumerate() {
+            let p = e.path(&self.inner);
+            if p == pre || (p.len() > pre.len() && &p[..pre.len()] == pre && p[pre.len()] == b'/') {
+                return Some(i as u32);
+            }
+        }
+        None
     }
 }
 
@@ -562,7 +1001,7 @@ pub struct IndexOpenOptions {
 impl Repository {
     /// Open the shared, auto-updating worktree index; fails if no index exists yet.
     #[napi]
-    pub fn index(&self) -> Result<Index> {
+    pub fn index(&self) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let shared = r.index().map_err(|e| err("index", e))?;
         Ok(Index {
@@ -573,7 +1012,7 @@ impl Repository {
     /// Open a fresh, fully-decoded copy of the index file; fails if no index exists yet.
     /// With `skipHash`, the on-disk checksum verification is skipped (faster, less safe).
     #[napi]
-    pub fn open_index(&self, skip_hash: Option<bool>) -> Result<Index> {
+    pub fn open_index(&self, skip_hash: Option<bool>) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let file = gix::index::File::at(
             r.index_path(),
@@ -589,7 +1028,11 @@ impl Repository {
     /// index), creating an empty in-memory index at that path if the file does not
     /// exist yet. A missing *shared* index remains an error.
     #[napi]
-    pub fn open_index_at(&self, path: String, options: Option<IndexOpenOptions>) -> Result<Index> {
+    pub fn open_index_at(
+        &self,
+        path: String,
+        options: Option<IndexOpenOptions>,
+    ) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let options = options.unwrap_or(IndexOpenOptions {
             skip_hash: None,
@@ -620,7 +1063,7 @@ impl Repository {
 
     /// Open a fresh, fully-decoded copy of the index file; fails if no index exists yet.
     #[napi]
-    pub fn open_index_file(&self) -> Result<Index> {
+    pub fn open_index_file(&self) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let file = r.open_index().map_err(|e| err("open_index", e))?;
         Ok(Index { inner: file })
@@ -628,7 +1071,7 @@ impl Repository {
 
     /// Return the index if present, or `null` if the repository has no index file yet.
     #[napi]
-    pub fn try_index(&self) -> Result<Option<Index>> {
+    pub fn try_index(&self) -> napi::Result<Option<Index>> {
         let r = thread_local(&self.inner);
         let opt = r.try_index().map_err(|e| err("try_index", e))?;
         Ok(opt.map(|shared| Index {
@@ -637,7 +1080,7 @@ impl Repository {
     }
 
     #[napi]
-    pub fn index_or_empty(&self) -> Result<Index> {
+    pub fn index_or_empty(&self) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let shared = r.index_or_empty().map_err(|e| err("index_or_empty", e))?;
         Ok(Index {
@@ -648,7 +1091,7 @@ impl Repository {
     /// Return the index loaded from `HEAD^{tree}` if no index file exists, or an empty
     /// index if `HEAD` is unborn. Never fails due to a missing index.
     #[napi]
-    pub fn index_or_load(&self) -> Result<Index> {
+    pub fn index_or_load(&self) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let loaded = r
             .index_or_load_from_head_or_empty()
@@ -662,7 +1105,7 @@ impl Repository {
     /// index file exists. Unlike `indexOrLoad`, this fails on an unborn HEAD instead of
     /// falling back to an empty index.
     #[napi]
-    pub fn index_or_load_from_head(&self) -> Result<Index> {
+    pub fn index_or_load_from_head(&self) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let loaded = r
             .index_or_load_from_head()
@@ -674,7 +1117,7 @@ impl Repository {
 
     /// Build an in-memory index from a tree id (expensive: recursively unpacks the tree).
     #[napi]
-    pub fn index_from_tree(&self, tree: String) -> Result<Index> {
+    pub fn index_from_tree(&self, tree: String) -> napi::Result<Index> {
         let r = thread_local(&self.inner);
         let oid = parse_oid(&tree)?;
         let file = r
@@ -692,19 +1135,19 @@ impl Repository {
 
     /// Read entries from the index (fails if no index exists).
     #[napi]
-    pub fn index_entries(&self) -> Result<Vec<IndexEntry>> {
+    pub fn index_entries(&self) -> napi::Result<Vec<IndexEntry>> {
         Ok(self.open_index_file()?.entries())
     }
 
     /// Read entries from the index, or load them from `HEAD` / an empty index if absent.
     #[napi]
-    pub fn index_or_load_from_head_entries(&self) -> Result<Vec<IndexEntry>> {
+    pub fn index_or_load_from_head_entries(&self) -> napi::Result<Vec<IndexEntry>> {
         Ok(self.index_or_load()?.entries())
     }
 
     /// Add or update index entries in the repository index file.
     #[napi]
-    pub fn edit_index(&self, entries: Vec<IndexEntryInput>) -> Result<()> {
+    pub fn edit_index(&self, entries: Vec<IndexEntryInput>) -> napi::Result<()> {
         let r = thread_local(&self.inner);
         let index_path = r.index_path();
         let mut file =
@@ -738,6 +1181,91 @@ impl Repository {
         file.write(Default::default())
             .map_err(|e| err("write_index", e))?;
         Ok(())
+    }
+
+    /// Add (or replace) a single entry in `index` in memory, without touching the object
+    /// database or the on-disk index file. The entry's `id` must already reference an
+    /// object in this repository. Call `index.write()` to persist.
+    #[napi]
+    pub fn add_to_index(&self, index: &mut Index, entry: IndexEntryInput) -> napi::Result<()> {
+        push_index_entry(&mut index.inner, &entry)
+    }
+
+    /// Write `data` to the object database as a blob, then add it to `index` in memory
+    /// (the entry's own `id` is ignored in favor of the freshly-written blob). Returns
+    /// the blob's object id. Call `index.write()` to persist the index.
+    #[napi]
+    pub fn add_from_buffer_to_index(
+        &self,
+        index: &mut Index,
+        entry: IndexEntryInput,
+        data: Buffer,
+    ) -> napi::Result<String> {
+        let r = thread_local(&self.inner);
+        let odb = r
+            .objects
+            .clone()
+            .into_arc()
+            .map_err(|e| err("add_from_buffer", e))?;
+        let oid = gix::objs::Write::write_buf(&*odb, gix::object::Kind::Blob, data.as_ref())
+            .map_err(|e| err("add_from_buffer", e))?;
+        let mut entry = entry;
+        entry.id = oid.to_string();
+        push_index_entry(&mut index.inner, &entry)?;
+        Ok(oid.to_string())
+    }
+
+    /// Recursively stage every file in the worktree into `index`, like
+    /// `git add -A`. Ignored files are staged too (matching git_spawn's
+    /// `Commit::commit`, which calls `index.add_all(["*"], …)` with no ignore
+    /// callback). Entries that no longer exist on disk are removed, so the result
+    /// matches the worktree exactly. Bare repositories are a no-op. The index is
+    /// modified in memory; call `index.write()` to persist (or use
+    /// `Repository.commitAll`, which writes a tree from the result).
+    #[napi]
+    pub fn add_all(&self, index: &mut Index) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let root = match r.worktree() {
+            Some(wt) => wt.base().to_path_buf(),
+            None => return Ok(()),
+        };
+        let mut present: Vec<Vec<u8>> = Vec::new();
+        stage_dir(&root, &root, &r, &mut index.inner, &mut present)
+            .map_err(|e| err("add_all", e))?;
+        index
+            .inner
+            .remove_entries(|_i, path, _e| !present.iter().any(|p| p.as_slice() == path.as_ref()));
+        index.inner.sort_entries();
+        index.inner.remove_tree();
+        Ok(())
+    }
+
+    /// Build a git tree object from `index` (stage-0 entries only) and write it to this
+    /// repository's object database, returning the tree's object id. Sparse indexes are
+    /// not supported yet and produce an error.
+    #[napi]
+    pub fn write_tree_from_index(&self, index: &Index) -> napi::Result<String> {
+        let r = thread_local(&self.inner);
+        let odb = r
+            .objects
+            .clone()
+            .into_arc()
+            .map_err(|e| err("write_tree", e))?;
+        if index.inner.is_sparse() {
+            return Err(err_str(
+                "write_tree",
+                "write_tree does not support sparse indexes yet",
+            ));
+        }
+        let entries: Vec<(Vec<u8>, gix::index::entry::Mode, gix::ObjectId)> = index
+            .inner
+            .entries()
+            .iter()
+            .filter(|e| e.stage() as u32 == 0)
+            .map(|e| (e.path(&index.inner).to_vec(), e.mode, e.id))
+            .collect();
+        let oid = write_tree_from_index_entries(&odb, &entries)?;
+        Ok(oid.to_string())
     }
 }
 
@@ -798,7 +1326,7 @@ impl IndexEntryMode {
     /// Build an `IndexEntryMode` from a tree entry mode string (`100644`, `100755`, `040000`,
     /// `120000`, `160000`). Throws on an unrecognized value.
     #[napi]
-    pub fn from_tree_mode(mode: String) -> Result<Self> {
+    pub fn from_tree_mode(mode: String) -> napi::Result<Self> {
         let val = u32::from_str_radix(mode.trim(), 8).map_err(|e| {
             err_str(
                 "from_tree_mode",
@@ -909,7 +1437,7 @@ impl IndexFsMetadata {
 /// Stat `path` without following symlinks, returning its filesystem metadata
 /// (the same `lstat`-based metadata git uses for index entries).
 #[napi]
-pub fn lstat(path: String) -> Result<IndexFsMetadata> {
+pub fn lstat(path: String) -> napi::Result<IndexFsMetadata> {
     let md = gix::index::fs::Metadata::from_path_no_follow(std::path::Path::new(&path))
         .map_err(|e| err("lstat", e))?;
     Ok(IndexFsMetadata { inner: md })
@@ -959,7 +1487,7 @@ pub struct ChunkIndex {
 }
 
 /// Parse a 4-byte chunk id, or throw if it isn't exactly 4 bytes.
-fn chunk_id(kind: &str) -> Result<[u8; 4]> {
+fn chunk_id(kind: &str) -> napi::Result<[u8; 4]> {
     let b = kind.as_bytes();
     if b.len() != 4 {
         return Err(err_str(
@@ -981,7 +1509,7 @@ impl ChunkIndex {
     /// Decode a chunk-file table of contents from `data`, starting at `tocOffset`, containing
     /// `numChunks` chunks. Throws on a malformed table of contents.
     #[napi]
-    pub fn from_bytes(data: Buffer, toc_offset: u32, num_chunks: u32) -> Result<ChunkIndex> {
+    pub fn from_bytes(data: Buffer, toc_offset: u32, num_chunks: u32) -> napi::Result<ChunkIndex> {
         let idx = gix_chunk::file::Index::from_bytes(&data, toc_offset as usize, num_chunks)
             .map_err(|e| err("chunk_index_from_bytes", e))?;
         Ok(ChunkIndex {
@@ -1018,7 +1546,7 @@ impl ChunkIndex {
 
     /// Return the byte range `[start, end)` of the chunk identified by `kind` (a 4-character id).
     #[napi]
-    pub fn offset_by_id(&self, kind: String) -> Result<ChunkOffset> {
+    pub fn offset_by_id(&self, kind: String) -> napi::Result<ChunkOffset> {
         let id = chunk_id(&kind)?;
         let r = self
             .inner
@@ -1032,7 +1560,7 @@ impl ChunkIndex {
 
     /// Return the raw bytes of the chunk identified by `kind` (a 4-character id) from `data`.
     #[napi]
-    pub fn data_by_id(&self, data: Buffer, kind: String) -> Result<Buffer> {
+    pub fn data_by_id(&self, data: Buffer, kind: String) -> napi::Result<Buffer> {
         let id = chunk_id(&kind)?;
         let slice = self
             .inner
@@ -1043,7 +1571,7 @@ impl ChunkIndex {
 
     /// Enumerate all chunks as `{ kind, start, end }` by decoding the table of contents in `data`.
     #[napi]
-    pub fn chunks(&self, data: Buffer) -> Result<Vec<ChunkEntry>> {
+    pub fn chunks(&self, data: Buffer) -> napi::Result<Vec<ChunkEntry>> {
         let entry_size = gix_chunk::file::Index::ENTRY_SIZE;
         let n = self.num_chunks as usize;
         let min_len = self.toc_offset + (n + 1) * entry_size;
@@ -1078,7 +1606,7 @@ impl ChunkIndex {
     /// Plan a chunk to write; `exactSizeOnDisk` is the exact number of bytes the chunk will occupy.
     /// Must be called on an index created via [`ChunkIndex::for_writing`].
     #[napi]
-    pub fn plan_chunk(&mut self, kind: String, exact_size_on_disk: i64) -> Result<()> {
+    pub fn plan_chunk(&mut self, kind: String, exact_size_on_disk: i64) -> napi::Result<()> {
         let id = chunk_id(&kind)?;
         self.inner.plan_chunk(id, exact_size_on_disk as u64);
         Ok(())
@@ -1095,7 +1623,7 @@ impl ChunkIndex {
     /// chunk file (table of contents + chunks + sentinel). Each `ChunkInput.data` length must match
     /// the size planned for that `kind` via [`ChunkIndex::plan_chunk`].
     #[napi]
-    pub fn write(&mut self, chunks: Vec<ChunkInput>) -> Result<Buffer> {
+    pub fn write(&mut self, chunks: Vec<ChunkInput>) -> napi::Result<Buffer> {
         // Steal the owned `Index` from `self` so we can hand it to `into_write`, leaving a
         // fresh (writing) index behind in its place.
         let idx = std::mem::replace(&mut self.inner, gix_chunk::file::Index::for_writing());
