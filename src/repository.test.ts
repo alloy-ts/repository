@@ -18,7 +18,7 @@ beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-api-"));
   cloneDir = join(base, "clone");
   try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
+    repo = await Repository.clone(realRoot, cloneDir);
   } catch (e) {
     rmSync(cloneDir, { recursive: true, force: true });
     execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
@@ -55,7 +55,7 @@ test(
     const dir = join(base, "clone-by-binding");
     let cloned: Repository | null = null;
     try {
-      cloned = await Repository.clone(realRoot, dir, false);
+      cloned = await Repository.clone(realRoot, dir);
     } catch (e) {
       console.log(`Repository.clone not exercised in this environment (${e})`);
     }
@@ -201,7 +201,7 @@ test("Repository path accessors reflects a non-bare worktree", () => {
 
 test("log returns commit summaries newest-first (JS log reading example)", () => {
   // Example: Read top 10 commits via high-level repo.log()
-  const entries = repo.log("HEAD", 10, false);
+  const entries = repo.log({ rev: "HEAD", limit: 10 });
   expect(entries.length).toBeGreaterThan(0);
   expect(entries[0].id).toBe(repo.headId());
   for (const e of entries) {

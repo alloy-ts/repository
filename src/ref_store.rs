@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use napi::Result;
+use crate::error::RepositoryResult as Result;
 use napi_derive::napi;
 
 use gix::config::AsBStr;
@@ -8,7 +8,8 @@ use gix::refs::TargetRef;
 
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::identity::{Signature, signature_from_dto, to_signature};
-use crate::reference::{Reference, ReflogEntry, build_reference};
+use crate::reference::{Reference, build_reference};
+use crate::reflog::ReflogEntry;
 use crate::repository::Repository;
 
 /// Maximum symbolic-reference nesting depth that [`RefStore::resolve`] will
@@ -41,7 +42,7 @@ pub fn ref_store_type_name(ty: RefStoreType) -> String {
 
 /// Parse a [`RefStoreType`] from its string name. Throws on an unknown name.
 #[napi]
-pub fn ref_store_type_from_str(name: String) -> Result<RefStoreType> {
+pub fn ref_store_type_from_str(name: String) -> napi::Result<RefStoreType> {
     match name.as_str() {
         "files" => Ok(RefStoreType::Files),
         "reftable" => Ok(RefStoreType::Reftable),
@@ -72,6 +73,30 @@ pub fn init_backend(_version: Option<u32>) -> RefStoreType {
 #[napi]
 pub struct RefStore {
     repo: Arc<gix::ThreadSafeRepository>,
+}
+
+/// A single reference edit for use with [`RefStore::transaction`].
+///
+/// Mirrors the parameters of [`RefStore::write`] but grouped so multiple edits
+/// can be applied atomically in one transaction.
+#[napi(object)]
+pub struct RefEditOptions {
+    /// The fully-qualified reference name (e.g. `refs/heads/main`).
+    pub name: String,
+    /// The new target: a 40-hex object id, or a symbolic reference name.
+    pub target: String,
+    /// Allow overwriting an existing ref.
+    pub force: Option<bool>,
+    /// Constrain the current value; yields an error on mismatch.
+    pub expected_target: Option<String>,
+    /// Apply the change to the referent of a symbolic `name`.
+    pub deref: Option<bool>,
+    /// When `false`, suppress creation of a new reflog.
+    pub update_reflog: Option<bool>,
+    /// Reflog author; defaults to the repository's configured committer.
+    pub signature: Option<Signature>,
+    /// Reflog message.
+    pub message: Option<String>,
 }
 
 #[napi]
@@ -149,7 +174,7 @@ impl RefStore {
     ///
     /// Mirrors `git_ref_store_exists`.
     #[napi]
-    pub fn exists(&self, ref_name: String) -> Result<bool> {
+    pub fn exists(&self, ref_name: String) -> napi::Result<bool> {
         let r = thread_local(&self.repo);
         match r.try_find_reference(ref_name.as_str()) {
             Ok(Some(_)) => Ok(true),
@@ -162,11 +187,31 @@ impl RefStore {
     ///
     /// Mirrors `git_ref_store_lookup`. Throws when the reference does not exist.
     #[napi]
-    pub fn lookup(&self, ref_name: String) -> Result<Reference> {
+    pub fn lookup(&self, ref_name: String) -> napi::Result<Reference> {
         let r = thread_local(&self.repo);
         let reference = r
             .find_reference(ref_name.as_str())
             .map_err(|e| err("lookup", e))?;
+        build_reference(&self.repo, reference)
+    }
+
+    /// Like [`lookup`](Self::lookup) but returns `null` instead of throwing when
+    /// the reference does not exist.
+    #[napi]
+    pub fn try_lookup(&self, ref_name: String) -> napi::Result<Option<Reference>> {
+        let r = thread_local(&self.repo);
+        match r.try_find_reference(ref_name.as_str()) {
+            Ok(Some(reference)) => Ok(Some(build_reference(&self.repo, reference)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("try_lookup", e)),
+        }
+    }
+
+    /// Look up the `HEAD` reference (the symbolic ref itself, not its resolved target).
+    #[napi]
+    pub fn head(&self) -> napi::Result<Reference> {
+        let r = thread_local(&self.repo);
+        let reference = r.find_reference("HEAD").map_err(|e| err("head", e))?;
         build_reference(&self.repo, reference)
     }
 
@@ -177,7 +222,7 @@ impl RefStore {
     /// points at a missing ref, that symbolic ref is returned (matching the C
     /// "return the symref" behaviour).
     #[napi]
-    pub fn resolve(&self, ref_name: String, max_nesting: Option<i32>) -> Result<Reference> {
+    pub fn resolve(&self, ref_name: String, max_nesting: Option<i32>) -> napi::Result<Reference> {
         let r = thread_local(&self.repo);
         let mut reference = r
             .find_reference(ref_name.as_str())
@@ -215,26 +260,39 @@ impl RefStore {
     /// Mirrors `git_ref_store_iterator`. The iteration is materialised eagerly
     /// into a name list; [`ReferenceIterator::next`] re-resolves each name.
     #[napi]
-    pub fn iterator(&self, glob: Option<String>) -> Result<ReferenceIterator> {
-        let r = thread_local(&self.repo);
-        let platform = r.references().map_err(|e| err("iterator", e))?;
-        let iter = platform.all().map_err(|e| err("iterator", e))?;
-        let mut names = Vec::new();
-        for reference in iter {
-            let reference = reference.map_err(|e| err("iterator", e))?;
-            let name = reference.name().to_string();
-            if let Some(g) = &glob {
-                if !glob_match(g, &name) {
-                    continue;
-                }
-            }
-            names.push(name);
-        }
+    pub fn iterator(&self, glob: Option<String>) -> napi::Result<ReferenceIterator> {
+        let names = self.collect_names(glob, "iterator")?;
         Ok(ReferenceIterator {
             repo: Arc::clone(&self.repo),
             names,
             pos: 0,
         })
+    }
+
+    /// Eagerly list references, optionally restricted to those matching `glob`.
+    ///
+    /// Unlike [`iterator`](Self::iterator) (which yields lazily and re-resolves),
+    /// this materialises the full [`Reference`] list up front.
+    #[napi]
+    pub fn list(&self, glob: Option<String>) -> napi::Result<Vec<Reference>> {
+        let r = thread_local(&self.repo);
+        let names = self.collect_names(glob, "list")?;
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            match r.try_find_reference(name.as_str()) {
+                Ok(Some(reference)) => out.push(build_reference(&self.repo, reference)?),
+                // The ref vanished between listing and resolution; skip it.
+                Ok(None) => continue,
+                Err(e) => return Err(err("list", e)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Like [`list`](Self::list) but returns just the reference names.
+    #[napi]
+    pub fn list_names(&self, glob: Option<String>) -> napi::Result<Vec<String>> {
+        self.collect_names(glob, "list_names")
     }
 
     /// Create or update a reference.
@@ -261,7 +319,7 @@ impl RefStore {
         expected_target: Option<String>,
         deref: Option<bool>,
         update_reflog: Option<bool>,
-    ) -> Result<Reference> {
+    ) -> napi::Result<Reference> {
         let r = thread_local(&self.repo);
         let full_name =
             gix::refs::FullName::try_from(name.as_str()).map_err(|e| err("write", e))?;
@@ -289,6 +347,54 @@ impl RefStore {
         build_reference(&self.repo, reference)
     }
 
+    /// Apply a batch of reference edits atomically.
+    ///
+    /// Mirrors applying several `git_ref_store_write` operations inside one
+    /// transaction. Each entry in `edits` follows [`RefEditOptions`]; the whole
+    /// batch succeeds or fails together (gix rolls back on error). Returns the
+    /// post-transaction state of every edited reference.
+    ///
+    /// A single reflog author is applied to all entries (gix attributes the
+    /// transaction to one committer); the first non-`None` `signature` in `edits`
+    /// is used.
+    #[napi]
+    pub fn transaction(&self, edits: Vec<RefEditOptions>) -> napi::Result<Vec<Reference>> {
+        let r = thread_local(&self.repo);
+        let mut gix_edits = Vec::with_capacity(edits.len());
+        for e in &edits {
+            let full_name = gix::refs::FullName::try_from(e.name.as_str())
+                .map_err(|e| err("transaction", e))?;
+            let target = parse_target(&e.target)?;
+            let previous = previous_value(e.expected_target.clone(), e.force, false)?;
+            let write_log = e.update_reflog.unwrap_or(true);
+            let log = gix::refs::transaction::LogChange {
+                mode: gix::refs::transaction::RefLog::AndReference,
+                force_create_reflog: write_log,
+                message: if write_log {
+                    e.message.clone().unwrap_or_default().into()
+                } else {
+                    Default::default()
+                },
+            };
+            let mut edit =
+                gix::refs::transaction::RefEdit::update_with_log(full_name, target, previous, log);
+            if e.deref.unwrap_or(false) {
+                edit = edit.with_deref(true);
+            }
+            gix_edits.push(edit);
+        }
+        let signature = edits.iter().find_map(|e| e.signature.clone());
+        self.apply_edits(&r, gix_edits, &signature)?;
+        let mut out = Vec::with_capacity(edits.len());
+        for e in &edits {
+            let reference = r
+                .find_reference(e.name.as_str())
+                .map_err(|e| err("transaction", e))?;
+            out.push(build_reference(&self.repo, reference)?);
+        }
+        Ok(out)
+    }
+
     /// Rename a reference from `oldName` to `newName`.
     ///
     /// Mirrors `git_ref_store_rename`. The reflog is not relocated (gix does not
@@ -303,7 +409,7 @@ impl RefStore {
         force: Option<bool>,
         signature: Option<Signature>,
         message: Option<String>,
-    ) -> Result<Reference> {
+    ) -> napi::Result<Reference> {
         let r = thread_local(&self.repo);
         let old = r
             .find_reference(old_name.as_str())
@@ -325,12 +431,8 @@ impl RefStore {
             force_create_reflog: false,
             message: message.unwrap_or_default().into(),
         };
-        let create = gix::refs::transaction::RefEdit::update_with_log(
-            new_full,
-            target,
-            new_previous,
-            log,
-        );
+        let create =
+            gix::refs::transaction::RefEdit::update_with_log(new_full, target, new_previous, log);
         let old_full =
             gix::refs::FullName::try_from(old_name.as_str()).map_err(|e| err("rename", e))?;
         let delete = gix::refs::transaction::RefEdit::delete_with_log(
@@ -353,7 +455,12 @@ impl RefStore {
     /// applies the deletion to the referent of a symbolic `refName` (gix
     /// `RefEdit::with_deref`).
     #[napi]
-    pub fn delete(&self, ref_name: String, expected_target: Option<String>, deref: Option<bool>) -> Result<()> {
+    pub fn delete(
+        &self,
+        ref_name: String,
+        expected_target: Option<String>,
+        deref: Option<bool>,
+    ) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         let name =
             gix::refs::FullName::try_from(ref_name.as_str()).map_err(|e| err("delete", e))?;
@@ -374,7 +481,7 @@ impl RefStore {
     /// Mirrors `git_ref_store_reflog_read`. Returns an empty list when the ref
     /// has no reflog (including when the ref does not exist).
     #[napi]
-    pub fn reflog_read(&self, ref_name: String) -> Result<Vec<ReflogEntry>> {
+    pub fn reflog_read(&self, ref_name: String) -> napi::Result<Vec<ReflogEntry>> {
         let r = thread_local(&self.repo);
         let full_name =
             gix::refs::FullName::try_from(ref_name.as_str()).map_err(|e| err("reflog_read", e))?;
@@ -387,22 +494,39 @@ impl RefStore {
         if let Some(iter) = platform.all().map_err(|e| err("reflog_read", e))? {
             for line in iter {
                 let line = line.map_err(|e| err("reflog line", e))?;
-                let t = line
-                    .signature
-                    .time()
-                    .map_err(|e| err("reflog time", e))?;
+                let t = line.signature.time().map_err(|e| err("reflog time", e))?;
                 out.push(ReflogEntry {
                     previous_oid: line.previous_oid.to_string(),
                     new_oid: line.new_oid.to_string(),
+                    hash: String::new(),
+                    abbreviated_hash: String::new(),
+                    selector: String::new(),
                     signature: to_signature(
                         &line.signature.name,
                         &line.signature.email,
                         t.seconds,
                         t.offset,
                     ),
-                    message: lossy(&line.message),
+                    subject: lossy(&line.message),
+                    action: String::new(),
+                    message: String::new(),
                 });
             }
+        }
+        // Derive the git_spawn-style fields (selector, abbreviated hash, and the
+        // action/message split of the subject); `@{0}` is the newest entry.
+        let n = out.len();
+        for (i, e) in out.iter_mut().enumerate() {
+            let rev = n.saturating_sub(i + 1);
+            e.hash = e.new_oid.clone();
+            e.abbreviated_hash = e.hash.chars().take(7).collect();
+            e.selector = format!("{ref_name}@{{{rev}}}");
+            let (action, message) = match e.subject.split_once(": ") {
+                Some((a, b)) => (a.to_string(), b.to_string()),
+                None => (e.subject.clone(), String::new()),
+            };
+            e.action = action;
+            e.message = message;
         }
         Ok(out)
     }
@@ -414,7 +538,7 @@ impl RefStore {
     /// opposite of bareness when unset, and applies the `heads/`/`remotes/`/
     /// `notes/`/`HEAD` rules.
     #[napi]
-    pub fn should_write_reflog(&self, ref_name: String) -> Result<bool> {
+    pub fn should_write_reflog(&self, ref_name: String) -> napi::Result<bool> {
         let r = thread_local(&self.repo);
         let logall = match r.config_snapshot().string("core.logAllRefUpdates") {
             Some(v) => match v.to_string().as_str() {
@@ -459,7 +583,7 @@ impl RefStore {
     /// trigger a HEAD reflog; otherwise this follows HEAD's symbolic chain and
     /// returns `true` when it ultimately points at `refName`.
     #[napi]
-    pub fn should_write_head_reflog(&self, ref_name: String) -> Result<bool> {
+    pub fn should_write_head_reflog(&self, ref_name: String) -> napi::Result<bool> {
         let r = thread_local(&self.repo);
         let input = r
             .find_reference(ref_name.as_str())
@@ -496,7 +620,7 @@ impl RefStore {
     ///
     /// Mirrors `git_ref_store_has_log`.
     #[napi]
-    pub fn has_log(&self, ref_name: String) -> Result<bool> {
+    pub fn has_log(&self, ref_name: String) -> napi::Result<bool> {
         let r = thread_local(&self.repo);
         r.refs
             .reflog_exists(ref_name.as_str())
@@ -509,7 +633,7 @@ impl RefStore {
     /// first reflog-bearing write, so this only verifies that the reference
     /// exists (reflogs for missing refs cannot be pre-created).
     #[napi]
-    pub fn ensure_log(&self, ref_name: String) -> Result<()> {
+    pub fn ensure_log(&self, ref_name: String) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         match r.try_find_reference(ref_name.as_str()) {
             Ok(Some(_)) => Ok(()),
@@ -532,13 +656,12 @@ impl RefStore {
         head_target: Option<String>,
         _mode: Option<u32>,
         _flags: Option<u32>,
-    ) -> Result<()> {
+    ) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         if let Some(target) = head_target {
             let target_full =
                 gix::refs::FullName::try_from(target.as_str()).map_err(|e| err("init", e))?;
-            let head_full =
-                gix::refs::FullName::try_from("HEAD").map_err(|e| err("init", e))?;
+            let head_full = gix::refs::FullName::try_from("HEAD").map_err(|e| err("init", e))?;
             let edit = gix::refs::transaction::RefEdit::update_with_log(
                 head_full,
                 gix::refs::Target::Symbolic(target_full),
@@ -559,7 +682,7 @@ impl RefStore {
     /// Mirrors `git_ref_store_set_backend`. gix has no pluggable reference
     /// backend — the format is fixed by the repository — so this always errors.
     #[napi]
-    pub fn set_backend(&self, _backend: RefStoreType) -> Result<()> {
+    pub fn set_backend(&self, _backend: RefStoreType) -> napi::Result<()> {
         Err(err_str(
             "set_backend",
             "gix does not expose a pluggable reference store backend; the format is fixed by the repository",
@@ -572,7 +695,7 @@ impl RefStore {
     /// and does not expose an explicit compaction through this API, so this is a
     /// no-op retained for interface parity.
     #[napi]
-    pub fn compress(&self) -> Result<()> {
+    pub fn compress(&self) -> napi::Result<()> {
         Ok(())
     }
 
@@ -583,7 +706,7 @@ impl RefStore {
     /// the ref name; call [`RefLock::unlock`] to apply a change or
     /// [`RefLock::cancel`] to release without writing.
     #[napi]
-    pub fn lock(&self, ref_name: String) -> Result<RefLock> {
+    pub fn lock(&self, ref_name: String) -> napi::Result<RefLock> {
         Ok(RefLock {
             repo: Arc::clone(&self.repo),
             ref_name,
@@ -599,23 +722,45 @@ impl RefStore {
         r: &gix::Repository,
         edits: Vec<gix::refs::transaction::RefEdit>,
         signature: &Option<Signature>,
-    ) -> Result<()> {
-        let committer = match signature {
-            Some(s) => {
-                let sig = signature_from_dto(s)?;
-                let time = sig.time.to_string();
-                Some((sig, time))
-            }
-            None => None,
+    ) -> napi::Result<()> {
+        let committer: Option<gix::actor::Signature> = match signature {
+            Some(s) => Some(signature_from_dto(s)?),
+            None => match r.committer() {
+                Some(Ok(sig_ref)) => sig_ref.to_owned().ok(),
+                _ => None,
+            },
         };
-        let committer_ref = committer.as_ref().map(|(sig, time)| gix::actor::SignatureRef {
+        let time_str = committer.as_ref().map(|s| s.time.to_string());
+        let committer_ref = committer.as_ref().map(|sig| gix::actor::SignatureRef {
             name: sig.name.as_bstr(),
             email: sig.email.as_bstr(),
-            time: time.as_str(),
+            time: time_str.as_ref().unwrap().as_str(),
         });
         r.edit_references_as(edits, committer_ref)
             .map_err(|e| err("edit_reference", e))?;
         Ok(())
+    }
+
+    /// Gather all reference names, optionally filtered by a shell-style `glob`.
+    ///
+    /// Shared by [`iterator`](Self::iterator), [`list`](Self::list) and
+    /// [`list_names`](Self::list_names). `what` labels any error from gix.
+    fn collect_names(&self, glob: Option<String>, what: &str) -> napi::Result<Vec<String>> {
+        let r = thread_local(&self.repo);
+        let platform = r.references().map_err(|e| err(what, e))?;
+        let iter = platform.all().map_err(|e| err(what, e))?;
+        let mut names = Vec::new();
+        for reference in iter {
+            let reference = reference.map_err(|e| err(what, e))?;
+            let name = reference.name().to_string();
+            if let Some(g) = &glob {
+                if !glob_match(g, &name) {
+                    continue;
+                }
+            }
+            names.push(name);
+        }
+        Ok(names)
     }
 }
 
@@ -635,7 +780,7 @@ pub struct ReferenceIterator {
 impl ReferenceIterator {
     /// Return the next reference, or `null` when exhausted.
     #[napi]
-    pub fn next(&mut self) -> Result<Option<Reference>> {
+    pub fn next(&mut self) -> napi::Result<Option<Reference>> {
         if self.pos >= self.names.len() {
             return Ok(None);
         }
@@ -680,7 +825,7 @@ pub struct RefLock {
 impl RefLock {
     /// Release the lock without applying any change.
     #[napi]
-    pub fn cancel(&self) -> Result<()> {
+    pub fn cancel(&self) -> napi::Result<()> {
         Ok(())
     }
 
@@ -699,7 +844,7 @@ impl RefLock {
         expected_target: Option<String>,
         deref: Option<bool>,
         update_reflog: Option<bool>,
-    ) -> Result<Reference> {
+    ) -> napi::Result<Reference> {
         let store = RefStore {
             repo: Arc::clone(&self.repo),
         };
@@ -717,7 +862,7 @@ impl RefLock {
 }
 
 /// Parse `s` as a reference target: a 40-hex object id, else a symbolic name.
-fn parse_target(s: &str) -> Result<gix::refs::Target> {
+fn parse_target(s: &str) -> napi::Result<gix::refs::Target> {
     match parse_oid(s) {
         Ok(oid) => Ok(gix::refs::Target::Object(oid)),
         Err(_) => gix::refs::FullName::try_from(s)
@@ -732,7 +877,7 @@ fn previous_value(
     expected: Option<String>,
     force: Option<bool>,
     is_delete: bool,
-) -> Result<gix::refs::transaction::PreviousValue> {
+) -> napi::Result<gix::refs::transaction::PreviousValue> {
     use gix::refs::transaction::PreviousValue;
     match expected {
         Some(t) => {

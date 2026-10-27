@@ -1,11 +1,34 @@
 use std::sync::Arc;
 
-use napi::Result;
+use crate::error::RepositoryResult as Result;
+use gix::bstr::ByteSlice;
 use napi_derive::napi;
 
 use crate::error::{err, thread_local};
 use crate::index::IndexEntryMode;
 use crate::repository::Repository;
+
+/// The resolved state of an attribute — git's attribute tri-state plus `unspecified`.
+/// Mirrors git2's `AttrValue`: `Set`→`True`, `Unset`→`False`, `Value`→`String`,
+/// `Unspecified`→`Unspecified`.
+#[derive(Clone, Copy)]
+#[napi(string_enum)]
+pub enum AttributeState {
+    /// The attribute is set (`attr`, or via `[attr]` macro expansion) — git2's
+    /// `AttrValue::True`.
+    #[napi(value = "set")]
+    Set,
+    /// The attribute is explicitly unset (`-attr`) — git2's `AttrValue::False`.
+    #[napi(value = "unset")]
+    Unset,
+    /// The attribute has a value (`attr=value`) — git2's `AttrValue::String` (and
+    /// `Bytes`, exposed as a lossy-UTF-8 JS string).
+    #[napi(value = "value")]
+    Value,
+    /// No rule assigned the attribute for the path — git2's `AttrValue::Unspecified`.
+    #[napi(value = "unspecified")]
+    Unspecified,
+}
 
 /// A single attribute assignment for a path, as resolved by git's attribute machinery.
 #[derive(Clone)]
@@ -13,11 +36,11 @@ use crate::repository::Repository;
 pub struct AttributeEntry {
     /// The attribute name, e.g. `text`, `eol`, `merge`.
     pub name: String,
-    /// The resolved state, rendered with `Debug`: `Set`, `Unspecified`, or `Value("…")`.
-    ///
-    /// Note: this is the raw git `State` representation. Use it as a tri-state rather than
-    /// assuming a particular string format.
-    pub value: String,
+    /// The resolved state (see [`AttributeState`]).
+    pub state: AttributeState,
+    /// The assigned value (`myattr=hello` → `"hello"`); present only when `state` is
+    /// `value`. Non-UTF-8 values decode lossily.
+    pub value: Option<String>,
 }
 
 /// Where to read `.gitattributes` data from.
@@ -90,16 +113,31 @@ fn ignore_source(source: Option<AttributeSource>) -> gix::worktree::stack::state
     }
 }
 
+/// Map a gix attribute state onto the [`AttributeState`] tri-state.
+fn to_entry(name: &str, state: gix::attrs::StateRef<'_>) -> AttributeEntry {
+    let (state, value) = match state {
+        gix::attrs::StateRef::Set => (AttributeState::Set, None),
+        gix::attrs::StateRef::Unset => (AttributeState::Unset, None),
+        gix::attrs::StateRef::Value(value) => (
+            AttributeState::Value,
+            Some(value.as_bstr().to_str_lossy().into_owned()),
+        ),
+        gix::attrs::StateRef::Unspecified => (AttributeState::Unspecified, None),
+    };
+    AttributeEntry {
+        name: name.to_string(),
+        state,
+        value,
+    }
+}
+
 /// Run attribute matching for `relative_path` on `platform`, returning the resolved entries.
 fn resolve_attributes(platform: &gix::worktree::stack::Platform<'_>) -> Vec<AttributeEntry> {
     let mut selected = gix::attrs::search::Outcome::default();
     platform.matching_attributes(&mut selected);
     selected
         .iter()
-        .map(|m| AttributeEntry {
-            name: m.assignment.name.as_str().to_string(),
-            value: format!("{:?}", m.assignment.state),
-        })
+        .map(|m| to_entry(m.assignment.name.as_str(), m.assignment.state))
         .collect()
 }
 
@@ -138,7 +176,7 @@ impl AttributeStack {
         &mut self,
         relative_path: String,
         mode: Option<u32>,
-    ) -> Result<Vec<AttributeEntry>> {
+    ) -> napi::Result<Vec<AttributeEntry>> {
         let r = thread_local(&self.repo);
         let platform = self
             .inner
@@ -151,13 +189,29 @@ impl AttributeStack {
         Ok(resolve_attributes(&platform))
     }
 
+    /// Resolve a single attribute for `relative_path`, reusing this stack's cache — the
+    /// equivalent of git2's `get_attr`. Returns `null` when the attribute is unspecified
+    /// for the path (no matching rule).
+    #[napi]
+    pub fn get_attribute(
+        &mut self,
+        relative_path: String,
+        name: String,
+        mode: Option<u32>,
+    ) -> napi::Result<Option<AttributeEntry>> {
+        Ok(self
+            .attributes(relative_path, mode)?
+            .into_iter()
+            .find(|e| e.name == name))
+    }
+
     /// Like [`attributes`](Self::attributes) but also returns the gathered [`AttributeStatistics`].
     #[napi]
     pub fn attributes_with_statistics(
         &mut self,
         relative_path: String,
         mode: Option<u32>,
-    ) -> Result<AttributeResult> {
+    ) -> napi::Result<AttributeResult> {
         let r = thread_local(&self.repo);
         let platform = self
             .inner
@@ -178,7 +232,7 @@ impl AttributeStack {
     /// Whether `relative_path` is excluded by `.gitignore`/exclude files, reusing this stack's cache.
     /// Equivalent to [`Repository::is_path_excluded`](crate::Repository::is_path_excluded).
     #[napi]
-    pub fn is_excluded(&mut self, relative_path: String) -> Result<bool> {
+    pub fn is_excluded(&mut self, relative_path: String) -> napi::Result<bool> {
         let r = thread_local(&self.repo);
         let platform = self
             .inner
@@ -219,7 +273,7 @@ impl Repository {
         &self,
         relative_path: String,
         source: Option<AttributeSource>,
-    ) -> Result<Vec<AttributeEntry>> {
+    ) -> napi::Result<Vec<AttributeEntry>> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -245,7 +299,7 @@ impl Repository {
         &self,
         relative_path: String,
         source: Option<AttributeSource>,
-    ) -> Result<AttributeResult> {
+    ) -> napi::Result<AttributeResult> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -282,7 +336,7 @@ impl Repository {
         &self,
         relative_path: String,
         source: Option<AttributeSource>,
-    ) -> Result<Vec<AttributeEntry>> {
+    ) -> napi::Result<Vec<AttributeEntry>> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -303,7 +357,7 @@ impl Repository {
         &self,
         relative_path: String,
         source: Option<AttributeSource>,
-    ) -> Result<AttributeResult> {
+    ) -> napi::Result<AttributeResult> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -324,7 +378,7 @@ impl Repository {
 
     /// Check whether a relative `relative_path` is excluded by gitignore / exclude files.
     #[napi]
-    pub fn is_path_excluded(&self, relative_path: String) -> Result<bool> {
+    pub fn is_path_excluded(&self, relative_path: String) -> napi::Result<bool> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -345,13 +399,32 @@ impl Repository {
         Ok(platform.is_excluded())
     }
 
+    /// Resolve a single attribute for `relative_path` — the equivalent of git2's
+    /// `get_attr`. Returns `null` when the attribute is unspecified for the path
+    /// (no matching rule), like git2's `None`.
+    #[napi]
+    pub fn get_attribute(
+        &self,
+        relative_path: String,
+        name: String,
+        source: Option<AttributeSource>,
+    ) -> napi::Result<Option<AttributeEntry>> {
+        Ok(self
+            .attributes(relative_path, source)?
+            .into_iter()
+            .find(|e| e.name == name))
+    }
+
     /// Build a reusable attribute *and* exclude cache for [`AttributeStack`] queries.
     ///
     /// Prefer this over repeatedly calling [`attributes`](Self::attributes) when you need to query
     /// many paths against the same worktree/attributes state. `source` selects where `.gitattributes`
     /// are read from; omit it to use the default (`WorktreeThenIdMapping`).
     #[napi]
-    pub fn attributes_stack(&self, source: Option<AttributeSource>) -> Result<AttributeStack> {
+    pub fn attributes_stack(
+        &self,
+        source: Option<AttributeSource>,
+    ) -> napi::Result<AttributeStack> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -373,7 +446,10 @@ impl Repository {
 
     /// Build a reusable attribute-only cache (no exclude/ignore information consulted).
     #[napi]
-    pub fn attributes_only_stack(&self, source: Option<AttributeSource>) -> Result<AttributeStack> {
+    pub fn attributes_only_stack(
+        &self,
+        source: Option<AttributeSource>,
+    ) -> napi::Result<AttributeStack> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()
@@ -390,7 +466,7 @@ impl Repository {
 
     /// Build a reusable exclude-only cache for [`AttributeStack::is_excluded`] queries.
     #[napi]
-    pub fn excludes_stack(&self, source: Option<AttributeSource>) -> Result<AttributeStack> {
+    pub fn excludes_stack(&self, source: Option<AttributeSource>) -> napi::Result<AttributeStack> {
         let r = thread_local(&self.inner);
         let index = r
             .index_or_load_from_head_or_empty()

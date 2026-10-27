@@ -1,22 +1,26 @@
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
 use gix::bstr::BStr;
 use gix::diff::Rewrites;
 use gix::diff::blob::Algorithm as DiffAlgorithm;
+use gix::diff::rewrites::Copies;
 
-use napi::Result;
+use crate::error::RepositoryResult as Result;
 use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
+use crate::identity::{Signature, signature_from_actor};
 use crate::repository::{Repository, lossy};
 
 /// A single blame hunk mapping a range of lines in the blamed file to the commit that introduced it.
 #[derive(Clone)]
 #[napi(object)]
 pub struct BlameEntry {
-    /// 0-based line index where this hunk begins in the blamed file.
+    /// 1-based line index where this hunk begins in the blamed file
+    /// (matches `git blame` output and the git2 `final_start_line_number`).
     pub start_in_blamed_file: u32,
-    /// 0-based line index where this hunk begins in the source file (may differ if the file moved).
+    /// 1-based line index where this hunk begins in the source file (may differ if the file moved).
     pub start_in_source_file: u32,
     /// Number of lines this hunk spans.
     pub len: u32,
@@ -24,6 +28,12 @@ pub struct BlameEntry {
     pub commit_id: String,
     /// The source file name, if it differs from the blamed file (renamed file).
     pub source_file_name: Option<String>,
+    /// Author of the introducing commit, or `null` unless `resolveCommits` was set.
+    pub author: Option<Signature>,
+    /// Committer of the introducing commit, or `null` unless `resolveCommits` was set.
+    pub committer: Option<Signature>,
+    /// First paragraph of the introducing commit message, or `null` unless `resolveCommits` was set.
+    pub summary: Option<String>,
 }
 
 /// Statistics about the work performed while computing a blame.
@@ -105,10 +115,15 @@ pub struct BlameOptions {
     pub since: Option<f64>,
     /// Track renames/rewrites (50% similarity, git default) while blaming.
     pub track_renames: Option<bool>,
+    /// Also track copies (beyond renames). Implies rewrite tracking.
+    pub track_copies: Option<bool>,
+    /// Resolve each hunk's commit to attach `author`, `committer` and `summary`.
+    /// Off by default to avoid the per-commit lookup cost when only `commitId` is needed.
+    pub resolve_commits: Option<bool>,
 }
 
 /// Map a user-supplied diff algorithm name to the backend enum.
-fn parse_diff_algorithm(s: &str) -> Result<DiffAlgorithm> {
+fn parse_diff_algorithm(s: &str) -> napi::Result<DiffAlgorithm> {
     Ok(match s.to_ascii_lowercase().as_str() {
         "myers" => DiffAlgorithm::Myers,
         "minimal" => DiffAlgorithm::MyersMinimal,
@@ -122,7 +137,7 @@ fn parse_diff_algorithm(s: &str) -> Result<DiffAlgorithm> {
 }
 
 /// Build a `gix_blame` range specification from napi options.
-fn build_ranges(ranges: Option<&[BlameRange]>) -> Result<gix::blame::BlameRanges> {
+fn build_ranges(ranges: Option<&[BlameRange]>) -> napi::Result<gix::blame::BlameRanges> {
     match ranges {
         None => Ok(gix::blame::BlameRanges::default()),
         Some(rs) => {
@@ -133,17 +148,100 @@ fn build_ranges(ranges: Option<&[BlameRange]>) -> Result<gix::blame::BlameRanges
     }
 }
 
+/// Resolve a commit to its author, committer and message summary.
+///
+/// Returns `None` when the commit cannot be found or decoded (the corresponding
+/// blame entries simply omit the commit details rather than failing the whole blame).
+fn resolve_commit(
+    r: &gix::Repository,
+    oid: &gix::ObjectId,
+) -> (Signature, Signature, Option<String>) {
+    let none = || {
+        (
+            Signature {
+                name: String::new(),
+                email: String::new(),
+                time: 0,
+                timezone_offset: 0,
+                date: None,
+            },
+            Signature {
+                name: String::new(),
+                email: String::new(),
+                time: 0,
+                timezone_offset: 0,
+                date: None,
+            },
+            None,
+        )
+    };
+
+    let commit_handle = match r.find_commit(*oid).ok() {
+        Some(c) => c,
+        None => return none(),
+    };
+    let commit = match commit_handle.decode().ok() {
+        Some(c) => c,
+        None => return none(),
+    };
+    let author = match commit.author().ok() {
+        Some(s) => signature_from_actor(&s),
+        None => return none(),
+    };
+    let committer = match commit.committer().ok() {
+        Some(s) => signature_from_actor(&s),
+        None => return none(),
+    };
+    let summary = {
+        let message = gix::objs::commit::MessageRef::from_bytes(commit.message.as_ref());
+        let s = message.summary();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    };
+    (author, committer, summary)
+}
+
 /// Convert a `gix_blame::Outcome` into the napi `BlameOutcome`.
-fn map_outcome(outcome: gix::blame::Outcome) -> BlameOutcome {
+///
+/// When `resolve` is set, each unique introducing commit is looked up once to
+/// attach its author, committer and message summary to the matching entries.
+fn map_outcome(r: &gix::Repository, outcome: gix::blame::Outcome, resolve: bool) -> BlameOutcome {
+    // O(unique commits) lookups; empty when resolution is disabled.
+    let resolved: HashMap<gix::ObjectId, Option<(Signature, Signature, Option<String>)>> =
+        if resolve {
+            let mut m = HashMap::with_capacity(outcome.entries.len());
+            for e in &outcome.entries {
+                m.entry(e.commit_id)
+                    .or_insert_with(|| Some(resolve_commit(r, &e.commit_id)));
+            }
+            m
+        } else {
+            HashMap::new()
+        };
+
     let entries = outcome
         .entries
         .iter()
-        .map(|e| BlameEntry {
-            start_in_blamed_file: e.start_in_blamed_file,
-            start_in_source_file: e.start_in_source_file,
-            len: e.len.get(),
-            commit_id: e.commit_id.to_string(),
-            source_file_name: e.source_file_name.as_ref().map(|n| lossy(n)),
+        .map(|e| {
+            let (author, committer, summary) = resolved
+                .get(&e.commit_id)
+                .and_then(|o| o.as_ref())
+                .map(|t| (Some(t.0.clone()), Some(t.1.clone()), t.2.clone()))
+                .unwrap_or((None, None, None));
+            BlameEntry {
+                // gix reports 0-based start lines; surface 1-based to match git and git2.
+                start_in_blamed_file: e.start_in_blamed_file + 1,
+                start_in_source_file: e.start_in_source_file + 1,
+                len: e.len.get(),
+                commit_id: e.commit_id.to_string(),
+                source_file_name: e.source_file_name.as_ref().map(|n| lossy(n)),
+                author,
+                committer,
+                summary,
+            }
         })
         .collect();
 
@@ -187,12 +285,16 @@ impl Repository {
     /// [`blame_with_options`](Self::blame_with_options) that uses default options (whole file,
     /// the repository's configured diff algorithm, no rename tracking, no `since` filter).
     #[napi]
-    pub fn blame(&self, file_path: String, commit_id: Option<String>) -> Result<BlameOutcome> {
+    pub fn blame(
+        &self,
+        file_path: String,
+        commit_id: Option<String>,
+    ) -> napi::Result<BlameOutcome> {
         self.blame_with_options(file_path, commit_id, None)
     }
 
     /// Compute a blame with fine-grained control over the diff algorithm, line ranges, the `since`
-    /// cutoff, and rename tracking.
+    /// cutoff, rename/copy tracking, and optional per-commit resolution.
     ///
     /// * `file_path` — slash-separated, repository-relative path to the file to blame.
     /// * `commit_id` — the commit to start from, or `HEAD` if omitted.
@@ -203,7 +305,7 @@ impl Repository {
         file_path: String,
         commit_id: Option<String>,
         options: Option<BlameOptions>,
-    ) -> Result<BlameOutcome> {
+    ) -> napi::Result<BlameOutcome> {
         let r = thread_local(&self.inner);
         let suspect = match commit_id {
             Some(c) => parse_oid(&c)?,
@@ -220,10 +322,16 @@ impl Repository {
             seconds: s as i64,
             offset: 0,
         });
-        let rewrites = opts
-            .track_renames
-            .filter(|v| *v)
-            .map(|_| Rewrites::default());
+        let track_copies = opts.track_copies.unwrap_or(false);
+        let rewrites = if opts.track_renames.unwrap_or(false) || track_copies {
+            let mut rw = Rewrites::default();
+            if track_copies {
+                rw.copies = Some(Copies::default());
+            }
+            Some(rw)
+        } else {
+            None
+        };
 
         let gix_opts = gix::repository::blame_file::Options {
             diff_algorithm,
@@ -236,6 +344,34 @@ impl Repository {
             .blame_file(BStr::new(file_path.as_str()), suspect, gix_opts)
             .map_err(|e| err("blame_file", e))?;
 
-        Ok(map_outcome(outcome))
+        Ok(map_outcome(
+            &r,
+            outcome,
+            opts.resolve_commits.unwrap_or(false),
+        ))
+    }
+
+    /// Compute a blame and return only the hunk covering `line` (1-based), or `null`
+    /// when the line is outside the file. Equivalent to calling
+    /// [`blame_with_options`](Self::blame_with_options) and binary-searching `entries`,
+    /// but exposed for ergonomics.
+    ///
+    /// * `file_path` — slash-separated, repository-relative path to the file to blame.
+    /// * `line` — 1-based line number in the blamed file.
+    /// * `commit_id` — the commit to start from, or `HEAD` if omitted.
+    /// * `options` — optional [`BlameOptions`]; honors `resolveCommits` like the others.
+    #[napi]
+    pub fn blame_line(
+        &self,
+        file_path: String,
+        line: u32,
+        commit_id: Option<String>,
+        options: Option<BlameOptions>,
+    ) -> napi::Result<Option<BlameEntry>> {
+        let outcome = self.blame_with_options(file_path, commit_id, options)?;
+        Ok(outcome
+            .entries
+            .into_iter()
+            .find(|e| line >= e.start_in_blamed_file && line < e.start_in_blamed_file + e.len))
     }
 }

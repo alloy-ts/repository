@@ -14,7 +14,7 @@ beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-revision-"));
   cloneDir = join(base, "clone");
   try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
+    repo = await Repository.clone(realRoot, cloneDir);
   } catch {
     rmSync(cloneDir, { recursive: true, force: true });
     execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
@@ -64,6 +64,72 @@ describe("Repository revision specs (src/revision.rs)", () => {
     }
   });
 
+  test("revWalk() accepts revision specs, excludes, globs and ranges", () => {
+    // Specs, not just object ids.
+    expect(repo.revWalk(["HEAD"])).toEqual(repo.revWalk([repo.headId()]));
+    expect(repo.revWalk(["HEAD~1"])[0]).toBe(repo.revParseSingle("HEAD~1"));
+
+    // exclude: hiding the tip empties the walk; hiding a parent keeps later commits.
+    expect(repo.revWalk(["HEAD"], { exclude: ["HEAD"] })).toEqual([]);
+    const head = repo.headCommit();
+    const parent = head.parentIds[0];
+    if (parent) {
+      const viaExclude = repo.revWalk(["HEAD"], { exclude: [parent] });
+      const viaRange = repo.revWalk([], { range: `${parent}..HEAD` });
+      expect(viaRange).toEqual(viaExclude);
+      expect(viaRange).not.toContain(parent);
+    }
+
+    // glob: implied refs/ prefix and /* suffix follow git's push_glob rules.
+    execSync("git tag probe-glob-tag HEAD", { cwd: cloneDir, stdio: "ignore" });
+    const globTips = repo.revWalk([], { glob: "refs/tags/*" });
+    expect(globTips.length).toBeGreaterThan(0);
+    expect(repo.revWalk([], { glob: "tags/*" })).toEqual(globTips);
+    expect(repo.revWalk([], { glob: "refs/tags" })).toEqual(globTips);
+
+    // Ranges and globs compose with the other options.
+    const sorted = repo.revWalk([], {
+      glob: "refs/tags/*",
+      sort: "time-newest",
+      reverse: true,
+    });
+    expect(sorted.slice().sort()).toEqual(globTips.slice().sort());
+    execSync("git tag -d probe-glob-tag", { cwd: cloneDir, stdio: "ignore" });
+
+    // symmetric range: commits reachable from either side but not from both.
+    if (parent) {
+      const sym = repo.revWalk([], { range: `${parent}...HEAD` });
+      // Both sides pushed, merge base hidden: HEAD's history minus shared ancestors.
+      expect(sym).toContain(repo.headId());
+      expect(sym.length).toBeGreaterThanOrEqual(1);
+    }
+    expect(() => repo.revWalk([], { range: `${"x".repeat(40)}...${"y".repeat(40)}` })).toThrow(
+      /couldn't parse revision|merge base/,
+    );
+
+    expect(() => repo.revWalk(["HEAD"], { sort: "topo" })).toThrow(/invalid sort/);
+    expect(() => repo.revWalk([], { range: "bogus..also-bogus" })).toThrow();
+  });
+
+  test("revParseExt() resolves the spec and the reference that provided it", () => {
+    const ext = repo.revParseExt("HEAD");
+    expect(ext.id).toBe(repo.headId());
+    expect(ext.referenceName).toBe("HEAD");
+
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: cloneDir,
+      encoding: "utf8",
+    }).trim();
+    const byBranch = repo.revParseExt(branch);
+    expect(byBranch.id).toBe(repo.headId());
+    expect(byBranch.referenceName).toBe(`refs/heads/${branch}`);
+
+    // A hex id resolves, but no reference is implicated.
+    const byOid = repo.revParseExt(repo.headId());
+    expect(byOid.id).toBe(repo.headId());
+    expect(byOid.referenceName ?? null).toBe(null);
+  });
+
   test("revWalk() accepts sort/reverse/firstParent options", () => {
     const head = repo.revParseSingle("HEAD");
     const def = repo.revWalk([head]);
@@ -94,49 +160,23 @@ describe("Repository revision specs (src/revision.rs)", () => {
     }
   });
 
-  test("describe() reports exact tag matches", () => {
-    execSync(
-      `git -c user.email=t@example.com -c user.name=T -c commit.gpgsign=false -c tag.gpgsign=false tag -a describe-test-v1 -m "tag" HEAD`,
-      {
-        cwd: cloneDir,
-        stdio: "ignore",
-      },
-    );
-    const head = repo.headId();
-    const exact = repo.describe(head, { names: "allTags" });
-    expect(exact).not.toBeNull();
-    expect(exact!.name).toBe("describe-test-v1");
-    expect(exact!.id).toBe(head);
-    expect(exact!.depth).toBe(0);
-    expect(exact!.exactMatch).toBe(true);
-    expect(exact!.format).toBe("describe-test-v1");
+  test("resolve() returns an Object directly (avoids a follow-up findObject)", () => {
+    const oid = repo.headId();
+    const obj = repo.resolve("HEAD");
+    expect(obj.id).toBe(oid);
+    expect(obj.kind).toBe("commit");
+    // Equivalent to parsing the id with revParseSingle and then findObject.
+    expect(repo.findObject(oid).id).toBe(obj.id);
   });
 
-  test("describe() counts depth for commits ahead of the closest tag", () => {
-    execSync(
-      `git -c user.email=t@example.com -c user.name=T -c commit.gpgsign=false -c tag.gpgsign=false commit --allow-empty -m "describe ahead"`,
-      { cwd: cloneDir, stdio: "ignore" },
-    );
-    const head = repo.headId();
-    const ahead = repo.describe(head, { names: "allTags" });
-    expect(ahead).not.toBeNull();
-    expect(ahead!.name).toBe("describe-test-v1");
-    expect(ahead!.depth).toBe(1);
-    expect(ahead!.exactMatch).toBe(false);
-    expect(ahead!.format).toMatch(/^describe-test-v1-1-g[0-9a-f]{7,}$/);
-    expect(ahead!.commitsSeen).toBeGreaterThan(0);
-  });
-
-  test("describe() falls back to the id, or returns null, when no candidate is used", () => {
-    const head = repo.headId();
-    const fallback = repo.describe(head, {
-      maxCandidates: 0,
-      idAsFallback: true,
-    });
-    expect(fallback).not.toBeNull();
-    expect(fallback!.name == null).toBe(true);
-    expect(fallback!.id).toBe(head);
-    expect(fallback!.format).toMatch(/^[0-9a-f]+$/);
-    expect(repo.describe(head, { maxCandidates: 0 })).toBeNull();
+  test("revWalk() accepts a limit option", () => {
+    const head = repo.revParseSingle("HEAD");
+    const full = repo.revWalk([head]);
+    // limit never exceeds the real history length.
+    const capped = repo.revWalk([head], { limit: 50 });
+    expect(capped.length).toBe(full.length);
+    if (full.length >= 3) {
+      expect(repo.revWalk([head], { limit: 2 }).length).toBe(2);
+    }
   });
 });

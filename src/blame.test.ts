@@ -14,7 +14,7 @@ beforeAll(async () => {
   base = mkdtempSync(join(tmpdir(), "repo-blame-"));
   cloneDir = join(base, "clone");
   try {
-    repo = await Repository.clone(realRoot, cloneDir, false);
+    repo = await Repository.clone(realRoot, cloneDir);
   } catch {
     rmSync(cloneDir, { recursive: true, force: true });
     execSync(`git clone --local --quiet ${JSON.stringify(realRoot)} ${JSON.stringify(cloneDir)}`, {
@@ -38,24 +38,32 @@ afterAll(() => {
 const file = "Cargo.toml";
 
 describe("Repository.blame / blameWithOptions (src/blame.rs)", () => {
-  test("blame() returns ordered, non-overlapping per-hunk entries", () => {
+  test("blame() returns ordered, non-overlapping, 1-based per-hunk entries", () => {
     const outcome = repo.blame(file);
     expect(Array.isArray(outcome.entries)).toBe(true);
     expect(outcome.entries.length).toBeGreaterThan(0);
 
-    let prevStart = 0;
+    let prevStart = 1;
     let covered = 0;
     for (const e of outcome.entries) {
       expect(typeof e.commitId).toBe("string");
       expect(e.commitId.length).toBe(40);
       expect(e.len).toBeGreaterThan(0);
+      // 1-based start lines, monotonically non-decreasing.
       expect(e.startInBlamedFile).toBeGreaterThanOrEqual(prevStart);
-      // An unrenamed file exposes no source file name.
-      expect(e.sourceFileName).toBe(null);
+      // An unrenamed file exposes no source file name (absent optional field).
+      expect(e.sourceFileName).toBeUndefined();
+      // Default behavior leaves commit details unresolved (napi serializes
+      // absent `Option` object fields as `undefined`).
+      expect(e.author).toBeUndefined();
+      expect(e.committer).toBeUndefined();
+      expect(e.summary).toBeUndefined();
       prevStart = e.startInBlamedFile + e.len;
       covered += e.len;
     }
     expect(covered).toBeGreaterThan(0);
+    // Whole-file blame starts at line 1.
+    expect(outcome.entries[0].startInBlamedFile).toBe(1);
 
     // The blamed file content is returned as bytes.
     expect((outcome.blob as unknown as { length: number }).length).toBeGreaterThan(0);
@@ -67,8 +75,8 @@ describe("Repository.blame / blameWithOptions (src/blame.rs)", () => {
     expect(outcome.statistics.treesDecoded).toBeGreaterThan(0);
     expect(outcome.statistics.treesDiffed).toBeGreaterThan(0);
     expect(outcome.statistics.blobsDiffed).toBeGreaterThan(0);
-    // debug_track_path is forced off by the high-level wrapper, so this is always null.
-    expect(outcome.blamePath).toBe(null);
+    // debug_track_path is forced off by the high-level wrapper, so this is always absent.
+    expect(outcome.blamePath).toBeUndefined();
   });
 
   test("blame() accepts an explicit commit id", () => {
@@ -109,9 +117,9 @@ describe("Repository.blame / blameWithOptions (src/blame.rs)", () => {
     expect(partial.entries.length).toBeGreaterThan(0);
 
     for (const e of partial.entries) {
-      // startInBlamedFile / len are 0-based; the 1-based inclusive last line is start + len.
-      expect(e.startInBlamedFile + 1).toBeGreaterThanOrEqual(ranges[0].start);
-      expect(e.startInBlamedFile + e.len).toBeLessThanOrEqual(ranges[0].end);
+      // 1-based: the hunk's inclusive last line is `startInBlamedFile + len - 1`.
+      expect(e.startInBlamedFile).toBeGreaterThanOrEqual(ranges[0].start);
+      expect(e.startInBlamedFile + e.len - 1).toBeLessThanOrEqual(ranges[0].end);
     }
   });
 
@@ -123,5 +131,63 @@ describe("Repository.blame / blameWithOptions (src/blame.rs)", () => {
   test("blameWithOptions() with trackRenames blames without error", () => {
     const outcome = repo.blameWithOptions(file, null, { trackRenames: true });
     expect(outcome.entries.length).toBeGreaterThan(0);
+  });
+
+  test("blameWithOptions() with trackCopies blames without error", () => {
+    const outcome = repo.blameWithOptions(file, null, { trackCopies: true });
+    expect(outcome.entries.length).toBeGreaterThan(0);
+  });
+
+  test("resolveCommits populates author/committer/summary; default leaves them null", () => {
+    const resolved = repo.blameWithOptions(file, null, {
+      resolveCommits: true,
+    });
+    expect(resolved.entries.length).toBeGreaterThan(0);
+    for (const e of resolved.entries) {
+      expect(e.author).not.toBe(null);
+      expect(typeof e.author!.name).toBe("string");
+      expect(typeof e.author!.email).toBe("string");
+      expect(typeof e.author!.time).toBe("number");
+      expect(typeof e.author!.timezoneOffset).toBe("number");
+      expect(e.committer).not.toBe(null);
+      expect(typeof e.committer!.name).toBe("string");
+      expect(typeof e.summary).toBe("string");
+    }
+
+    const plain = repo.blame(file);
+    for (const e of plain.entries) {
+      expect(e.author).toBeUndefined();
+      expect(e.committer).toBeUndefined();
+      expect(e.summary).toBeUndefined();
+    }
+  });
+});
+
+describe("Repository.blameLine (src/blame.rs)", () => {
+  test("returns the hunk covering a 1-based line and null when out of range", () => {
+    const all = repo.blame(file);
+    const totalLines = all.entries.reduce((acc, e) => acc + e.len, 0);
+    expect(totalLines).toBeGreaterThan(0);
+    const mid = Math.ceil(totalLines / 2);
+
+    const entry = repo.blameLine(file, mid, null);
+    expect(entry).not.toBe(null);
+    expect(mid).toBeGreaterThanOrEqual(entry!.startInBlamedFile);
+    expect(mid).toBeLessThan(entry!.startInBlamedFile + entry!.len);
+
+    // A line far beyond the file maps to no hunk.
+    expect(repo.blameLine(file, totalLines + 100, null)).toBe(null);
+    // Line 0 (0-based caller mistake) also maps to nothing.
+    expect(repo.blameLine(file, 0, null)).toBe(null);
+  });
+
+  test("honors resolveCommits for the single returned hunk", () => {
+    const all = repo.blame(file);
+    const totalLines = all.entries.reduce((acc, e) => acc + e.len, 0);
+    const mid = Math.ceil(totalLines / 2);
+    const entry = repo.blameLine(file, mid, null, { resolveCommits: true });
+    expect(entry).not.toBe(null);
+    expect(entry!.author).not.toBe(null);
+    expect(typeof entry!.summary).toBe("string");
   });
 });

@@ -7,7 +7,6 @@ use napi_derive::napi;
 use gix::bstr::ByteSlice;
 use gix::progress::MessageLevel as GixMessageLevel;
 use gix::progress::Unit;
-use gix::protocol;
 
 /// The severity of a progress [`message`](crate::progress::ProgressEvent::level).
 ///
@@ -42,6 +41,18 @@ pub struct ProgressEvent {
     pub message: Option<String>,
     /// The severity of `message`, as a [`MessageLevel`].
     pub level: Option<MessageLevel>,
+    /// The unit of `step`/`max`, e.g. `"objects"`. Present only on the `init` event that
+    /// opens a progress phase; subsequent updates omit it.
+    pub unit: Option<String>,
+}
+
+/// Render gix's `Unit` (a label like `"objects"`) to a plain string.
+fn unit_label(unit: &Unit) -> String {
+    let mut out = String::new();
+    let _ = unit
+        .as_display_value()
+        .display_current_value(&mut out, 0, None);
+    out
 }
 
 /// Bridges a JS progress callback into the `gix` [`Progress`](gix::progress::Progress) trait.
@@ -86,6 +97,7 @@ impl gix::progress::Count for ProgressCallback {
             percent: None,
             message: None,
             level: None,
+            unit: None,
         });
     }
 
@@ -102,6 +114,7 @@ impl gix::progress::Count for ProgressCallback {
             percent: None,
             message: None,
             level: None,
+            unit: None,
         });
     }
 
@@ -122,6 +135,7 @@ impl gix::progress::NestedProgress for ProgressCallback {
             percent: None,
             message: None,
             level: None,
+            unit: None,
         });
         child
     }
@@ -144,6 +158,7 @@ impl gix::progress::Progress for ProgressCallback {
             percent: None,
             message: None,
             level: None,
+            unit: _unit.as_ref().map(unit_label),
         });
     }
 
@@ -155,6 +170,7 @@ impl gix::progress::Progress for ProgressCallback {
             percent: None,
             message: None,
             level: None,
+            unit: None,
         });
     }
 
@@ -179,6 +195,7 @@ impl gix::progress::Progress for ProgressCallback {
             percent: None,
             message: Some(message),
             level: Some(level),
+            unit: None,
         });
     }
 }
@@ -186,7 +203,7 @@ impl gix::progress::Progress for ProgressCallback {
 /// Parsed progress information as sent by a git server during fetch, clone and push operations.
 ///
 /// Build one from a raw server progress `line` with [`RemoteProgress::from_bytes`].
-#[napi(object)]
+#[napi]
 pub struct RemoteProgress {
     /// The name of the action, like `"Receiving objects"` or `"Resolving deltas"`.
     pub action: String,
@@ -196,6 +213,68 @@ pub struct RemoteProgress {
     pub step: Option<f64>,
     /// The maximum expected number of items (`step` / `max` * 100 ≈ `percent`), if reported.
     pub max: Option<f64>,
+    /// Total bytes transferred so far, parsed from the trailing throughput portion of the line
+    /// (e.g. `, 1.23 MiB`). `null` when the server omitted it. This is git2's
+    /// `Progress::received_bytes` equivalent.
+    pub received_bytes: Option<f64>,
+    /// Transfer rate in bytes per second, parsed from the trailing `| x MiB/s` portion. `null`
+    /// when the server omitted it.
+    pub throughput: Option<f64>,
+}
+
+/// Parse git-style human-readable byte counts from a server progress line, e.g.
+/// `, 1.23 MiB | 4.56 MiB/s` → `(Some(1289748.48), Some(4781506.56))`.
+///
+/// The first count is the total transferred so far; the second (after `|`) is the rate. Units use
+/// git's 1024-base suffixes (`B`, `KiB`, `MiB`, `GiB`, `TiB`, `PiB`, `EiB`). Returns
+/// `(None, None)` when no such tokens are present (the common case for phase lines without
+/// throughput).
+fn parse_byte_counts(text: &str) -> (Option<f64>, Option<f64>) {
+    const UNITS: &[(&str, f64)] = &[
+        ("EiB", (1u64 << 60) as f64),
+        ("PiB", (1u64 << 50) as f64),
+        ("TiB", (1u64 << 40) as f64),
+        ("GiB", (1u64 << 30) as f64),
+        ("MiB", (1u64 << 20) as f64),
+        ("KiB", (1u64 << 10) as f64),
+        ("B", 1.0),
+    ];
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        let mut j = i;
+        while j < bytes.len() && bytes[j] == b' ' {
+            j += 1;
+        }
+        let unit_start = j;
+        let mut k = j;
+        while k < bytes.len() && bytes[k].is_ascii_alphabetic() {
+            k += 1;
+        }
+        let unit = &text[unit_start..k];
+        if let Some((_, mult)) = UNITS.iter().find(|(u, _)| u.eq_ignore_ascii_case(unit)) {
+            if let Ok(value) = text[start..i].parse::<f64>() {
+                found.push(value * mult);
+            }
+        }
+        i = k;
+    }
+    (found.first().copied(), found.get(1).copied())
 }
 
 #[napi]
@@ -206,11 +285,14 @@ impl RemoteProgress {
     /// (e.g. a keep-alive packet or a line without an action prefix).
     #[napi]
     pub fn from_bytes(text: String) -> Option<RemoteProgress> {
+        let (received_bytes, throughput) = parse_byte_counts(&text);
         gix::protocol::RemoteProgress::from_bytes(text.as_bytes()).map(|p| RemoteProgress {
             action: String::from_utf8_lossy(p.action.as_bytes()).into_owned(),
             percent: p.percent,
             step: p.step.map(|s| s as f64),
             max: p.max.map(|m| m as f64),
+            received_bytes,
+            throughput,
         })
     }
 }
