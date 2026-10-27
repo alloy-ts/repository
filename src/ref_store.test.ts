@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import {
   initBackend,
-  refStoreTypeName,
-  refStoreTypeFromStr,
   RefStore,
   RefStoreType,
+  refStoreTypeFromStr,
+  refStoreTypeName,
   Repository,
 } from "./main.ts";
 
@@ -18,8 +18,7 @@ let repo: Repository;
 let store: RefStore;
 let head: string;
 
-const git = (args: string) =>
-  execSync(`git ${args}`, { cwd: path, stdio: "ignore" });
+const git = (args: string) => execSync(`git ${args}`, { cwd: path, stdio: "ignore" });
 
 beforeAll(() => {
   base = mkdtempSync(join(tmpdir(), "repo-ref-store-"));
@@ -40,19 +39,24 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  rmSync(base, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 200,
+  });
 });
 
 describe("RefStore lifecycle (src/ref_store.rs)", () => {
   test("new() and open() bind the same repository", () => {
     const a = new RefStore(repo);
     const b = RefStore.open(repo);
-    expect(a.storeType()).toBe(RefStoreType.Files);
-    expect(b.storeType()).toBe(RefStoreType.Files);
+    expect(a.storeType).toBe(RefStoreType.Files);
+    expect(b.storeType).toBe(RefStoreType.Files);
   });
 
   test("storeType() reports the backend format", () => {
-    expect(store.storeType()).toBe(RefStoreType.Files);
+    expect(store.storeType).toBe(RefStoreType.Files);
   });
 });
 
@@ -119,6 +123,97 @@ describe("RefStore iteration (src/ref_store.rs)", () => {
   });
 });
 
+describe("RefStore list / tryLookup / head / transaction (src/ref_store.rs)", () => {
+  test("list() / listNames() return all references (optionally globbed)", () => {
+    const refs = store.list();
+    const names = store.listNames();
+    expect(Array.isArray(refs)).toBe(true);
+    expect(Array.isArray(names)).toBe(true);
+    expect(refs.length).toBe(names.length);
+    expect(names).toContain("refs/heads/main");
+    expect(names).toContain("HEAD");
+
+    const heads = store.list("refs/heads/*");
+    expect(heads.every((r) => r.name.startsWith("refs/heads/"))).toBe(true);
+    const headNames = store.listNames("refs/heads/*");
+    expect(headNames.every((n) => n.startsWith("refs/heads/"))).toBe(true);
+  });
+
+  test("tryLookup() returns a Reference or null (no throw)", () => {
+    const found = store.tryLookup("refs/heads/main");
+    expect(found).not.toBe(null);
+    expect(found!.name).toBe("refs/heads/main");
+    expect(store.tryLookup("refs/heads/__nope__")).toBe(null);
+  });
+
+  test("head() returns the HEAD reference", () => {
+    const h = store.head();
+    expect(h.name).toBe("HEAD");
+    expect(h.kind === "symbolic" || h.kind === "object").toBe(true);
+  });
+
+  test("transaction() applies multiple edits and rolls back a failing batch", () => {
+    const result = store.transaction([
+      {
+        name: "refs/heads/__rs_tx_a__",
+        target: head,
+        force: true,
+        message: "tx a",
+      },
+      {
+        name: "refs/heads/__rs_tx_b__",
+        target: head,
+        force: true,
+        message: "tx b",
+      },
+    ]);
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBe(2);
+    expect(store.exists("refs/heads/__rs_tx_a__")).toBe(true);
+    expect(store.exists("refs/heads/__rs_tx_b__")).toBe(true);
+
+    // A wrong expectedTarget inside the batch must fail the whole transaction and
+    // create none of its new refs.
+    expect(() =>
+      store.transaction([
+        { name: "refs/heads/__rs_tx_c__", target: head, force: true },
+        {
+          name: "refs/heads/__rs_tx_a__",
+          target: head,
+          force: true,
+          expectedTarget: "0".repeat(40),
+        },
+      ]),
+    ).toThrow();
+    expect(store.exists("refs/heads/__rs_tx_c__")).toBe(false);
+    expect(store.lookup("refs/heads/__rs_tx_a__").target).toBe(head);
+
+    store.delete("refs/heads/__rs_tx_a__");
+    store.delete("refs/heads/__rs_tx_b__");
+  });
+
+  test("transaction() honours a per-entry signature for the reflog", () => {
+    const result = store.transaction([
+      {
+        name: "refs/heads/__rs_tx_sig__",
+        target: head,
+        force: true,
+        message: "sig tx",
+        signature: {
+          name: "TX Bot",
+          email: "tx@example.com",
+          time: 0,
+          timezoneOffset: 0,
+        },
+      },
+    ]);
+    expect(result.length).toBe(1);
+    const log = store.reflogRead("refs/heads/__rs_tx_sig__");
+    expect(log[log.length - 1].signature.name).toBe("TX Bot");
+    store.delete("refs/heads/__rs_tx_sig__");
+  });
+});
+
 describe("RefStore write / rename / delete (src/ref_store.rs)", () => {
   test("write() creates a reference and reflog", () => {
     const ref = store.write("refs/heads/__rs_write__", head, true, undefined, "probe write");
@@ -173,9 +268,7 @@ describe("RefStore write / rename / delete (src/ref_store.rs)", () => {
   test("rename() without force refuses to clobber an existing ref", () => {
     store.write("refs/heads/__rs_a__", head, true);
     store.write("refs/heads/__rs_b__", head, true);
-    expect(() =>
-      store.rename("refs/heads/__rs_a__", "refs/heads/__rs_b__", false),
-    ).toThrow();
+    expect(() => store.rename("refs/heads/__rs_a__", "refs/heads/__rs_b__", false)).toThrow();
     store.delete("refs/heads/__rs_a__");
     store.delete("refs/heads/__rs_b__");
   });
@@ -183,9 +276,7 @@ describe("RefStore write / rename / delete (src/ref_store.rs)", () => {
   test("delete() enforces expectedTarget", () => {
     store.write("refs/heads/__rs_del__", head, true);
 
-    expect(() =>
-      store.delete("refs/heads/__rs_del__", "0".repeat(40)),
-    ).toThrow();
+    expect(() => store.delete("refs/heads/__rs_del__", "0".repeat(40))).toThrow();
 
     store.delete("refs/heads/__rs_del__", head);
     expect(store.exists("refs/heads/__rs_del__")).toBe(false);
@@ -254,9 +345,9 @@ describe("RefStore paths and deref (src/ref_store.rs)", () => {
   test("gitDir / commonDir / commonDirResolved / packedRefsPath expose store locations", () => {
     expect(store.gitDir.length).toBeGreaterThan(0);
     // A non-worktree clone: common dir equals git dir.
-    expect(store.commonDir()).toBe(store.gitDir());
-    expect(store.commonDirResolved()).toBe(store.gitDir());
-    expect(store.packedRefsPath().endsWith("packed-refs")).toBe(true);
+    expect(store.commonDir).toBe(store.gitDir);
+    expect(store.commonDirResolved).toBe(store.gitDir);
+    expect(store.packedRefsPath.endsWith("packed-refs")).toBe(true);
   });
 
   test("write() with deref updates the referent of a symbolic ref", () => {

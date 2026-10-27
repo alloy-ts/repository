@@ -77,6 +77,28 @@ Absent optional fields on result objects are **omitted** (`undefined`), while
 class getters return `null` — the same convention the rest of this library
 follows.
 
+### Name matching & mapping
+
+Syntactic name predicates and single-side mapping — the per-refspec equivalents
+of git2's `Refspec::src_matches` / `dst_matches` / `transform` / `rtransform`.
+Each wraps the `MatchGroup` machinery used by `matchLhs` / `matchRhs`,
+delegating to this `RefSpec` alone.
+
+| Member               | Signature                          | Notes                                                                                                                        |
+| -------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `sourceMatches`      | `(name: string) => boolean`        | `true` when `name` matches the source (left) side.                                                                           |
+| `destinationMatches` | `(name: string) => boolean`        | `true` when `name` matches the destination (right) side. One-sided push specs have no destination and always return `false`. |
+| `transform`          | `(name: string) => string \| null` | Map `name` on the source side to its destination; `null` when `name` does not match.                                         |
+| `rtransform`         | `(name: string) => string \| null` | Reverse-map `name` on the destination side to its source; `null` when `name` does not match.                                 |
+
+Caveats:
+
+- A **negative** refspec never produces a mapping, so `sourceMatches` /
+  `destinationMatches` return `false` for names it excludes and `transform` /
+  `rtransform` return `null`. Its pattern is still readable via `spec`.
+- `transform` / `rtransform` are correct for **fetch** specs (they also _work_
+  for push specs), matching the `matchLhs` / `matchRhs` guarantee above.
+
 ## `MatchGroup`
 
 A group of refspecs matched in order, handling negation, deduplication, and
@@ -146,6 +168,15 @@ spec.expandPrefixes();
 // ["main", "refs/main", "refs/tags/main", "refs/heads/main", ...] for partial names
 spec.instruction();
 // { operation: "fetch", kind: "and_update", src, dst, allowNonFastForward: true }
+
+// Probe a name against either side, or map it through the spec
+spec.sourceMatches("refs/heads/main"); // true
+spec.sourceMatches("refs/tags/v1"); // false
+spec.destinationMatches("refs/remotes/origin/main"); // true
+spec.destinationMatches("refs/heads/main"); // false
+spec.transform("refs/heads/main"); // "refs/remotes/origin/main"
+spec.rtransform("refs/remotes/origin/main"); // "refs/heads/main"
+spec.transform("refs/tags/v1"); // null (no match)
 
 // Decide what a fetch of a remote's refs would update
 const group = MatchGroup.parseSpecs(
