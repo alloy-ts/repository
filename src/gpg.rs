@@ -1,10 +1,12 @@
 use std::io::{Cursor, Write};
 use std::process::{Command, Stdio};
 
-use napi::bindgen_prelude::Buffer;
 use napi::Result as NapiResult;
+use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use pgp::composed::{ArmorOptions, Deserializable, Message, MessageBuilder, SignedPublicKey, SignedSecretKey};
+use pgp::composed::{
+    ArmorOptions, Deserializable, Message, MessageBuilder, SignedPublicKey, SignedSecretKey,
+};
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use pgp::types::{KeyDetails, KeyId, Password};
@@ -283,7 +285,12 @@ impl Context {
     }
 
     #[napi]
-    pub fn decrypt(&self, secret_key: &Key, passphrase: Option<String>, data: &Data) -> NapiResult<Data> {
+    pub fn decrypt(
+        &self,
+        secret_key: &Key,
+        passphrase: Option<String>,
+        data: &Data,
+    ) -> NapiResult<Data> {
         if self.protocol != Protocol::OpenPgp {
             return Err(napi::Error::from_reason(format!(
                 "Protocol {:?} not supported for decryption",
@@ -299,7 +306,9 @@ impl Context {
 
         let bytes = data.bytes.clone();
         let (msg, _) = Message::from_armor(Cursor::new(bytes.clone()))
-            .or_else(|_| Message::from_bytes(Cursor::new(bytes.clone())).map(|m| (m, Default::default())))
+            .or_else(|_| {
+                Message::from_bytes(Cursor::new(bytes.clone())).map(|m| (m, Default::default()))
+            })
             .map_err(|e| napi::Error::from_reason(format!("Failed to parse message: {e}")))?;
 
         let pass = passphrase.unwrap_or_default();
@@ -308,15 +317,20 @@ impl Context {
             .decrypt(&pw, sk)
             .map_err(|e| napi::Error::from_reason(format!("Decryption error: {e}")))?;
 
-        let literal_bytes = decrypted
-            .as_data_vec()
-            .map_err(|e| napi::Error::from_reason(format!("Failed to extract decrypted data: {e}")))?;
+        let literal_bytes = decrypted.as_data_vec().map_err(|e| {
+            napi::Error::from_reason(format!("Failed to extract decrypted data: {e}"))
+        })?;
 
         Ok(Data::from_bytes(Buffer::from(literal_bytes)))
     }
 
     #[napi]
-    pub fn sign(&self, secret_key: &Key, passphrase: Option<String>, data: &Data) -> NapiResult<Data> {
+    pub fn sign(
+        &self,
+        secret_key: &Key,
+        passphrase: Option<String>,
+        data: &Data,
+    ) -> NapiResult<Data> {
         if self.protocol != Protocol::OpenPgp {
             return Err(napi::Error::from_reason(format!(
                 "Protocol {:?} not supported for signing",
@@ -363,11 +377,13 @@ impl Context {
         };
 
         let bytes = signed_data.bytes.clone();
-        let (msg, _) = match Message::from_armor(Cursor::new(bytes.clone()))
-            .or_else(|_| Message::from_bytes(Cursor::new(bytes.clone())).map(|m| (m, Default::default())))
-        {
+        let (msg, _) = match Message::from_armor(Cursor::new(bytes.clone())).or_else(|_| {
+            Message::from_bytes(Cursor::new(bytes.clone())).map(|m| (m, Default::default()))
+        }) {
             Ok(m) => m,
-            Err(e) => return VerificationResult::failure(format!("Failed to parse signed data: {e}")),
+            Err(e) => {
+                return VerificationResult::failure(format!("Failed to parse signed data: {e}"));
+            }
         };
 
         match msg.verify(&pub_key) {
@@ -400,7 +416,11 @@ pub fn gpg_nth_column(line: String, col: u32) -> NapiResult<String> {
     for _ in 0..col {
         match line[pos..].find(':') {
             Some(p) => pos += p + 1,
-            None => return Err(napi::Error::from_reason("Malformed output from gpg".to_string())),
+            None => {
+                return Err(napi::Error::from_reason(
+                    "Malformed output from gpg".to_string(),
+                ));
+            }
         }
     }
     let end_pos = line[pos..].find(':').map(|p| pos + p);
@@ -447,7 +467,13 @@ pub fn gpg_get_uid(fingerprint: String) -> String {
 pub fn gpg_lookup_key(query: String) -> Vec<String> {
     let exe = gpg_get_executable();
     let output = Command::new(exe)
-        .args(["--batch", "--with-colons", "--fingerprint", "--list-keys", &query])
+        .args([
+            "--batch",
+            "--with-colons",
+            "--fingerprint",
+            "--list-keys",
+            &query,
+        ])
         .output();
 
     let Ok(output) = output else {
@@ -481,12 +507,19 @@ pub fn gpg_lookup_key(query: String) -> Vec<String> {
 pub fn gpg_list_secret_keys() -> NapiResult<Vec<String>> {
     let exe = gpg_get_executable();
     let output = Command::new(exe)
-        .args(["--batch", "--with-colons", "--list-secret-keys", "--fingerprint"])
+        .args([
+            "--batch",
+            "--with-colons",
+            "--list-secret-keys",
+            "--fingerprint",
+        ])
         .output()
         .map_err(|e| napi::Error::from_reason(format!("Failed to execute gpg: {e}")))?;
 
     if !output.status.success() {
-        return Err(napi::Error::from_reason("gpg --list-secret-keys failed".to_string()));
+        return Err(napi::Error::from_reason(
+            "gpg --list-secret-keys failed".to_string(),
+        ));
     }
 
     let mut secret_keys = Vec::new();
@@ -516,15 +549,27 @@ pub fn gpg_encrypt_to_file(
     if key_is_trusted {
         cmd.args(["--trust-model", "always"]);
     }
-    cmd.args(["-o", &filename, "-r", &format!("0x{recipient_fingerprint}"), "-e"]);
+    cmd.args([
+        "-o",
+        &filename,
+        "-r",
+        &format!("0x{recipient_fingerprint}"),
+        "-e",
+    ]);
     cmd.stdin(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| napi::Error::from_reason(format!("Failed to spawn gpg: {e}")))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| napi::Error::from_reason(format!("Failed to spawn gpg: {e}")))?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_ref()).map_err(|e| napi::Error::from_reason(format!("Failed to write stdin: {e}")))?;
+        stdin
+            .write_all(input.as_ref())
+            .map_err(|e| napi::Error::from_reason(format!("Failed to write stdin: {e}")))?;
     }
 
-    let status = child.wait().map_err(|e| napi::Error::from_reason(format!("Failed to wait for gpg: {e}")))?;
+    let status = child
+        .wait()
+        .map_err(|e| napi::Error::from_reason(format!("Failed to wait for gpg: {e}")))?;
     if !status.success() {
         return Err(napi::Error::from_reason("Failed to encrypt".to_string()));
     }
@@ -565,7 +610,9 @@ mod tests {
         assert_eq!(d1.bytes().as_ref(), b"hello");
         assert!(!d1.is_armored());
 
-        let d2 = Data::from_armored_string("-----BEGIN PGP MESSAGE-----\n-----END PGP MESSAGE-----".to_string());
+        let d2 = Data::from_armored_string(
+            "-----BEGIN PGP MESSAGE-----\n-----END PGP MESSAGE-----".to_string(),
+        );
         assert!(d2.is_armored());
     }
 

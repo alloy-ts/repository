@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use napi::Result;
 use napi_derive::napi;
 
 use crate::error::{err, err_str, parse_oid, thread_local};
@@ -55,7 +54,7 @@ pub struct GraphCommit {
 fn to_graph_commit(
     g: &gix::commitgraph::Graph,
     commit: gix::commitgraph::file::Commit<'_>,
-) -> Result<GraphCommit> {
+) -> napi::Result<GraphCommit> {
     let id = commit.id().to_string();
     let root_tree_id = commit.root_tree_id().to_string();
     let generation = commit.generation() as f64;
@@ -76,15 +75,13 @@ fn to_graph_commit(
     })
 }
 
-fn parse_hash_kind(s: &str) -> Result<gix::hash::Kind> {
-    match s {
-        "Sha1" => Ok(gix::hash::Kind::Sha1),
-        "Sha256" => Ok(gix::hash::Kind::Sha256),
-        other => Err(err_str(
+fn parse_hash_kind(s: &str) -> napi::Result<gix::hash::Kind> {
+    crate::object::parse_hash_kind_ci(s).ok_or_else(|| {
+        err_str(
             "hash_kind",
-            &format!("unknown object hash kind: {other} (expected \"Sha1\" or \"Sha256\")"),
-        )),
-    }
+            &format!("unknown object hash kind: {s} (expected \"Sha1\" or \"Sha256\")"),
+        )
+    })
 }
 
 /// A complete commit-graph, wrapping `gix::commitgraph::Graph`.
@@ -113,7 +110,7 @@ impl Graph {
 
     /// Translate the given commit id to its position in the graph, or `null` if it is absent.
     #[napi]
-    pub fn lookup(&self, id: String) -> Result<Option<f64>> {
+    pub fn lookup(&self, id: String) -> napi::Result<Option<f64>> {
         let oid = parse_oid(&id)?;
         Ok(self.inner.lookup(oid).map(|p| p.0 as f64))
     }
@@ -124,7 +121,7 @@ impl Graph {
     /// If `pos` is not a non-negative integer within the `u32` range, or if it is
     /// greater than or equal to [`num_commits`](Self::num_commits).
     #[napi]
-    pub fn id_at(&self, pos: f64) -> Result<String> {
+    pub fn id_at(&self, pos: f64) -> napi::Result<String> {
         if pos < 0.0 || pos.fract() != 0.0 || pos > u32::MAX as f64 {
             return Err(err_str(
                 "id_at",
@@ -144,7 +141,7 @@ impl Graph {
     /// Verify the integrity of the commit-graph (checksums and generation numbers) and return a
     /// summary of the traversal.
     #[napi]
-    pub fn verify_integrity(&self) -> Result<CommitGraphOutcome> {
+    pub fn verify_integrity(&self) -> napi::Result<CommitGraphOutcome> {
         let outcome = self
             .inner
             .verify_integrity(|_commit| Ok::<_, Infallible>(()))
@@ -167,7 +164,7 @@ impl Graph {
     ///
     /// Note: gix panics on out-of-range access, so this guards the range and returns `null` instead.
     #[napi]
-    pub fn commit_at(&self, position: f64) -> Result<Option<GraphCommit>> {
+    pub fn commit_at(&self, position: f64) -> napi::Result<Option<GraphCommit>> {
         if position < 0.0 || position.fract() != 0.0 || position > u32::MAX as f64 {
             return Err(err_str(
                 "commit_at",
@@ -186,7 +183,7 @@ impl Graph {
 
     /// Return the commit matching `id`, or `null` if it is not present in the graph.
     #[napi]
-    pub fn commit_by_id(&self, id: String) -> Result<Option<GraphCommit>> {
+    pub fn commit_by_id(&self, id: String) -> napi::Result<Option<GraphCommit>> {
         let oid = parse_oid(&id)?;
         match self.inner.commit_by_id(oid) {
             Some(commit) => Ok(Some(to_graph_commit(&self.inner, commit)?)),
@@ -202,7 +199,7 @@ impl Graph {
 
     /// All commits in the graph (unsorted), as owned [`GraphCommit`] values.
     #[napi]
-    pub fn iter_commits(&self) -> Result<Vec<GraphCommit>> {
+    pub fn iter_commits(&self) -> napi::Result<Vec<GraphCommit>> {
         let mut out = Vec::new();
         for commit in self.inner.iter_commits() {
             out.push(to_graph_commit(&self.inner, commit)?);
@@ -216,7 +213,11 @@ impl Graph {
     /// backward compatibility and must be `"Sha1"` or `"Sha256"` (it is validated but no longer
     /// selects the parser). `alloc_limit_bytes` is accepted for compatibility and currently unused.
     #[napi]
-    pub fn at(path: String, object_hash: String, alloc_limit_bytes: Option<f64>) -> Result<Graph> {
+    pub fn at(
+        path: String,
+        object_hash: String,
+        alloc_limit_bytes: Option<f64>,
+    ) -> napi::Result<Graph> {
         // Validate the caller's hash-kind hint (the parser auto-detects from the file).
         let _kind = parse_hash_kind(&object_hash)?;
         let _ = alloc_limit_bytes;
@@ -230,7 +231,7 @@ impl Graph {
 impl Repository {
     /// Return info about the commit-graph if it is present *and* enabled, else `null`.
     #[napi]
-    pub fn commit_graph_if_enabled(&self) -> Result<Option<CommitGraphInfo>> {
+    pub fn commit_graph_if_enabled(&self) -> napi::Result<Option<CommitGraphInfo>> {
         let r = thread_local(&self.inner);
         match r
             .commit_graph_if_enabled()
@@ -245,7 +246,7 @@ impl Repository {
 
     /// Return info about the commit-graph if it is present (regardless of configuration), else `null`.
     #[napi]
-    pub fn commit_graph(&self) -> Result<Option<CommitGraphInfo>> {
+    pub fn commit_graph(&self) -> napi::Result<Option<CommitGraphInfo>> {
         let r = thread_local(&self.inner);
         match r.commit_graph() {
             Ok(graph) => Ok(Some(CommitGraphInfo {
@@ -258,7 +259,7 @@ impl Repository {
 
     /// Return the full commit-graph if it is present *and* enabled, else `null`.
     #[napi]
-    pub fn graph_if_enabled(&self) -> Result<Option<Graph>> {
+    pub fn graph_if_enabled(&self) -> napi::Result<Option<Graph>> {
         let r = thread_local(&self.inner);
         match r
             .commit_graph_if_enabled()
@@ -273,7 +274,7 @@ impl Repository {
 
     /// Return the full commit-graph if it is present (regardless of configuration), else `null`.
     #[napi]
-    pub fn graph(&self) -> Result<Option<Graph>> {
+    pub fn graph(&self) -> napi::Result<Option<Graph>> {
         let r = thread_local(&self.inner);
         match r.commit_graph() {
             Ok(graph) => Ok(Some(Graph {
@@ -324,7 +325,7 @@ impl TraversalGraph {
     ///
     /// `cache` is an optional commit-graph (from [`Repository::graph`]) used to accelerate lookups.
     #[napi(constructor)]
-    pub fn new(repo: &Repository, cache: Option<&Graph>) -> Result<Self> {
+    pub fn new(repo: &Repository, cache: Option<&Graph>) -> napi::Result<Self> {
         let cache_arc = cache.map(|g| Arc::clone(&g.inner));
         // SAFETY: the `Arc` is stored in `self.cache` (declared above `inner`) and is only dropped
         // after `inner`, so the `Graph` it points to outlives `inner`'s `cache` reference.
@@ -357,7 +358,7 @@ impl TraversalGraph {
 
     /// Whether `id` has been cached (i.e. already processed).
     #[napi]
-    pub fn contains(&self, id: String) -> Result<bool> {
+    pub fn contains(&self, id: String) -> napi::Result<bool> {
         let oid = parse_oid(&id)?;
         Ok(self.inner.contains(oid.as_ref()))
     }
@@ -367,7 +368,7 @@ impl TraversalGraph {
     /// New parents are cached with default (`()`) data; already-cached parents are left untouched.
     /// If `first_parent` is `true`, only the first parent is considered (useful for first-parent walks).
     #[napi]
-    pub fn insert_parents(&mut self, id: String, first_parent: bool) -> Result<()> {
+    pub fn insert_parents(&mut self, id: String, first_parent: bool) -> napi::Result<()> {
         let oid = parse_oid(&id)?;
         let mut new_parent_data = |_id, _ts| ();
         let mut update_existing = |_id, _data: &mut ()| {};

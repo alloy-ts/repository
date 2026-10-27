@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use napi::Result;
 use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
@@ -176,7 +175,7 @@ fn write_same_object(
     r: &gix::Repository,
     original: &gix::Object,
     bytes: Vec<u8>,
-) -> Result<gix::ObjectId> {
+) -> napi::Result<gix::ObjectId> {
     let hash = r.object_hash();
     let typed: Option<gix::ObjectId> = match original.kind {
         gix::object::Kind::Commit => gix::objs::CommitRef::from_bytes(&bytes, hash)
@@ -366,7 +365,7 @@ fn replace_inner(
     object: String,
     content: Either<Buffer, String>,
     options: Option<ReplaceOptions>,
-) -> Result<ReplaceResult> {
+) -> napi::Result<ReplaceResult> {
     let r = thread_local(repo);
     let force = options.as_ref().and_then(|o| o.force).unwrap_or(false);
     let use_replace = match options.as_ref().and_then(|o| o.use_replace_refs) {
@@ -647,7 +646,7 @@ impl Repository {
         object: String,
         content: Either<Buffer, String>,
         options: Option<ReplaceOptions>,
-    ) -> Result<ReplaceResult> {
+    ) -> napi::Result<ReplaceResult> {
         replace_inner(&self.inner, object, content, options)
     }
 
@@ -659,7 +658,7 @@ impl Repository {
         object: String,
         content: Either<Buffer, String>,
         options: Option<ReplaceOptions>,
-    ) -> Result<Option<ReplaceResult>> {
+    ) -> napi::Result<Option<ReplaceResult>> {
         let force = options.as_ref().and_then(|o| o.force).unwrap_or(false);
         if !force {
             let r = thread_local(&self.inner);
@@ -687,7 +686,7 @@ impl Repository {
     /// flat `revisions` array. Returns `null` when no such node exists (or the stored
     /// blob is not a revision node).
     #[napi(ts_return_type = "Revision | null")]
-    pub fn get_replace_node(&self, oid: String) -> Result<Option<Replace>> {
+    pub fn get_replace_node(&self, oid: String) -> napi::Result<Option<Replace>> {
         let r = thread_local(&self.inner);
         let ref_name = format!("refs/replace/{oid}");
         let reference = match r.try_find_reference(ref_name.as_str()) {

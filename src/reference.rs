@@ -1,25 +1,44 @@
 use std::sync::Arc;
 
-use napi::Result;
 use napi_derive::napi;
 
 use gix::config::AsBStr;
+use gix::refs::TargetRef;
 
+use crate::blob::{Blob, build_blob};
 use crate::commit::{Commit, build_commit};
 use crate::error::{err, err_str, parse_oid, thread_local};
-use crate::identity::{Signature, signature_from_dto, to_signature};
+use crate::identity::{Signature, signature_from_dto};
+use crate::object::{Object, build_object, string_to_kind};
 use crate::repository::Repository;
+use crate::tag::{Tag, build_tag};
 use crate::tree::{Tree, build_tree};
 
 /// The repository HEAD, exposed to TypeScript.
 #[napi(object)]
 pub struct Head {
+    /// The name of the reference `HEAD` points at (`refs/heads/...`), or `null`
+    /// when `HEAD` is detached or unborn.
     pub referent: Option<String>,
+    /// The kind of `HEAD`: `"symbolic"` (points at a branch), `"detached"`
+    /// (points directly at an object), or `"unborn"` (points at a branch that
+    /// does not exist yet).
+    pub kind: String,
 }
 
-pub fn build_head(_repo: &Arc<gix::ThreadSafeRepository>, head: gix::Head) -> Result<Head> {
+pub fn build_head(_repo: &Arc<gix::ThreadSafeRepository>, head: gix::Head) -> napi::Result<Head> {
     let referent = head.referent_name().map(|n| n.to_string());
-    Ok(Head { referent })
+    let kind = if head.is_detached() {
+        "detached"
+    } else if head.is_unborn() {
+        "unborn"
+    } else {
+        "symbolic"
+    };
+    Ok(Head {
+        referent,
+        kind: kind.to_string(),
+    })
 }
 
 /// A git reference (branch, tag, or HEAD) exposed to TypeScript.
@@ -29,6 +48,9 @@ pub struct Reference {
     pub(crate) name: String,
     target: String,
     symbolic_target: Option<String>,
+    /// The packed-refs peel target (`git_reference_target_peel`), populated only
+    /// for references that originated from `packed-refs`; `null` otherwise.
+    target_peel: Option<String>,
 }
 
 #[napi]
@@ -61,13 +83,60 @@ impl Reference {
         self.symbolic_target.clone()
     }
 
+    /// The packed-refs peel target of a direct reference that points at a tag
+    /// object (`git_reference_target_peel`). Only populated for references that
+    /// originated from `packed-refs`; `null` for loose references and for
+    /// symbolic references.
+    #[napi(getter)]
+    pub fn target_peel(&self) -> Option<String> {
+        self.target_peel.clone()
+    }
+
     /// The reference category derived from the name prefix, e.g. `tag`, `local_branch`,
     /// `remote_branch`, `note`, `pseudo_ref`, `main_ref`, `linked_ref`, `bisect`,
     /// `rewritten`, or `worktree_private`; `null` when the name has no known category.
     #[napi]
     pub fn category(&self) -> Option<String> {
-        let full_name = gix::refs::FullName::try_from(self.name.as_str()).ok()?;
-        full_name.category().map(category_to_string)
+        category_enum(&self.name).map(category_to_string)
+    }
+
+    /// Whether this reference is a local branch (`refs/heads/...`).
+    #[napi]
+    pub fn is_branch(&self) -> bool {
+        matches!(category_enum(&self.name), Some(RefCategory::LocalBranch))
+    }
+
+    /// Whether this reference points at another reference (rather than directly at an object).
+    #[napi]
+    pub fn is_symbolic(&self) -> bool {
+        self.symbolic_target.is_some()
+    }
+
+    /// Whether this reference is a remote-tracking branch (`refs/remotes/...`).
+    #[napi]
+    pub fn is_remote(&self) -> bool {
+        matches!(category_enum(&self.name), Some(RefCategory::RemoteBranch))
+    }
+
+    /// Whether this reference is a tag (`refs/tags/...`).
+    #[napi]
+    pub fn is_tag(&self) -> bool {
+        matches!(category_enum(&self.name), Some(RefCategory::Tag))
+    }
+
+    /// Whether this reference is a note (`refs/notes/...`).
+    #[napi]
+    pub fn is_note(&self) -> bool {
+        matches!(category_enum(&self.name), Some(RefCategory::Note))
+    }
+
+    /// Whether this reference is a pseudo ref (`HEAD`, `FETCH_HEAD`, ...).
+    #[napi]
+    pub fn is_pseudo_ref(&self) -> bool {
+        matches!(
+            category_enum(&self.name),
+            Some(RefCategory::PseudoRef) | Some(RefCategory::MainPseudoRef)
+        )
     }
 
     /// Like [`category()`](Self::category), but also returns the shortened name with
@@ -78,7 +147,7 @@ impl Reference {
         full_name
             .category_and_short_name()
             .map(|(category, short_name)| RefCategoryAndShortName {
-                category: category_to_string(category),
+                category: category_to_string(ref_category_from(category)),
                 short_name: String::from_utf8_lossy(short_name).into_owned(),
             })
     }
@@ -86,7 +155,7 @@ impl Reference {
     /// The name with well-known category prefixes stripped, e.g.
     /// `refs/heads/main` → `main`. Names without a known prefix are returned as-is.
     #[napi]
-    pub fn shorten(&self) -> Result<String> {
+    pub fn shorten(&self) -> napi::Result<String> {
         let full_name =
             gix::refs::FullName::try_from(self.name.as_str()).map_err(|e| err("ref_name", e))?;
         Ok(String::from_utf8_lossy(full_name.shorten()).into_owned())
@@ -94,7 +163,7 @@ impl Reference {
 
     /// The file name portion of the full name, e.g. `main` for `refs/heads/main`.
     #[napi]
-    pub fn file_name(&self) -> Result<String> {
+    pub fn file_name(&self) -> napi::Result<String> {
         let full_name =
             gix::refs::FullName::try_from(self.name.as_str()).map_err(|e| err("ref_name", e))?;
         Ok(String::from_utf8_lossy(full_name.as_ref().file_name()).into_owned())
@@ -104,7 +173,7 @@ impl Reference {
     /// tag chain, returning the first non-tag object id this reference ultimately
     /// points to. Throws when a symbolic chain loops or an object is missing.
     #[napi]
-    pub fn peel_to_id(&self) -> Result<String> {
+    pub fn peel_to_id(&self) -> napi::Result<String> {
         let r = thread_local(&self.repo);
         let mut reference = r
             .find_reference(self.name.as_str())
@@ -116,7 +185,7 @@ impl Reference {
     /// Follow this symbolic reference one level and return the reference it points
     /// to, or `null` if this reference points directly at an object.
     #[napi]
-    pub fn follow(&self) -> Result<Option<Reference>> {
+    pub fn follow(&self) -> napi::Result<Option<Reference>> {
         let r = thread_local(&self.repo);
         let reference = r
             .find_reference(self.name.as_str())
@@ -130,9 +199,246 @@ impl Reference {
         }
     }
 
+    /// Follow all symbolic references until a direct reference is reached,
+    /// returning that reference. Throws when the symbolic chain loops or a
+    /// referent is missing.
+    #[napi]
+    pub fn resolve(&self) -> napi::Result<Reference> {
+        let r = thread_local(&self.repo);
+        let mut name = self.name.clone();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(name.clone()) {
+                return Err(err_str(
+                    "resolve",
+                    format!("symbolic reference cycle detected at '{name}'"),
+                ));
+            }
+            let reference = r
+                .find_reference(name.as_str())
+                .map_err(|e| err("resolve", e))?;
+            match reference.target() {
+                TargetRef::Object(_) => return build_reference(&self.repo, reference),
+                TargetRef::Symbolic(next) => name = next.to_string(),
+            }
+        }
+    }
+
+    /// Peel this reference to an object of the given kind (`"commit"`, `"tree"`,
+    /// `"blob"`, or `"tag"`), following symbolic references and annotated tags,
+    /// and return the resulting object. Throws when the reference cannot be
+    /// peeled to that kind.
+    #[napi]
+    pub fn peel_to_kind(&self, kind: String) -> napi::Result<Object> {
+        let r = thread_local(&self.repo);
+        let mut reference = r
+            .find_reference(self.name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let kind = string_to_kind(&kind)?;
+        let obj = reference
+            .peel_to_kind(kind)
+            .map_err(|e| err("peel_to_kind", e))?;
+        build_object(&self.repo, obj.id)
+    }
+
+    /// Peel this reference to a commit.
+    #[napi]
+    pub fn peel_to_commit(&self) -> napi::Result<Commit> {
+        let r = thread_local(&self.repo);
+        let mut reference = r
+            .find_reference(self.name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let commit = reference
+            .peel_to_commit()
+            .map_err(|e| err("peel_to_commit", e))?;
+        build_commit(&self.repo, commit)
+    }
+
+    /// Peel this reference to a tree.
+    #[napi]
+    pub fn peel_to_tree(&self) -> napi::Result<Tree> {
+        let r = thread_local(&self.repo);
+        let mut reference = r
+            .find_reference(self.name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let tree = reference
+            .peel_to_tree()
+            .map_err(|e| err("peel_to_tree", e))?;
+        build_tree(&self.repo, tree.id)
+    }
+
+    /// Peel this reference to a blob.
+    #[napi]
+    pub fn peel_to_blob(&self) -> napi::Result<Blob> {
+        let r = thread_local(&self.repo);
+        let mut reference = r
+            .find_reference(self.name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let blob = reference
+            .peel_to_blob()
+            .map_err(|e| err("peel_to_blob", e))?;
+        Ok(build_blob(&self.repo, blob.id))
+    }
+
+    /// Peel this reference to a tag.
+    #[napi]
+    pub fn peel_to_tag(&self) -> napi::Result<Tag> {
+        let r = thread_local(&self.repo);
+        let mut reference = r
+            .find_reference(self.name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let tag = reference.peel_to_tag().map_err(|e| err("peel_to_tag", e))?;
+        build_tag(&self.repo, tag)
+    }
+
+    /// Re-point this direct reference at `id`, writing a reflog entry. By default
+    /// the reference must already exist; pass `expected` to additionally require
+    /// its current target to match (a 40-hex object id or symbolic name) before
+    /// updating, for a compare-and-swap.
+    #[napi]
+    pub fn set_target(
+        &self,
+        id: String,
+        message: Option<String>,
+        expected: Option<String>,
+    ) -> napi::Result<Reference> {
+        let r = thread_local(&self.repo);
+        let oid = parse_oid(&id)?;
+        let previous = match expected {
+            Some(e) => {
+                gix::refs::transaction::PreviousValue::MustExistAndMatch(parse_ref_target(&e)?)
+            }
+            None => gix::refs::transaction::PreviousValue::MustExist,
+        };
+        let full_name =
+            gix::refs::FullName::try_from(self.name.as_str()).map_err(|e| err("ref_name", e))?;
+        let log = gix::refs::transaction::LogChange {
+            mode: gix::refs::transaction::RefLog::AndReference,
+            force_create_reflog: false,
+            message: message.unwrap_or_default().into(),
+        };
+        let edit = gix::refs::transaction::RefEdit::update_with_log(
+            full_name,
+            gix::refs::Target::Object(oid),
+            previous,
+            log,
+        );
+        r.edit_reference(edit).map_err(|e| err("set_target", e))?;
+        build_reference(
+            &self.repo,
+            r.find_reference(self.name.as_str())
+                .map_err(|e| err("find_reference", e))?,
+        )
+    }
+
+    /// Re-point this symbolic reference at `target`, writing a reflog entry. The
+    /// reference must already exist.
+    #[napi]
+    pub fn set_symbolic_target(
+        &self,
+        target: String,
+        message: Option<String>,
+    ) -> napi::Result<Reference> {
+        let r = thread_local(&self.repo);
+        let full_name =
+            gix::refs::FullName::try_from(self.name.as_str()).map_err(|e| err("ref_name", e))?;
+        let symbolic =
+            gix::refs::FullName::try_from(target.as_str()).map_err(|e| err("ref_target", e))?;
+        let log = gix::refs::transaction::LogChange {
+            mode: gix::refs::transaction::RefLog::AndReference,
+            force_create_reflog: false,
+            message: message.unwrap_or_default().into(),
+        };
+        let edit = gix::refs::transaction::RefEdit::update_with_log(
+            full_name,
+            gix::refs::Target::Symbolic(symbolic),
+            gix::refs::transaction::PreviousValue::MustExist,
+            log,
+        );
+        r.edit_reference(edit)
+            .map_err(|e| err("set_symbolic_target", e))?;
+        build_reference(
+            &self.repo,
+            r.find_reference(self.name.as_str())
+                .map_err(|e| err("find_reference", e))?,
+        )
+    }
+
+    /// Rename this reference to `newName`. By default the destination must not
+    /// exist; pass `force` to overwrite it. This is implemented as a
+    /// create-at-destination followed by a delete-at-source in a single
+    /// transaction; unlike libgit2 it does not move the reflog, so the new ref
+    /// starts without history.
+    #[napi]
+    pub fn rename(
+        &self,
+        new_name: String,
+        force: Option<bool>,
+        message: Option<String>,
+    ) -> napi::Result<Reference> {
+        let r = thread_local(&self.repo);
+        let reference = r
+            .find_reference(self.name.as_str())
+            .map_err(|e| err("find_reference", e))?;
+        let target = match reference.target() {
+            TargetRef::Object(id) => gix::refs::Target::Object(id.to_owned()),
+            TargetRef::Symbolic(name) => gix::refs::Target::Symbolic(name.to_owned()),
+        };
+        let new_full =
+            gix::refs::FullName::try_from(new_name.as_str()).map_err(|e| err("rename", e))?;
+        if !force.unwrap_or(false)
+            && r.try_find_reference(new_name.as_str())
+                .map_err(|e| err("rename", e))?
+                .is_some()
+        {
+            return Err(err_str(
+                "rename",
+                format!("reference '{new_name}' already exists"),
+            ));
+        }
+        let new_previous = if force.unwrap_or(false) {
+            gix::refs::transaction::PreviousValue::Any
+        } else {
+            gix::refs::transaction::PreviousValue::MustNotExist
+        };
+        let log = gix::refs::transaction::LogChange {
+            mode: gix::refs::transaction::RefLog::AndReference,
+            force_create_reflog: false,
+            message: message.unwrap_or_default().into(),
+        };
+        let create =
+            gix::refs::transaction::RefEdit::update_with_log(new_full, target, new_previous, log);
+        let old_full =
+            gix::refs::FullName::try_from(self.name.as_str()).map_err(|e| err("rename", e))?;
+        let delete = gix::refs::transaction::RefEdit::delete_with_log(
+            old_full,
+            gix::refs::transaction::PreviousValue::MustExist,
+            gix::refs::transaction::RefLog::AndReference,
+        );
+        r.edit_references([create, delete])
+            .map_err(|e| err("rename", e))?;
+        build_reference(
+            &self.repo,
+            r.find_reference(new_name.as_str())
+                .map_err(|e| err("find_reference", e))?,
+        )
+    }
+
+    /// Re-resolve this reference by name and return a fresh snapshot, or `null`
+    /// if it no longer exists. Useful after external changes.
+    #[napi]
+    pub fn reload(&self) -> napi::Result<Option<Reference>> {
+        let r = thread_local(&self.repo);
+        match r.try_find_reference(self.name.as_str()) {
+            Ok(Some(reference)) => Ok(Some(build_reference(&self.repo, reference)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(err("reload", e)),
+        }
+    }
+
     /// Delete this reference.
     #[napi]
-    pub fn delete(&self) -> Result<()> {
+    pub fn delete(&self) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         let reference = r
             .find_reference(self.name.as_str())
@@ -142,21 +448,74 @@ impl Reference {
     }
 }
 
-fn category_to_string(category: gix::refs::Category<'_>) -> String {
+/// An owned, lifetime-free view of a reference category (mirrors
+/// [`gix::refs::Category`] but without the embedded name borrow).
+#[derive(PartialEq, Clone, Copy)]
+enum RefCategory {
+    Tag,
+    LocalBranch,
+    RemoteBranch,
+    Note,
+    PseudoRef,
+    MainPseudoRef,
+    MainRef,
+    LinkedPseudoRef,
+    LinkedRef,
+    Bisect,
+    Rewritten,
+    WorktreePrivate,
+}
+
+fn category_enum(name: &str) -> Option<RefCategory> {
     use gix::refs::Category;
+    let full = gix::refs::FullName::try_from(name).ok()?;
+    Some(match full.category()? {
+        Category::Tag => RefCategory::Tag,
+        Category::LocalBranch => RefCategory::LocalBranch,
+        Category::RemoteBranch => RefCategory::RemoteBranch,
+        Category::Note => RefCategory::Note,
+        Category::PseudoRef => RefCategory::PseudoRef,
+        Category::MainPseudoRef => RefCategory::MainPseudoRef,
+        Category::MainRef => RefCategory::MainRef,
+        Category::LinkedPseudoRef { .. } => RefCategory::LinkedPseudoRef,
+        Category::LinkedRef { .. } => RefCategory::LinkedRef,
+        Category::Bisect => RefCategory::Bisect,
+        Category::Rewritten => RefCategory::Rewritten,
+        Category::WorktreePrivate => RefCategory::WorktreePrivate,
+    })
+}
+
+fn ref_category_from(category: gix::refs::Category<'_>) -> RefCategory {
     match category {
-        Category::Tag => "tag",
-        Category::LocalBranch => "local_branch",
-        Category::RemoteBranch => "remote_branch",
-        Category::Note => "note",
-        Category::PseudoRef => "pseudo_ref",
-        Category::MainPseudoRef => "main_pseudo_ref",
-        Category::MainRef => "main_ref",
-        Category::LinkedPseudoRef { .. } => "linked_pseudo_ref",
-        Category::LinkedRef { .. } => "linked_ref",
-        Category::Bisect => "bisect",
-        Category::Rewritten => "rewritten",
-        Category::WorktreePrivate => "worktree_private",
+        gix::refs::Category::Tag => RefCategory::Tag,
+        gix::refs::Category::LocalBranch => RefCategory::LocalBranch,
+        gix::refs::Category::RemoteBranch => RefCategory::RemoteBranch,
+        gix::refs::Category::Note => RefCategory::Note,
+        gix::refs::Category::PseudoRef => RefCategory::PseudoRef,
+        gix::refs::Category::MainPseudoRef => RefCategory::MainPseudoRef,
+        gix::refs::Category::MainRef => RefCategory::MainRef,
+        gix::refs::Category::LinkedPseudoRef { .. } => RefCategory::LinkedPseudoRef,
+        gix::refs::Category::LinkedRef { .. } => RefCategory::LinkedRef,
+        gix::refs::Category::Bisect => RefCategory::Bisect,
+        gix::refs::Category::Rewritten => RefCategory::Rewritten,
+        gix::refs::Category::WorktreePrivate => RefCategory::WorktreePrivate,
+    }
+}
+
+fn category_to_string(category: RefCategory) -> String {
+    match category {
+        RefCategory::Tag => "tag",
+        RefCategory::LocalBranch => "local_branch",
+        RefCategory::RemoteBranch => "remote_branch",
+        RefCategory::Note => "note",
+        RefCategory::PseudoRef => "pseudo_ref",
+        RefCategory::MainPseudoRef => "main_pseudo_ref",
+        RefCategory::MainRef => "main_ref",
+        RefCategory::LinkedPseudoRef => "linked_pseudo_ref",
+        RefCategory::LinkedRef => "linked_ref",
+        RefCategory::Bisect => "bisect",
+        RefCategory::Rewritten => "rewritten",
+        RefCategory::WorktreePrivate => "worktree_private",
     }
     .into()
 }
@@ -171,7 +530,7 @@ pub struct RefCategoryAndShortName {
     pub short_name: String,
 }
 
-fn category_from_string(category: &str) -> Result<gix::refs::Category<'static>> {
+fn category_from_string(category: &str) -> napi::Result<gix::refs::Category<'static>> {
     use gix::refs::Category;
     Ok(match category {
         "tag" => Category::Tag,
@@ -210,6 +569,96 @@ pub fn ref_partial_name_is_valid(name: String) -> bool {
     <&gix::refs::PartialNameRef>::try_from(name.as_str()).is_ok()
 }
 
+/// Whether `name` is a valid local-branch reference name. Like
+/// [`refNameIsValid`](refNameIsValid) but additionally rejects `refs/heads/HEAD`,
+/// matching git's branch-specific validation.
+#[napi]
+pub fn ref_branch_name_is_valid(name: String) -> bool {
+    gix::validate::reference::branch_name(gix::bstr::BStr::new(name.as_bytes())).is_ok()
+}
+
+/// Sanitize `name` into a valid partial reference name, replacing illegal
+/// characters and sequences (this is the closest gix equivalent to libgit2's
+/// `git_reference_normalize_name`; it does not support the `ReferenceFormat`
+/// flags). Empty or fully-stripped input yields `-`.
+#[napi]
+pub fn ref_name_sanitize(name: String) -> String {
+    let sanitized =
+        gix::validate::reference::name_partial_or_sanitize(gix::bstr::BStr::new(name.as_bytes()));
+    String::from_utf8_lossy(sanitized.as_ref()).into_owned()
+}
+
+/// Options controlling [`ref_name_normalize`].
+#[derive(Default)]
+#[napi(object)]
+pub struct RefNameNormalizeOptions {
+    /// Allow one-level (unprefixed) names such as `HEAD` or `ORIG_HEAD`.
+    pub allow_one_level: Option<bool>,
+    /// Also allow shorthand branch names (`main`) together with `allowOneLevel`.
+    pub refspec_shorthand: Option<bool>,
+    /// Allow a single `*` as a full path component (e.g. `refs/heads/*`).
+    pub refspec_pattern: Option<bool>,
+}
+
+/// Normalize `name` into a valid reference name, mirroring git2's
+/// `git_reference_normalize_name` as closely as `gix` permits: collapse runs of
+/// adjacent slashes, then validate as a full name (default), a partial/one-level
+/// name (`allowOneLevel` / `refspecShorthand`), or a refspec pattern
+/// (`refspecPattern`). Throws when the result is not a valid name.
+///
+/// Unlike git2 this is a best-effort wrapper around `gix`'s validators and does
+/// not implement the precise flag matrix byte-for-byte.
+#[napi]
+pub fn ref_name_normalize(
+    name: String,
+    opts: Option<RefNameNormalizeOptions>,
+) -> napi::Result<String> {
+    // 1. Collapse runs of adjacent '/' into a single '/' and strip leading/trailing '/'.
+    let mut collapsed = String::with_capacity(name.len());
+    let mut last_slash = false;
+    for c in name.chars() {
+        if c == '/' {
+            if !last_slash {
+                collapsed.push('/');
+            }
+            last_slash = true;
+        } else {
+            collapsed.push(c);
+            last_slash = false;
+        }
+    }
+    let collapsed = collapsed.trim_matches('/').to_string();
+
+    let opts = opts.unwrap_or_default();
+    let allow_one_level = opts.allow_one_level.unwrap_or(false);
+    let refspec_shorthand = opts.refspec_shorthand.unwrap_or(false);
+    let refspec_pattern = opts.refspec_pattern.unwrap_or(false);
+
+    // 2. Validate. A `*` is only legal as a full component in patterns, so substitute a
+    //    placeholder for validation purposes (at most one `*` allowed).
+    let validation_target = if refspec_pattern {
+        if collapsed.chars().filter(|&c| c == '*').count() > 1 {
+            return Err(err_str(
+                "ref_name_normalize",
+                "a refspec pattern may contain at most one '*'",
+            ));
+        }
+        collapsed.replace('*', "x")
+    } else {
+        collapsed.clone()
+    };
+
+    if refspec_pattern || allow_one_level || refspec_shorthand {
+        <&gix::refs::PartialNameRef>::try_from(validation_target.as_str())
+            .map_err(|e| err("ref_name_normalize", e))?;
+    } else {
+        gix::refs::FullName::try_from(validation_target.as_str())
+            .map_err(|e| err("ref_name_normalize", e))?;
+    }
+
+    Ok(collapsed)
+}
+
 /// Build a fully qualified reference name from a `category` (as returned by
 /// [`Reference.category()`](Reference::category)) and a `shortName`, e.g.
 /// `local_branch` + `main` → `refs/heads/main`.
@@ -218,7 +667,7 @@ pub fn ref_partial_name_is_valid(name: String) -> bool {
 /// linked-worktree categories (`linked_pseudo_ref`, `linked_ref`) are not
 /// supported as they require a worktree name.
 #[napi]
-pub fn ref_category_full_name(category: String, short_name: String) -> Result<String> {
+pub fn ref_category_full_name(category: String, short_name: String) -> napi::Result<String> {
     let category = category_from_string(&category)?;
     let full_name = category
         .to_full_name(gix::bstr::BStr::new(short_name.as_bytes()))
@@ -229,34 +678,31 @@ pub fn ref_category_full_name(category: String, short_name: String) -> Result<St
 pub fn build_reference(
     repo: &Arc<gix::ThreadSafeRepository>,
     reference: gix::Reference,
-) -> Result<Reference> {
-    let name = reference.name().to_string();
-    let (target, symbolic_target) = match reference.target() {
-        gix::refs::TargetRef::Object(id) => (id.to_string(), None),
-        gix::refs::TargetRef::Symbolic(name) => (String::new(), Some(name.to_string())),
+) -> napi::Result<Reference> {
+    let detached = reference.detach();
+    let name = detached.name.to_string();
+    let (target, symbolic_target) = match &detached.target {
+        gix::refs::Target::Object(id) => (id.to_string(), None),
+        gix::refs::Target::Symbolic(name) => (String::new(), Some(name.to_string())),
     };
+    let target_peel = detached.peeled.as_ref().map(|id| id.to_string());
     Ok(Reference {
         repo: Arc::clone(repo),
         name,
         target,
         symbolic_target,
+        target_peel,
     })
 }
 
-#[napi(object)]
-pub struct ReflogEntry {
-    /// The previous object id of the reference; the null hash when the ref was created.
-    pub previous_oid: String,
-    /// The new object id of the reference; the null hash when the ref was deleted.
-    pub new_oid: String,
-    /// The identity that made the change.
-    pub signature: Signature,
-    /// The reflog message; empty when there was none.
-    pub message: String,
-}
-
-fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
+/// Parse `s` as a reference target: a 40-hex object id, else a symbolic name.
+fn parse_ref_target(s: &str) -> napi::Result<gix::refs::Target> {
+    match parse_oid(s) {
+        Ok(oid) => Ok(gix::refs::Target::Object(oid)),
+        Err(_) => gix::refs::FullName::try_from(s)
+            .map(gix::refs::Target::Symbolic)
+            .map_err(|e| err("ref_target", e)),
+    }
 }
 
 /// A single reference edit, mirroring `gix::refs::RefEdit` for use from TypeScript.
@@ -298,7 +744,7 @@ pub struct RefEditInput {
 }
 
 /// Parse `expectedTarget` into a `gix::refs::Target` (object id or symbolic name).
-fn parse_expected_target(target: &str) -> Result<gix::refs::Target> {
+fn parse_expected_target(target: &str) -> napi::Result<gix::refs::Target> {
     match parse_oid(target) {
         Ok(oid) => Ok(gix::refs::Target::Object(oid)),
         Err(_) => gix::refs::FullName::try_from(target)
@@ -311,7 +757,7 @@ fn parse_expected_target(target: &str) -> Result<gix::refs::Target> {
 fn build_previous_value(
     input: &RefEditInput,
     is_delete: bool,
-) -> Result<gix::refs::transaction::PreviousValue> {
+) -> napi::Result<gix::refs::transaction::PreviousValue> {
     use gix::refs::transaction::PreviousValue;
     let fallback = if input.force.unwrap_or(false) {
         PreviousValue::Any
@@ -354,7 +800,7 @@ fn build_previous_value(
 }
 
 /// Build a `gix::refs::RefEdit` from the input DTO.
-fn build_ref_edit(input: &RefEditInput) -> Result<gix::refs::transaction::RefEdit> {
+fn build_ref_edit(input: &RefEditInput) -> napi::Result<gix::refs::transaction::RefEdit> {
     use gix::refs::{Target, transaction::LogChange, transaction::RefLog};
     let name =
         gix::refs::FullName::try_from(input.name.as_str()).map_err(|e| err("ref_name", e))?;
@@ -402,14 +848,14 @@ fn build_ref_edit(input: &RefEditInput) -> Result<gix::refs::transaction::RefEdi
 impl Repository {
     /// The repository `HEAD`.
     #[napi]
-    pub fn head(&self) -> Result<Head> {
+    pub fn head(&self) -> napi::Result<Head> {
         let r = thread_local(&self.inner);
         build_head(&self.inner, r.head().map_err(|e| err("head", e))?)
     }
 
     /// The commit `HEAD` points to.
     #[napi]
-    pub fn head_commit(&self) -> Result<Commit> {
+    pub fn head_commit(&self) -> napi::Result<Commit> {
         let r = thread_local(&self.inner);
         build_commit(
             &self.inner,
@@ -419,7 +865,7 @@ impl Repository {
 
     /// The object id `HEAD` points to.
     #[napi]
-    pub fn head_id(&self) -> Result<String> {
+    pub fn head_id(&self) -> napi::Result<String> {
         let r = thread_local(&self.inner);
         let id = r.head_id().map_err(|e| err("head_id", e))?;
         Ok(id.to_string())
@@ -427,7 +873,7 @@ impl Repository {
 
     /// The symbolic referent name of `HEAD`, if it is not detached.
     #[napi]
-    pub fn head_name(&self) -> Result<Option<String>> {
+    pub fn head_name(&self) -> napi::Result<Option<String>> {
         let r = thread_local(&self.inner);
         Ok(r.head_name()
             .map_err(|e| err("head_name", e))?
@@ -436,7 +882,7 @@ impl Repository {
 
     /// The object id of the root tree pointed to by HEAD.
     #[napi]
-    pub fn head_tree_id(&self) -> Result<String> {
+    pub fn head_tree_id(&self) -> napi::Result<String> {
         let r = thread_local(&self.inner);
         let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
         Ok(id.to_string())
@@ -445,7 +891,7 @@ impl Repository {
     /// The object id of the root tree pointed to by HEAD, falling back to the empty tree
     /// if HEAD is unborn.
     #[napi]
-    pub fn head_tree_id_or_empty(&self) -> Result<String> {
+    pub fn head_tree_id_or_empty(&self) -> napi::Result<String> {
         let r = thread_local(&self.inner);
         let id = r
             .head_tree_id_or_empty()
@@ -455,7 +901,7 @@ impl Repository {
 
     /// The reference HEAD points to, or null if HEAD is detached or unborn.
     #[napi]
-    pub fn head_ref(&self) -> Result<Option<Reference>> {
+    pub fn head_ref(&self) -> napi::Result<Option<Reference>> {
         let r = thread_local(&self.inner);
         match r.head_ref().map_err(|e| err("head_ref", e))? {
             Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
@@ -465,31 +911,81 @@ impl Repository {
 
     /// The root tree object HEAD points to.
     #[napi]
-    pub fn head_tree(&self) -> Result<Tree> {
+    pub fn head_tree(&self) -> napi::Result<Tree> {
         let r = thread_local(&self.inner);
         let tree = r.head_tree().map_err(|e| err("head_tree", e))?;
         build_tree(&self.inner, tree.id)
     }
 
-    /// Set HEAD to point to a commit ID.
+    /// Point HEAD at a commit id (detached HEAD) or at a branch/ref name (symbolic HEAD).
+    ///
+    /// `target` is interpreted as a 40-hex object id when it parses as one; otherwise it is
+    /// treated as a reference name. A fully-qualified name (`refs/heads/main`) is used directly,
+    /// while a short name (`main`) is DWIM-resolved to its full name — mirroring git2's
+    /// `git_repository_set_head`.
     #[napi]
-    pub fn set_head(&self, target: String) -> Result<()> {
+    pub fn set_head(&self, target: String) -> napi::Result<()> {
         let r = thread_local(&self.inner);
-        let oid = parse_oid(&target)?;
+        let ref_target = if let Ok(oid) = parse_oid(&target) {
+            gix::refs::Target::Object(oid)
+        } else {
+            // symbolic: accept a fully-qualified name, or DWIM a short name.
+            let sym = match gix::refs::FullName::try_from(target.as_str()) {
+                Ok(f) => f,
+                Err(_) => {
+                    let resolved = r
+                        .find_reference(target.as_str())
+                        .map_err(|e| err("set_head", e))?;
+                    gix::refs::FullName::try_from(resolved.name())
+                        .map_err(|e| err("set_head", e))?
+                }
+            };
+            gix::refs::Target::Symbolic(sym)
+        };
         let label = format!("set_head {target}");
-        r.reference(
-            "HEAD",
-            oid,
+        let log = gix::refs::transaction::LogChange {
+            mode: gix::refs::transaction::RefLog::AndReference,
+            force_create_reflog: false,
+            message: label.into(),
+        };
+        let edit = gix::refs::transaction::RefEdit::update_with_log(
+            gix::refs::FullName::try_from("HEAD").unwrap(),
+            ref_target,
             gix::refs::transaction::PreviousValue::Any,
-            label,
-        )
-        .map_err(|e| err("set_head", e))?;
+            log,
+        );
+        r.edit_reference(edit).map_err(|e| err("set_head", e))?;
         Ok(())
+    }
+
+    /// Whether HEAD is detached (points directly at an object id rather than a branch).
+    /// Mirrors git2's `git_repository_head_detached`.
+    #[napi]
+    pub fn head_detached(&self) -> napi::Result<bool> {
+        let r = thread_local(&self.inner);
+        Ok(r.head().map_err(|e| err("head", e))?.is_detached())
+    }
+
+    /// Point HEAD directly at a commit object id (detached HEAD). `target` must parse as a
+    /// 40-hex object id. Mirrors git2's `git_repository_set_head_detached`.
+    #[napi]
+    pub fn set_head_detached(&self, target: String) -> napi::Result<()> {
+        let _ = parse_oid(&target)?;
+        self.set_head(target)
+    }
+
+    /// Point HEAD at a commit object id. In this gix-backed binding there is no distinct
+    /// annotated-commit type, so this is identical to
+    /// [`set_head_detached`](Self::set_head_detached). Mirrors git2's
+    /// `git_repository_set_head_detached_from_annotated`.
+    #[napi]
+    pub fn set_head_detached_from_annotated(&self, target: String) -> napi::Result<()> {
+        self.set_head_detached(target)
     }
 
     /// All references in the repository.
     #[napi]
-    pub fn references(&self) -> Result<Vec<Reference>> {
+    pub fn references(&self) -> napi::Result<Vec<Reference>> {
         let r = thread_local(&self.inner);
         let platform = r.references().map_err(|e| err("references", e))?;
         let mut out = Vec::new();
@@ -501,7 +997,7 @@ impl Repository {
     }
 
     #[napi]
-    pub fn references_prefixed(&self, prefix: String) -> Result<Vec<Reference>> {
+    pub fn references_prefixed(&self, prefix: String) -> napi::Result<Vec<Reference>> {
         let r = thread_local(&self.inner);
         let platform = r.references().map_err(|e| err("references", e))?;
         let iter = platform
@@ -518,7 +1014,7 @@ impl Repository {
     /// The pseudo references in the root of the `.git` directory, like `HEAD` or
     /// `FETCH_HEAD` (anything ending in `HEAD` there), sorted by name.
     #[napi]
-    pub fn references_pseudo(&self) -> Result<Vec<Reference>> {
+    pub fn references_pseudo(&self) -> napi::Result<Vec<Reference>> {
         let r = thread_local(&self.inner);
         let platform = r.references().map_err(|e| err("references", e))?;
         let iter = platform.pseudo().map_err(|e| err("references_pseudo", e))?;
@@ -530,53 +1026,45 @@ impl Repository {
         Ok(out)
     }
 
-    /// Whether a reflog exists for the given reference name.
+    /// All reference names in the repository, optionally restricted to those
+    /// matching `prefix` (e.g. `refs/heads/`). Cheaper than `references` because
+    /// the references are not materialised into objects (mirrors libgit2's
+    /// `git_reference_next_name`).
     #[napi]
-    pub fn reflog_exists(&self, name: String) -> Result<bool> {
+    pub fn reference_names(&self, prefix: Option<String>) -> napi::Result<Vec<String>> {
         let r = thread_local(&self.inner);
-        r.refs
-            .reflog_exists(name.as_str())
-            .map_err(|e| err("reflog_exists", e))
-    }
-
-    /// All reflog entries of `name`, oldest first (or most recent first when
-    /// `reverse` is set). Empty when the ref has no reflog; a missing ref also
-    /// yields an empty list instead of an error.
-    #[napi]
-    pub fn reflog(&self, name: String, reverse: Option<bool>) -> Result<Vec<ReflogEntry>> {
-        fn push_entry(out: &mut Vec<ReflogEntry>, line: gix::refs::log::Line) {
-            out.push(ReflogEntry {
-                previous_oid: line.previous_oid.to_string(),
-                new_oid: line.new_oid.to_string(),
-                signature: to_signature(
-                    &line.signature.name,
-                    &line.signature.email,
-                    line.signature.time.seconds,
-                    line.signature.time.offset,
-                ),
-                message: lossy(&line.message),
-            });
-        }
-        let r = thread_local(&self.inner);
-        // Iterate through the store directly so that refs without a reflog (or refs
-        // that no longer exist, e.g. after a log-only deletion) yield empty results.
-        let full_name =
-            gix::refs::FullName::try_from(name.as_str()).map_err(|e| err("ref_name", e))?;
-        let mut platform = gix::refs::file::log::iter::Platform {
-            store: &r.refs,
-            name: full_name.as_ref(),
-            buf: Vec::new(),
+        let platform = r.references().map_err(|e| err("references", e))?;
+        let iter = match prefix {
+            Some(p) => platform
+                .prefixed(p.as_str())
+                .map_err(|e| err("references_prefixed", e))?,
+            None => platform.all().map_err(|e| err("references", e))?,
         };
         let mut out = Vec::new();
-        if reverse.unwrap_or(false) {
-            if let Some(iter) = platform.rev().map_err(|e| err("reflog.rev", e))? {
-                for line in iter {
-                    push_entry(&mut out, line.map_err(|e| err("reflog line", e))?.into());
-                }
-            }
-        } else if let Some(iter) = platform.all().map_err(|e| err("reflog.all", e))? {
-            for line in iter {
-                push_entry(&mut out, line.map_err(|e| err("reflog line", e))?.into());
+        for reference in iter {
+            let reference = reference.map_err(|e| err("reference", e))?;
+            out.push(reference.name().to_string());
+        }
+        Ok(out)
+    }
+
+    /// All references whose name matches the shell-style `glob` (with `*` and
+    /// `?`), mirroring libgit2's `git_reference_iterator_glob`. Uses
+    /// [`gix::glob::wildmatch`](gix::glob::wildmatch) rather than a hand-rolled
+    /// matcher.
+    #[napi]
+    pub fn references_glob(&self, glob: String) -> napi::Result<Vec<Reference>> {
+        let r = thread_local(&self.inner);
+        let platform = r.references().map_err(|e| err("references", e))?;
+        let iter = platform.all().map_err(|e| err("references", e))?;
+        let pattern = gix::bstr::BStr::new(glob.as_bytes());
+        let mode = gix::glob::wildmatch::Mode::empty();
+        let mut out = Vec::new();
+        for reference in iter {
+            let reference = reference.map_err(|e| err("reference", e))?;
+            let name = reference.name().to_string();
+            if gix::glob::wildmatch(pattern, gix::bstr::BStr::new(name.as_bytes()), mode) {
+                out.push(build_reference(&self.inner, reference)?);
             }
         }
         Ok(out)
@@ -616,7 +1104,7 @@ impl Repository {
     /// processes become visible; some filesystems lack nanosecond granularity, so
     /// changes within the same second are otherwise likely to be missed.
     #[napi]
-    pub fn force_refresh_packed_buffer(&self) -> Result<()> {
+    pub fn force_refresh_packed_buffer(&self) -> napi::Result<()> {
         let r = thread_local(&self.inner);
         r.refs
             .force_refresh_packed_buffer()
@@ -625,7 +1113,7 @@ impl Repository {
 
     /// Find a single reference by name (e.g. `main`, `refs/heads/main`, `HEAD`).
     #[napi]
-    pub fn find_reference(&self, name: String) -> Result<Reference> {
+    pub fn find_reference(&self, name: String) -> napi::Result<Reference> {
         let r = thread_local(&self.inner);
         let reference = r
             .find_reference(name.as_str())
@@ -635,7 +1123,7 @@ impl Repository {
 
     /// Find a single reference by name, returning `null` if it does not exist (instead of throwing).
     #[napi]
-    pub fn try_find_reference(&self, name: String) -> Result<Option<Reference>> {
+    pub fn try_find_reference(&self, name: String) -> napi::Result<Option<Reference>> {
         let r = thread_local(&self.inner);
         match r.try_find_reference(name.as_str()) {
             Ok(Some(reference)) => Ok(Some(build_reference(&self.inner, reference)?)),
@@ -645,7 +1133,7 @@ impl Repository {
     }
 
     #[napi]
-    pub fn get_reference(&self, name: String) -> Result<String> {
+    pub fn get_reference(&self, name: String) -> napi::Result<String> {
         let oid: gix::ObjectId = thread_local(&self.inner)
             .rev_parse_single(name.as_str())
             .map_err(|e| err("rev_parse_single", e))?
@@ -663,8 +1151,21 @@ impl Repository {
         name: String,
         target: String,
         force: Option<bool>,
-    ) -> Result<Reference> {
+    ) -> napi::Result<Reference> {
         let r = thread_local(&self.inner);
+        // `PreviousValue::MustNotExist` is not reliably enforced by the transaction
+        // convenience in this gix version, so check explicitly (as `rename` does).
+        if !force.unwrap_or(false) {
+            if r.try_find_reference(name.as_str())
+                .map_err(|e| err("create_reference", e))?
+                .is_some()
+            {
+                return Err(err_str(
+                    "create_reference",
+                    format!("reference '{name}' already exists"),
+                ));
+            }
+        }
         let constraint = if force.unwrap_or(false) {
             gix::refs::transaction::PreviousValue::Any
         } else {
@@ -677,51 +1178,81 @@ impl Repository {
         build_reference(&self.inner, reference)
     }
 
-    /// Create an annotated tag `name` -> `target`.
+    /// Create (or, if `force`, overwrite) a symbolic reference `name` pointing at the
+    /// reference `target` (a fully-qualified or DWIM-resolved ref name). Mirrors git2's
+    /// `git_reference_symbolic`. To create a direct (object) reference, use
+    /// [`create_reference`](Self::create_reference) instead.
     #[napi]
-    pub fn create_tag(
+    pub fn create_symbolic_reference(
         &self,
         name: String,
         target: String,
-        message: String,
         force: Option<bool>,
-    ) -> Result<Reference> {
+        message: Option<String>,
+    ) -> napi::Result<Reference> {
         let r = thread_local(&self.inner);
-        let target_id = parse_oid(&target)?;
-        let kind = r
-            .find_object(target_id.clone())
-            .map_err(|e| err("find_object", e))?
-            .kind;
-        let tagger = r.committer().and_then(|res| res.ok());
+        let full = gix::refs::FullName::try_from(name.as_str()).map_err(|e| err("ref_name", e))?;
+        // `PreviousValue::MustNotExist` is not reliably enforced by the transaction
+        // convenience in this gix version, so check explicitly (as `rename` does).
+        if !force.unwrap_or(false) {
+            if r.try_find_reference(name.as_str())
+                .map_err(|e| err("create_symbolic_reference", e))?
+                .is_some()
+            {
+                return Err(err_str(
+                    "create_symbolic_reference",
+                    format!("reference '{name}' already exists"),
+                ));
+            }
+        }
+        let symbolic = match gix::refs::FullName::try_from(target.as_str()) {
+            Ok(f) => f,
+            Err(_) => {
+                let resolved = r
+                    .find_reference(target.as_str())
+                    .map_err(|e| err("ref_target", e))?;
+                gix::refs::FullName::try_from(resolved.name()).map_err(|e| err("ref_target", e))?
+            }
+        };
         let constraint = if force.unwrap_or(false) {
             gix::refs::transaction::PreviousValue::Any
         } else {
             gix::refs::transaction::PreviousValue::MustNotExist
         };
-        let reference = r
-            .tag(name, target_id, kind, tagger, message.as_str(), constraint)
-            .map_err(|e| err("create_tag", e))?;
-        build_reference(&self.inner, reference)
+        let label = message.unwrap_or_else(|| format!("create symbolic reference {name}"));
+        let log = gix::refs::transaction::LogChange {
+            mode: gix::refs::transaction::RefLog::AndReference,
+            force_create_reflog: false,
+            message: label.into(),
+        };
+        let edit = gix::refs::transaction::RefEdit::update_with_log(
+            full,
+            gix::refs::Target::Symbolic(symbolic),
+            constraint,
+            log,
+        );
+        r.edit_reference(edit)
+            .map_err(|e| err("create_symbolic_reference", e))?;
+        build_reference(
+            &self.inner,
+            r.find_reference(name.as_str())
+                .map_err(|e| err("find_reference", e))?,
+        )
     }
 
-    /// Create a lightweight tag `name` -> `target`.
+    /// Create a lightweight tag `name` -> `target`, i.e. a `refs/tags/<name>` reference
+    /// pointing directly at `target`. `name` may be short (`v1.0.0`) or fully qualified
+    /// (`refs/tags/v1.0.0`). Throws when the tag exists unless `force` is set.
+    ///
+    /// See [`create_tag`](Self::create_tag) for annotated (and signed) tags.
     #[napi]
     pub fn create_lightweight_tag(
         &self,
         name: String,
         target: String,
         force: Option<bool>,
-    ) -> Result<Reference> {
-        let r = thread_local(&self.inner);
-        let constraint = if force.unwrap_or(false) {
-            gix::refs::transaction::PreviousValue::Any
-        } else {
-            gix::refs::transaction::PreviousValue::MustNotExist
-        };
-        let reference = r
-            .tag_reference(name, parse_oid(&target)?, constraint)
-            .map_err(|e| err("create_lightweight_tag", e))?;
-        build_reference(&self.inner, reference)
+    ) -> napi::Result<Reference> {
+        self.tag_reference(name, target, force)
     }
 
     /// Create (or, if `force`, overwrite) a lightweight tag reference `name` -> `target`.
@@ -731,22 +1262,30 @@ impl Repository {
         name: String,
         target: String,
         force: Option<bool>,
-    ) -> Result<Reference> {
+    ) -> napi::Result<Reference> {
         let r = thread_local(&self.inner);
+        // Normalized here (instead of handing the name to gix's `tag_reference`) so that a
+        // name that already carries `refs/tags/` is not prefixed a second time.
+        let full = crate::tag::to_tag_full_name(&name)?;
         let constraint = if force.unwrap_or(false) {
             gix::refs::transaction::PreviousValue::Any
         } else {
             gix::refs::transaction::PreviousValue::MustNotExist
         };
         let reference = r
-            .tag_reference(name, parse_oid(&target)?, constraint)
+            .reference(
+                full.to_string(),
+                parse_oid(&target)?,
+                constraint,
+                format!("tag: created {name}"),
+            )
             .map_err(|e| err("tag_reference", e))?;
         build_reference(&self.inner, reference)
     }
 
     /// Apply a single reference edit (create or update) and return the affected reference names.
     #[napi]
-    pub fn edit_reference(&self, edit: RefEditInput) -> Result<Vec<String>> {
+    pub fn edit_reference(&self, edit: RefEditInput) -> napi::Result<Vec<String>> {
         let r = thread_local(&self.inner);
         let e = build_ref_edit(&edit)?;
         let edits = r.edit_reference(e).map_err(|e| err("edit_reference", e))?;
@@ -758,7 +1297,7 @@ impl Repository {
 
     /// Apply multiple reference edits and return all affected reference names.
     #[napi]
-    pub fn edit_references(&self, edits: Vec<RefEditInput>) -> Result<Vec<String>> {
+    pub fn edit_references(&self, edits: Vec<RefEditInput>) -> napi::Result<Vec<String>> {
         let r = thread_local(&self.inner);
         let mut built = Vec::with_capacity(edits.len());
         for input in &edits {
@@ -779,7 +1318,7 @@ impl Repository {
         &self,
         edits: Vec<RefEditInput>,
         committer: Option<Signature>,
-    ) -> Result<Vec<String>> {
+    ) -> napi::Result<Vec<String>> {
         let r = thread_local(&self.inner);
         let mut built = Vec::with_capacity(edits.len());
         for input in &edits {

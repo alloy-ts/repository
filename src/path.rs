@@ -1,4 +1,3 @@
-use napi::Result;
 use napi_derive::napi;
 
 use crate::error::err;
@@ -22,7 +21,7 @@ fn bstr_path_to_string(b: &gix::bstr::BStr) -> String {
 /// `maxSymlinks` (default 32) symlinks are followed, when a `..` component
 /// escapes the root, or when the current directory cannot be determined.
 #[napi]
-pub fn path_realpath(path: String, max_symlinks: Option<u32>) -> Result<String> {
+pub fn path_realpath(path: String, max_symlinks: Option<u32>) -> napi::Result<String> {
     let max = max_symlinks.unwrap_or(PATH_MAX_SYMLINKS as u32) as u8;
     gix::path::realpath_opts(
         std::path::Path::new(&path),
@@ -40,7 +39,7 @@ pub fn path_realpath_with_cwd(
     path: String,
     cwd: String,
     max_symlinks: Option<u32>,
-) -> Result<String> {
+) -> napi::Result<String> {
     let max = max_symlinks.unwrap_or(PATH_MAX_SYMLINKS as u32) as u8;
     gix::path::realpath_opts(std::path::Path::new(&path), std::path::Path::new(&cwd), max)
         .map(|p| path_to_string(&p))
@@ -67,7 +66,7 @@ pub fn path_normalize(path: String, current_dir: String) -> Option<String> {
 ///
 /// Throws when normalization exhausts an empty or relative `currentDir`.
 #[napi]
-pub fn path_normalize_saturating(path: String, current_dir: String) -> Result<String> {
+pub fn path_normalize_saturating(path: String, current_dir: String) -> napi::Result<String> {
     gix::path::normalize_saturating(
         std::path::PathBuf::from(path).into(),
         std::path::Path::new(&current_dir),

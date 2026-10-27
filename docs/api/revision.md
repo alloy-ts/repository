@@ -34,8 +34,9 @@ lookup at stage 0).
 | ---------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `revParseSingle` | `(spec: string) => string`                                               | Resolve a spec to a single hex object id. Throws on invalid, ambiguous, or multi-object specs.                                                           |
 | `revParseHex`    | `(spec: string) => string`                                               | Alias of `revParseSingle`.                                                                                                                               |
+| `revParseExt`    | `(spec: string) => RevParseExt`                                          | Resolve a spec and report which reference provided it (`"main"` → `refs/heads/main`); `referenceName` is `null` when the spec is not a ref name.         |
 | `revParse`       | `(spec: string) => RevSpec`                                              | Parse a spec and report its kind plus the resolved id(s) — distinguishes ranges, merges and exclusions.                                                  |
-| `revWalk`        | `(tips: string[], options?: WalkOptions) => string[]`                    | Walk all commits reachable from the tips, in walk order. Invalid tip ids throw.                                                                          |
+| `revWalk`        | `(tips: string[], options?: WalkOptions) => string[]`                    | Walk all commits reachable from the tips — which may be specs, not just ids — with exclusions, reference globs, and ranges.                              |
 | `describe`       | `(commit: string, options?: DescribeOptions) => DescribeOutcome \| null` | `git describe`: closest tag/branch containing `commit`. `null` when no candidate exists and `idAsFallback` is off. Throws when `commit` is not a commit. |
 
 ## Result and option objects
@@ -54,10 +55,18 @@ interface RevSpec {
   to?: string; // the `to` side of a range, or `ours` of a merge
 }
 
+interface RevParseExt {
+  id: string; // the resolved object id
+  referenceName?: string; // full name of the reference that provided it ("refs/heads/main")
+}
+
 interface WalkOptions {
   sort?: "breadth-first" | "time-newest" | "time-oldest"; // default: breadth-first
   reverse?: boolean; // return commits oldest-first instead
   firstParent?: boolean; // traverse only the first parent of merge commits
+  exclude?: string[]; // specs whose commits (and ancestors) are hidden: ["v1.0.0"]
+  glob?: string; // push matching refs as tips: "refs/tags/v*" ("refs/" and "/*" implied)
+  range?: string; // "<from>..<to>": push `to`, hide `from`; "<from>...<to>": hide merge base
 }
 
 interface DescribeOptions {
@@ -111,11 +120,20 @@ const range = repo.revParse("HEAD~2..HEAD");
 const merge = repo.revParse("main...feature");
 // { kind: "merge", from: "<theirs>", to: "<ours>", id: "<ours>" }
 
-// Walk history
+// Walk history — tips may be specs, not just ids
 const head = repo.headId();
-repo.revWalk([head]); // breadth-first, newest tip first
-repo.revWalk([head], { sort: "time-oldest", reverse: true }); // chronological order
-repo.revWalk([head], { firstParent: true }); // skip side branches
+repo.revWalk(["HEAD"]); // breadth-first, newest tip first
+repo.revWalk(["HEAD"], { sort: "time-oldest", reverse: true }); // chronological order
+repo.revWalk(["HEAD"], { firstParent: true }); // skip side branches
+
+// Exclude everything reachable from v1.0.0, or walk a range / a set of refs
+repo.revWalk(["HEAD"], { exclude: ["v1.0.0"] }); // commits after v1.0.0
+repo.revWalk([], { range: "v1.0.0..main", sort: "time-newest" });
+repo.revWalk([], { glob: "refs/tags/v*" }); // tips from all v* tags ("refs/" and "/*" implied)
+
+// Which reference provided a resolution?
+repo.revParseExt("main");
+// { id: "<head of main>", referenceName: "refs/heads/main" }
 
 // Describe commits
 repo.describe(head, { names: "allTags" });
@@ -130,9 +148,13 @@ repo.describe(repo.revParseSingle("HEAD~1"), { names: "allTags" });
   git-compatible messages (unknown refs, ambiguous short hashes, malformed
   navigation, unconsumed input). They also throw when the delegate cannot
   produce a revision, e.g. a `HEAD~1` on a root commit.
-- `revWalk` throws for tip ids that don't exist or don't decode. An unrecognized
-  `sort` value is treated as `"breadth-first"` (lenient, like the rest of the
-  library's option parsing).
+- `revWalk` throws for tips, excludes, or range sides that don't resolve, for an
+  unrecognized `sort` value (`invalid sort …`), and for malformed ranges
+  (`<from>..<to>` or `<from>...<to>` only). A symmetric range with no merge base
+  between the two sides also throws. Tips and specs may be any `revParseSingle`
+  input.
+- `revParseExt` throws under the same conditions as `revParseSingle`; its
+  `referenceName` is `undefined` when the spec did not name a reference.
 - `describe` throws when `commit` does not exist or is not a commit. It returns
   `null` when no candidate name was found and `idAsFallback` is off; with
   `idAsFallback` on it always returns an outcome whose `name` is absent.

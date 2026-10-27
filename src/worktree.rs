@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use napi::Result;
 use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
 use napi::bindgen_prelude::Buffer;
@@ -88,6 +87,28 @@ fn to_remove_force(force: Option<WorktreeRemoveForce>) -> gix::worktree::remove:
     }
 }
 
+/// Options controlling how a worktree is pruned, mirroring git2's
+/// `WorktreePruneOptions`. All fields default to `false`.
+#[napi(object)]
+pub struct WorktreePruneOptions {
+    /// Also prune worktrees whose working tree still exists on disk. Default `false`.
+    pub valid: Option<bool>,
+    /// Also prune locked worktrees. Default `false`.
+    pub locked: Option<bool>,
+    /// Also remove the working tree directory from the filesystem. Default `false`.
+    pub working_tree: Option<bool>,
+}
+
+/// Resolve prune options to concrete flags, defaulting every unset field to `false`.
+fn resolve_prune_opts(opts: &Option<WorktreePruneOptions>) -> (bool, bool, bool) {
+    let o = opts.as_ref();
+    (
+        o.and_then(|o| o.valid).unwrap_or(false),
+        o.and_then(|o| o.locked).unwrap_or(false),
+        o.and_then(|o| o.working_tree).unwrap_or(false),
+    )
+}
+
 /// One materialized entry of a worktree stream.
 ///
 /// Deliberately plain data — no `Buffer` and no repository handle — so the type is
@@ -122,7 +143,7 @@ impl Task for StreamTask {
     type Output = Vec<StreamEntry>;
     type JsValue = Vec<StreamEntry>;
 
-    fn compute(&mut self) -> Result<Vec<StreamEntry>> {
+    fn compute(&mut self) -> napi::Result<Vec<StreamEntry>> {
         let r = thread_local(&self.repo);
         let id = parse_oid(&self.tree_id)?;
         let (mut stream, _index) = r
@@ -148,7 +169,11 @@ impl Task for StreamTask {
         Ok(out)
     }
 
-    fn resolve(&mut self, _env: napi::Env, output: Vec<StreamEntry>) -> Result<Vec<StreamEntry>> {
+    fn resolve(
+        &mut self,
+        _env: napi::Env,
+        output: Vec<StreamEntry>,
+    ) -> napi::Result<Vec<StreamEntry>> {
         Ok(output)
     }
 }
@@ -169,7 +194,7 @@ impl Task for StreamRawTask {
     type Output = Vec<u8>;
     type JsValue = Buffer;
 
-    fn compute(&mut self) -> Result<Vec<u8>> {
+    fn compute(&mut self) -> napi::Result<Vec<u8>> {
         let r = thread_local(&self.repo);
         let id = parse_oid(&self.tree_id)?;
         let (stream, _index) = r
@@ -181,7 +206,7 @@ impl Task for StreamRawTask {
         Ok(bytes)
     }
 
-    fn resolve(&mut self, _env: napi::Env, output: Vec<u8>) -> Result<Buffer> {
+    fn resolve(&mut self, _env: napi::Env, output: Vec<u8>) -> napi::Result<Buffer> {
         Ok(Buffer::from(output))
     }
 }
@@ -192,6 +217,7 @@ pub struct AddWorktreeTask {
     destination: String,
     head_kind: WorktreeHeadKind,
     head_name: String,
+    lock: bool,
 }
 
 impl AddWorktreeTask {
@@ -200,21 +226,23 @@ impl AddWorktreeTask {
         destination: String,
         head_kind: WorktreeHeadKind,
         head_name: String,
+        lock: bool,
     ) -> Self {
         Self {
             repo,
             destination,
             head_kind,
             head_name,
+            lock,
         }
     }
 }
 
 impl Task for AddWorktreeTask {
-    type Output = Repository;
-    type JsValue = Repository;
+    type Output = Worktree;
+    type JsValue = Worktree;
 
-    fn compute(&mut self) -> Result<Repository> {
+    fn compute(&mut self) -> napi::Result<Worktree> {
         let r = thread_local(&self.repo);
         let head = match self.head_kind {
             WorktreeHeadKind::Detached => {
@@ -231,7 +259,7 @@ impl Task for AddWorktreeTask {
                 gix::worktree::add::Head::Attached(name)
             }
         };
-        let (repo, _outcome) = r
+        let (added, _outcome) = r
             .add_worktree(
                 self.destination.as_str(),
                 head,
@@ -239,15 +267,26 @@ impl Task for AddWorktreeTask {
                 &AtomicBool::new(false),
             )
             .map_err(|e| err("add_worktree", e))?;
-        // The checkout outcome summary is not representable next to the returned
-        // repository handle (napi AsyncTask values cannot be tuples), so only
-        // the opened worktree repository is surfaced.
-        Ok(Repository {
-            inner: Arc::new(repo.into()),
-        })
+        // The administrative directory of a linked worktree is its real git
+        // directory; its file name is the worktree id.
+        let git_dir = added.git_dir().to_path_buf();
+        let id = git_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| err_str("add_worktree", "could not determine the worktree id"))?;
+        let wt = Worktree {
+            repo: Arc::clone(&self.repo),
+            path: self.destination.clone(),
+            id,
+            git_dir: git_dir.to_string_lossy().into_owned(),
+        };
+        if self.lock {
+            wt.lock(None)?;
+        }
+        Ok(wt)
     }
 
-    fn resolve(&mut self, _env: napi::Env, output: Repository) -> Result<Repository> {
+    fn resolve(&mut self, _env: napi::Env, output: Worktree) -> napi::Result<Worktree> {
         Ok(output)
     }
 }
@@ -265,7 +304,11 @@ impl RemoveWorktreeTask {
         target: String,
         force: gix::worktree::remove::Force,
     ) -> Self {
-        Self { repo, target, force }
+        Self {
+            repo,
+            target,
+            force,
+        }
     }
 }
 
@@ -273,7 +316,7 @@ impl Task for RemoveWorktreeTask {
     type Output = ();
     type JsValue = ();
 
-    fn compute(&mut self) -> Result<()> {
+    fn compute(&mut self) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         r.remove_worktree(
             std::path::Path::new(&self.target),
@@ -283,14 +326,14 @@ impl Task for RemoveWorktreeTask {
         .map_err(|e| err("remove_worktree", e))
     }
 
-    fn resolve(&mut self, _env: napi::Env, output: ()) -> Result<()> {
+    fn resolve(&mut self, _env: napi::Env, output: ()) -> napi::Result<()> {
         Ok(output)
     }
 }
 
 /// Resolve the repository handle implied by `repo`, or by the environment
 /// (`GIT_DIR` / `REPO_DIR` / current directory) when it is omitted.
-fn repo_or_current(repo: Option<&Repository>) -> Result<Arc<gix::ThreadSafeRepository>> {
+fn repo_or_current(repo: Option<&Repository>) -> napi::Result<Arc<gix::ThreadSafeRepository>> {
     match repo {
         Some(r) => Ok(Arc::clone(&r.inner)),
         None => crate::repository::current_repo(),
@@ -326,19 +369,49 @@ impl Worktree {
     /// The repository is taken from `commit`, so no `repo` argument is needed. The
     /// checkout runs on the libuv thread pool.
     #[napi(constructor)]
-    pub fn new(path: String, commit: &Commit) -> Result<Self> {
+    pub fn new(path: String, commit: &Commit, lock: Option<bool>) -> napi::Result<Self> {
         Self::add(
             Arc::clone(&commit.repo),
             path,
             gix::worktree::add::Head::Detached(commit.id),
+            lock.unwrap_or(false),
         )
     }
 
     /// Create a linked worktree at `path`, checked out at `commit` with a detached `HEAD`.
-    /// Equivalent to `new Worktree(path, commit)`.
+    /// Equivalent to `new Worktree(path, commit, lock)`.
     #[napi(factory)]
-    pub fn from_commit(path: String, commit: &Commit) -> Result<Self> {
-        Self::new(path, commit)
+    pub fn from_commit(path: String, commit: &Commit, lock: Option<bool>) -> napi::Result<Self> {
+        Self::new(path, commit, lock)
+    }
+
+    /// Open an existing linked worktree by its id (the administrative directory name
+    /// under `$GIT_DIR/worktrees/`), like git2's `Repository::find_worktree` plus
+    /// `Worktree::open_from_repository`. Returns `null` when no worktree with that id
+    /// is registered.
+    #[napi]
+    pub fn open(id: String, repo: Option<&Repository>) -> napi::Result<Option<Self>> {
+        let inner = repo_or_current(repo)?;
+        let r = thread_local(&inner);
+        let proxy = r
+            .worktree_proxy_by_id(id.as_str())
+            .map_err(|e| err("worktree_proxy_by_id", e))?;
+        match proxy.as_ref() {
+            Some(p) => {
+                let base = p
+                    .base()
+                    .map_err(|e| err("worktree.open", e))?
+                    .to_string_lossy()
+                    .into_owned();
+                Ok(Some(Worktree {
+                    repo: inner,
+                    path: base,
+                    id: id.clone(),
+                    git_dir: p.git_dir().to_string_lossy().into_owned(),
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Create a linked worktree at `path` with `HEAD` attached to an existing local
@@ -347,7 +420,12 @@ impl Worktree {
     /// `repo` may be omitted, in which case the repository is resolved from the
     /// environment (`GIT_DIR` / `REPO_DIR` / current directory).
     #[napi(factory)]
-    pub fn from_branch(path: String, branch: String, repo: Option<&Repository>) -> Result<Self> {
+    pub fn from_branch(
+        path: String,
+        branch: String,
+        repo: Option<&Repository>,
+        lock: Option<bool>,
+    ) -> napi::Result<Self> {
         let full = if branch.starts_with("refs/") {
             branch
         } else {
@@ -358,6 +436,7 @@ impl Worktree {
             repo_or_current(repo)?,
             path,
             gix::worktree::add::Head::Attached(name),
+            lock.unwrap_or(false),
         )
     }
 
@@ -365,7 +444,8 @@ impl Worktree {
         repo: Arc<gix::ThreadSafeRepository>,
         path: String,
         head: gix::worktree::add::Head,
-    ) -> Result<Self> {
+        lock: bool,
+    ) -> napi::Result<Self> {
         let r = thread_local(&repo);
         let (added, _outcome) = r
             .add_worktree(
@@ -382,12 +462,16 @@ impl Worktree {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| err_str("add_worktree", "could not determine the worktree id"))?;
-        Ok(Worktree {
+        let wt = Worktree {
             repo,
             path,
             id,
             git_dir: git_dir.to_string_lossy().into_owned(),
-        })
+        };
+        if lock {
+            wt.lock(None)?;
+        }
+        Ok(wt)
     }
 
     /// The worktree id (the administrative directory name).
@@ -408,6 +492,28 @@ impl Worktree {
         self.git_dir.clone()
     }
 
+    /// Open the linked worktree as its own repository, sharing the object
+    /// database with the main repository. The administrative directory is a
+    /// valid git directory, so it is opened directly.
+    #[napi]
+    pub fn repository(&self) -> napi::Result<Repository> {
+        let ts = gix::ThreadSafeRepository::open(self.git_dir.clone())
+            .map_err(|e| err("worktree_repository", e))?;
+        Ok(Repository {
+            inner: Arc::new(ts),
+        })
+    }
+
+    /// Whether this is the main worktree (rather than a linked one). A linked
+    /// worktree's administrative directory is `$GIT_DIR/worktrees/<id>`, whereas
+    /// the main worktree's is the repository's common directory.
+    #[napi(getter)]
+    pub fn is_main(&self) -> bool {
+        let r = thread_local(&self.repo);
+        let common = r.common_dir().to_string_lossy().into_owned();
+        self.git_dir == common
+    }
+
     /// Whether this worktree is locked, which prevents pruning, moving and deletion.
     #[napi]
     pub fn is_locked(&self) -> bool {
@@ -416,7 +522,7 @@ impl Worktree {
 
     /// The recorded lock reason, or `null` when the worktree is not locked.
     #[napi]
-    pub fn lock_reason(&self) -> Result<Option<String>> {
+    pub fn lock_reason(&self) -> napi::Result<Option<String>> {
         match std::fs::read_to_string(self.locked_path()) {
             Ok(s) => Ok(Some(s)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -424,12 +530,61 @@ impl Worktree {
         }
     }
 
+    /// Validate that this worktree still exists on disk and its metadata is consistent,
+    /// like git2's `Worktree::validate`. Throws when the working tree, administrative
+    /// directory, or the mutual `.git` ↔ `gitdir` links are missing.
+    #[napi]
+    pub fn validate(&self) -> napi::Result<()> {
+        let base = std::path::Path::new(&self.path);
+        if !base.exists() {
+            return Err(err_str("worktree.validate", "working tree does not exist"));
+        }
+        let admin = std::path::Path::new(&self.git_dir);
+        if !admin.is_dir() {
+            return Err(err_str(
+                "worktree.validate",
+                "administrative directory does not exist",
+            ));
+        }
+        if !base.join(".git").exists() {
+            return Err(err_str(
+                "worktree.validate",
+                "worktree .git link is missing",
+            ));
+        }
+        if !admin.join("gitdir").exists() {
+            return Err(err_str(
+                "worktree.validate",
+                "administrative gitdir file is missing",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether this worktree can be pruned, like git2's `Worktree::is_prunable`.
+    ///
+    /// With default options (all flags `false`), only worktrees whose working tree is
+    /// missing and that are not locked are prunable. `options.valid` additionally allows
+    /// valid (still-present) worktrees; `options.locked` additionally allows locked ones.
+    #[napi]
+    pub fn is_prunable(&self, options: Option<WorktreePruneOptions>) -> bool {
+        let (valid, locked, _working_tree) = resolve_prune_opts(&options);
+        let working_exists = std::path::Path::new(&self.path).exists();
+        if !valid && working_exists {
+            return false;
+        }
+        if !locked && self.is_locked() {
+            return false;
+        }
+        true
+    }
+
     /// List details of every worktree: the main worktree first, then each linked one.
     ///
     /// `repo` may be omitted, in which case the repository is resolved from the
     /// environment (`GIT_DIR` / `REPO_DIR` / current directory).
     #[napi]
-    pub fn list(repo: Option<&Repository>) -> Result<Vec<WorktreeProxy>> {
+    pub fn list(repo: Option<&Repository>) -> napi::Result<Vec<WorktreeProxy>> {
         let inner = repo_or_current(repo)?;
         let r = thread_local(&inner);
         let proxies = r.worktrees().map_err(|e| err("worktrees", e))?;
@@ -443,7 +598,7 @@ impl Worktree {
     /// Implemented directly against `$GIT_DIR/worktrees/<id>/locked` — `gix`
     /// exposes no lock API.
     #[napi]
-    pub fn lock(&self, reason: Option<String>) -> Result<()> {
+    pub fn lock(&self, reason: Option<String>) -> napi::Result<()> {
         std::fs::write(self.locked_path(), reason.unwrap_or_default())
             .map_err(|e| err("worktree.lock", e))
     }
@@ -453,7 +608,7 @@ impl Worktree {
     ///
     /// Implemented directly against `$GIT_DIR/worktrees/<id>/locked`.
     #[napi]
-    pub fn unlock(&self) -> Result<()> {
+    pub fn unlock(&self) -> napi::Result<()> {
         match std::fs::remove_file(self.locked_path()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -468,7 +623,7 @@ impl Worktree {
     /// Implemented directly against the worktree metadata — `gix` exposes no
     /// move API.
     #[napi(js_name = "move")]
-    pub fn move_to(&mut self, new_path: String) -> Result<()> {
+    pub fn move_to(&mut self, new_path: String) -> napi::Result<()> {
         let old = std::path::PathBuf::from(&self.path);
         let new = std::path::PathBuf::from(&new_path);
         if old.exists() {
@@ -496,7 +651,7 @@ impl Worktree {
     pub fn remove(
         &self,
         force: Option<WorktreeRemoveForce>,
-    ) -> Result<AsyncTask<RemoveWorktreeTask>> {
+    ) -> napi::Result<AsyncTask<RemoveWorktreeTask>> {
         Ok(AsyncTask::new(RemoveWorktreeTask::new(
             Arc::clone(&self.repo),
             self.path.clone(),
@@ -505,13 +660,20 @@ impl Worktree {
     }
 
     /// Remove stale administrative files for worktrees whose working trees are
-    /// missing, returning the ids that were pruned. Locked worktrees are skipped.
+    /// missing, returning the ids that were pruned. Locked worktrees are skipped
+    /// unless `options.locked` is set; valid (still-present) worktrees are skipped
+    /// unless `options.valid` is set; `options.working_tree` additionally removes the
+    /// working tree directory.
     ///
     /// `repo` may be omitted, in which case the repository is resolved from the
     /// environment. Implemented directly — `gix` exposes no prune API.
     #[napi]
-    pub fn prune(repo: Option<&Repository>) -> Result<Vec<String>> {
+    pub fn prune_all(
+        repo: Option<&Repository>,
+        opts: Option<WorktreePruneOptions>,
+    ) -> napi::Result<Vec<String>> {
         let inner = repo_or_current(repo)?;
+        let (valid, locked, working_tree) = resolve_prune_opts(&opts);
         let root = admin_dir(&inner);
         let mut pruned = Vec::new();
         if !root.exists() {
@@ -520,16 +682,22 @@ impl Worktree {
         for entry in std::fs::read_dir(&root).map_err(|e| err("worktree.prune", e))? {
             let entry = entry.map_err(|e| err("worktree.prune", e))?;
             let admin = entry.path();
-            if !admin.is_dir() || admin.join("locked").exists() {
+            if !admin.is_dir() {
+                continue;
+            }
+            if !locked && admin.join("locked").exists() {
                 continue;
             }
             let target = match std::fs::read_to_string(admin.join("gitdir")) {
                 Ok(s) => std::path::PathBuf::from(s.trim().to_string()),
                 Err(_) => continue,
             };
-            // A present .git link means the working tree still exists.
-            if target.exists() {
+            let working_exists = target.exists();
+            if !valid && working_exists {
                 continue;
+            }
+            if working_tree && working_exists {
+                let _ = std::fs::remove_dir_all(&target);
             }
             std::fs::remove_dir_all(&admin).map_err(|e| err("worktree.prune", e))?;
             if let Some(id) = admin.file_name() {
@@ -537,6 +705,36 @@ impl Worktree {
             }
         }
         Ok(pruned)
+    }
+
+    /// Remove this worktree's stale administrative files, returning the pruned id
+    /// (an empty array when this worktree is not prunable). Honors the same
+    /// `options` as the static [`Worktree::pruneAll`]; the main worktree cannot be pruned.
+    ///
+    /// This is the per-worktree equivalent of git2's `Worktree::prune`.
+    #[napi]
+    pub fn prune(&self, opts: Option<WorktreePruneOptions>) -> napi::Result<Vec<String>> {
+        let (valid, locked, working_tree) = resolve_prune_opts(&opts);
+        let admin = std::path::Path::new(&self.git_dir);
+        if !admin.is_dir() {
+            return Ok(Vec::new());
+        }
+        if !locked && admin.join("locked").exists() {
+            return Ok(Vec::new());
+        }
+        let target = match std::fs::read_to_string(admin.join("gitdir")) {
+            Ok(s) => std::path::PathBuf::from(s.trim().to_string()),
+            Err(_) => return Ok(Vec::new()),
+        };
+        let working_exists = target.exists();
+        if !valid && working_exists {
+            return Ok(Vec::new());
+        }
+        if working_tree && working_exists {
+            let _ = std::fs::remove_dir_all(&target);
+        }
+        std::fs::remove_dir_all(admin).map_err(|e| err("worktree.prune", e))?;
+        Ok(vec![self.id.clone()])
     }
 
     /// Repair worktree administrative files that became stale because a worktree
@@ -547,7 +745,7 @@ impl Worktree {
     ///
     /// Implemented directly — `gix` exposes no repair API.
     #[napi]
-    pub fn repair(&self, paths: Option<Vec<String>>) -> Result<Vec<String>> {
+    pub fn repair(&self, paths: Option<Vec<String>>) -> napi::Result<Vec<String>> {
         let targets = paths.unwrap_or_else(|| vec![self.path.clone()]);
         let mut repaired = Vec::new();
         for p in targets {
@@ -593,7 +791,7 @@ impl Worktree {
     /// (path, mode, id, size), with filters applied and `export-ignore` honored.
     /// The whole stream is drained on the thread pool.
     #[napi]
-    pub fn stream(&self, tree_id: String) -> Result<AsyncTask<StreamTask>> {
+    pub fn stream(&self, tree_id: String) -> napi::Result<AsyncTask<StreamTask>> {
         Ok(AsyncTask::new(StreamTask::new(
             Arc::clone(&self.repo),
             tree_id,
@@ -603,7 +801,7 @@ impl Worktree {
     /// Encode the worktree stream of the tree at `tree_id` into its raw,
     /// unspecified transport bytes.
     #[napi]
-    pub fn stream_raw(&self, tree_id: String) -> Result<AsyncTask<StreamRawTask>> {
+    pub fn stream_raw(&self, tree_id: String) -> napi::Result<AsyncTask<StreamRawTask>> {
         Ok(AsyncTask::new(StreamRawTask::new(
             Arc::clone(&self.repo),
             tree_id,
@@ -623,7 +821,7 @@ impl Worktree {
 impl Repository {
     /// List secondary worktrees for this repository.
     #[napi]
-    pub fn worktrees(&self) -> Result<Vec<WorktreeProxy>> {
+    pub fn worktrees(&self) -> napi::Result<Vec<WorktreeProxy>> {
         let r = thread_local(&self.inner);
         let proxies = r.worktrees().map_err(|e| err("worktrees", e))?;
         proxies.iter().map(|p| Ok(proxy_to_napi!(p))).collect()
@@ -632,7 +830,7 @@ impl Repository {
     /// List all worktrees including the main repository, opening each one.
     /// The main repository comes first, then the linked worktrees in iteration order.
     #[napi]
-    pub fn worktrees_including_main(&self) -> Result<Vec<Repository>> {
+    pub fn worktrees_including_main(&self) -> napi::Result<Vec<Repository>> {
         let r = thread_local(&self.inner);
         let mut out = Vec::new();
         for item in r
@@ -650,7 +848,7 @@ impl Repository {
     /// Return the worktree identified by `id` (a directory name under
     /// `.git/worktrees/`), or `null` if it does not exist.
     #[napi]
-    pub fn worktree_proxy_by_id(&self, id: String) -> Result<Option<WorktreeProxy>> {
+    pub fn worktree_proxy_by_id(&self, id: String) -> napi::Result<Option<WorktreeProxy>> {
         let r = thread_local(&self.inner);
         let proxy = r
             .worktree_proxy_by_id(id.as_str())
@@ -692,12 +890,14 @@ impl Repository {
         destination: String,
         head_kind: WorktreeHeadKind,
         head_name: String,
-    ) -> Result<AsyncTask<AddWorktreeTask>> {
+        lock: Option<bool>,
+    ) -> napi::Result<AsyncTask<AddWorktreeTask>> {
         Ok(AsyncTask::new(AddWorktreeTask::new(
             self.inner.clone(),
             destination,
             head_kind,
             head_name,
+            lock.unwrap_or(false),
         )))
     }
 
@@ -713,7 +913,7 @@ impl Repository {
         &self,
         target: String,
         force: Option<WorktreeRemoveForce>,
-    ) -> Result<AsyncTask<RemoveWorktreeTask>> {
+    ) -> napi::Result<AsyncTask<RemoveWorktreeTask>> {
         Ok(AsyncTask::new(RemoveWorktreeTask::new(
             self.inner.clone(),
             target,
@@ -726,11 +926,8 @@ impl Repository {
     /// honored. A live stream cannot cross the FFI boundary, so the whole stream
     /// is drained on the thread pool.
     #[napi]
-    pub fn worktree_stream(&self, tree_id: String) -> Result<AsyncTask<StreamTask>> {
-        Ok(AsyncTask::new(StreamTask::new(
-            self.inner.clone(),
-            tree_id,
-        )))
+    pub fn worktree_stream(&self, tree_id: String) -> napi::Result<AsyncTask<StreamTask>> {
+        Ok(AsyncTask::new(StreamTask::new(self.inner.clone(), tree_id)))
     }
 
     /// Encode the worktree stream of the tree at `tree_id` into its raw,
@@ -743,7 +940,7 @@ impl Repository {
     /// elsewhere (e.g. for `git archive`-style transport). Like the
     /// materialized variant, the whole stream is produced on the thread pool.
     #[napi]
-    pub fn worktree_stream_raw(&self, tree_id: String) -> Result<AsyncTask<StreamRawTask>> {
+    pub fn worktree_stream_raw(&self, tree_id: String) -> napi::Result<AsyncTask<StreamRawTask>> {
         Ok(AsyncTask::new(StreamRawTask::new(
             self.inner.clone(),
             tree_id,

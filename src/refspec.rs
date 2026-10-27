@@ -1,4 +1,3 @@
-use napi::Result;
 use napi_derive::napi;
 
 use crate::error::{err, err_str, parse_oid};
@@ -20,6 +19,24 @@ pub(crate) fn to_refspec_operation(op: RefSpecOperation) -> gix::refspec::parse:
 
 fn bstr_to_string(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
+}
+
+/// The operation (fetch/push) of `spec` as the napi enum.
+fn op_napi(spec: &gix::refspec::RefSpec) -> RefSpecOperation {
+    match spec.to_ref().instruction() {
+        gix::refspec::Instruction::Push(_) => RefSpecOperation::Push,
+        gix::refspec::Instruction::Fetch(_) => RefSpecOperation::Fetch,
+    }
+}
+
+/// A match input with `name` as its full reference name and a zero object id. Matching only
+/// inspects the name, so the id is irrelevant.
+fn match_item(name: &str) -> MatchItem {
+    MatchItem {
+        full_ref_name: name.to_string(),
+        target: "0000000000000000000000000000000000000000".to_string(),
+        object: None,
+    }
 }
 
 /// The flattened instruction derived from a [`RefSpec`], making clear what to do with it.
@@ -117,7 +134,7 @@ impl RefSpec {
     /// Patterns with more than one `*` or otherwise invalid ref names reject the parse.
     /// An empty fetch spec parses as a `HEAD`-only spec, matching Git.
     #[napi(factory)]
-    pub fn parse(spec: String, operation: RefSpecOperation) -> Result<RefSpec> {
+    pub fn parse(spec: String, operation: RefSpecOperation) -> napi::Result<RefSpec> {
         let parsed = gix::refspec::parse(
             gix::bstr::BStr::new(spec.as_bytes()),
             to_refspec_operation(operation),
@@ -225,6 +242,49 @@ impl RefSpec {
     pub fn instruction(&self) -> RefSpecInstruction {
         to_instruction(self.inner.to_ref().instruction())
     }
+
+    /// Whether `name` is matched by the source (left-hand) side of this spec, like git2's
+    /// `src_matches`.
+    ///
+    /// Note: a negative refspec never produces a mapping, so this returns `false` for names it
+    /// excludes; its pattern is still visible via [`spec()`](Self::spec).
+    #[napi]
+    pub fn source_matches(&self, name: String) -> napi::Result<bool> {
+        let group = MatchGroup::from_specs(vec![self], op_napi(&self.inner));
+        Ok(!group.match_lhs(vec![match_item(&name)])?.is_empty())
+    }
+
+    /// Whether `name` is matched by the destination (right-hand) side of this spec, like git2's
+    /// `dst_matches`.
+    #[napi]
+    pub fn destination_matches(&self, name: String) -> napi::Result<bool> {
+        let group = MatchGroup::from_specs(vec![self], op_napi(&self.inner));
+        Ok(!group.match_rhs(vec![match_item(&name)])?.is_empty())
+    }
+
+    /// Map `name` on the source side to its destination, like git2's `transform`. Returns `null`
+    /// when `name` is not matched by this spec.
+    #[napi]
+    pub fn transform(&self, name: String) -> napi::Result<Option<String>> {
+        let group = MatchGroup::from_specs(vec![self], op_napi(&self.inner));
+        Ok(group
+            .match_lhs(vec![match_item(&name)])?
+            .into_iter()
+            .next()
+            .and_then(|m| m.rhs))
+    }
+
+    /// Reverse-map `name` on the destination side to its source, like git2's `rtransform`. Returns
+    /// `null` when `name` is not matched by this spec.
+    #[napi]
+    pub fn rtransform(&self, name: String) -> napi::Result<Option<String>> {
+        let group = MatchGroup::from_specs(vec![self], op_napi(&self.inner));
+        Ok(group
+            .match_rhs(vec![match_item(&name)])?
+            .into_iter()
+            .next()
+            .map(|m| m.lhs))
+    }
 }
 
 fn spec_operation(spec: &gix::refspec::RefSpec) -> gix::refspec::parse::Operation {
@@ -284,7 +344,7 @@ pub struct ValidatedMatch {
     pub fixes: Vec<MatchFix>,
 }
 
-fn parse_ids(items: &[MatchItem]) -> Result<Vec<(gix::ObjectId, Option<gix::ObjectId>)>> {
+fn parse_ids(items: &[MatchItem]) -> napi::Result<Vec<(gix::ObjectId, Option<gix::ObjectId>)>> {
     items
         .iter()
         .map(|i| {
@@ -356,7 +416,10 @@ impl MatchGroup {
     /// Parse each refspec in `specs` for use in `operation` and build a match group
     /// from the valid ones.
     #[napi(factory)]
-    pub fn parse_specs(specs: Vec<String>, operation: RefSpecOperation) -> Result<MatchGroup> {
+    pub fn parse_specs(
+        specs: Vec<String>,
+        operation: RefSpecOperation,
+    ) -> napi::Result<MatchGroup> {
         let op = to_refspec_operation(operation);
         let mut out = Vec::with_capacity(specs.len());
         for spec in &specs {
@@ -383,7 +446,7 @@ impl MatchGroup {
     /// being matched against `items`. Negative matches are not observable in the result
     /// but are used to remove mappings.
     #[napi]
-    pub fn match_lhs(&self, items: Vec<MatchItem>) -> Result<Vec<RefSpecMapping>> {
+    pub fn match_lhs(&self, items: Vec<MatchItem>) -> napi::Result<Vec<RefSpecMapping>> {
         let ids = parse_ids(&items)?;
         let gix_items = to_items(&items, &ids);
         Ok(self
@@ -402,7 +465,7 @@ impl MatchGroup {
     /// matched and reverse-mapped to obtain their remote counterparts. Negative fetch
     /// refspecs exclude mappings by their source side.
     #[napi]
-    pub fn match_rhs(&self, items: Vec<MatchItem>) -> Result<Vec<RefSpecMapping>> {
+    pub fn match_rhs(&self, items: Vec<MatchItem>) -> napi::Result<Vec<RefSpecMapping>> {
         let ids = parse_ids(&items)?;
         let gix_items = to_items(&items, &ids);
         Ok(self
@@ -418,7 +481,7 @@ impl MatchGroup {
     /// destinations are returned as `issues`, and mappings with partial destinations
     /// are removed and reported in `fixes`.
     #[napi(ts_return_type = "ValidatedMatch")]
-    pub fn match_lhs_validated(&self, items: Vec<MatchItem>) -> Result<ValidatedMatch> {
+    pub fn match_lhs_validated(&self, items: Vec<MatchItem>) -> napi::Result<ValidatedMatch> {
         use gix::refspec::match_group::validate::Fix;
         let ids = parse_ids(&items)?;
         let gix_items = to_items(&items, &ids);

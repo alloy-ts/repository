@@ -1,8 +1,7 @@
-use napi::Result;
 use napi_derive::napi;
 
 use crate::error::{err, thread_local};
-use crate::object::lossy;
+use crate::object::{lossy, rfc3339};
 use crate::repository::Repository;
 
 /// A person with name and email (no timestamp), mirroring `gix_actor::Identity`.
@@ -24,6 +23,7 @@ pub struct Signature {
     pub email: String,
     pub time: i64,
     pub timezone_offset: i32,
+    pub date: Option<String>,
 }
 
 /// Build a NAPI [`Signature`] from raw actor parts.
@@ -33,6 +33,7 @@ pub(crate) fn to_signature(name: &[u8], email: &[u8], seconds: i64, offset: i32)
         email: lossy(email),
         time: seconds,
         timezone_offset: offset,
+        date: Some(rfc3339(seconds, offset)),
     }
 }
 
@@ -54,7 +55,7 @@ pub(crate) fn signature_from_actor(s: &gix::actor::SignatureRef<'_>) -> Signatur
     )
 }
 
-pub(crate) fn signature_from_dto(s: &Signature) -> Result<gix::actor::Signature> {
+pub(crate) fn signature_from_dto(s: &Signature) -> napi::Result<gix::actor::Signature> {
     Ok(gix::actor::Signature {
         name: s.name.clone().into(),
         email: s.email.clone().into(),
@@ -77,7 +78,7 @@ pub fn signature_to_identity(sig: Signature) -> Identity {
 
 /// Serialize a signature to the git actor format `Name <email> <seconds> <offset>`.
 #[napi]
-pub fn signature_to_raw(sig: Signature) -> Result<String> {
+pub fn signature_to_raw(sig: Signature) -> napi::Result<String> {
     let s = signature_from_dto(&sig)?;
     let mut out = Vec::new();
     s.write_to(&mut out)
@@ -88,7 +89,7 @@ pub fn signature_to_raw(sig: Signature) -> Result<String> {
 /// Serialize an identity to the git identity format `Name <email>`
 /// (a signature without timestamp).
 #[napi]
-pub fn identity_to_raw(identity: Identity) -> Result<String> {
+pub fn identity_to_raw(identity: Identity) -> napi::Result<String> {
     let identity = gix::actor::Identity {
         name: identity.name.into(),
         email: identity.email.into(),
@@ -122,7 +123,7 @@ pub fn parse_signature(data: String) -> Option<Signature> {
 impl Repository {
     /// Retrieve the default author signature configured for this repository.
     #[napi]
-    pub fn default_author(&self) -> Result<Option<Signature>> {
+    pub fn default_author(&self) -> napi::Result<Option<Signature>> {
         let r = thread_local(&self.inner);
         Ok(r.author()
             .and_then(|res| res.ok())
@@ -131,7 +132,7 @@ impl Repository {
 
     /// Retrieve the default committer signature configured for this repository.
     #[napi]
-    pub fn default_committer(&self) -> Result<Option<Signature>> {
+    pub fn default_committer(&self) -> napi::Result<Option<Signature>> {
         let r = thread_local(&self.inner);
         Ok(r.committer()
             .and_then(|res| res.ok())
@@ -144,7 +145,11 @@ impl Repository {
     /// The fallback lives only on the underlying handle for the duration of this call;
     /// it is not persisted to configuration.
     #[napi]
-    pub fn committer_or_set_fallback(&self, name: String, email: String) -> Result<Signature> {
+    pub fn committer_or_set_fallback(
+        &self,
+        name: String,
+        email: String,
+    ) -> napi::Result<Signature> {
         let mut r = thread_local(&self.inner);
         let s = r
             .committer_or_set_fallback(name.as_bytes(), email.as_bytes())
@@ -155,7 +160,7 @@ impl Repository {
     /// Like `committerOrSetFallback`, but installs a generic fallback identity when
     /// nothing is configured.
     #[napi]
-    pub fn committer_or_set_generic_fallback(&self) -> Result<Signature> {
+    pub fn committer_or_set_generic_fallback(&self) -> napi::Result<Signature> {
         let mut r = thread_local(&self.inner);
         let s = r
             .committer_or_set_generic_fallback()
@@ -170,7 +175,7 @@ impl Repository {
     /// repository configuration — gix 0.89 only supports installing committer fallbacks, so the
     /// synthesized identity is returned directly.
     #[napi]
-    pub fn author_or_set_fallback(&self, name: String, email: String) -> Result<Signature> {
+    pub fn author_or_set_fallback(&self, name: String, email: String) -> napi::Result<Signature> {
         let r = thread_local(&self.inner);
         match r.author().and_then(|res| res.ok()) {
             Some(s) => Ok(signature_from_actor(&s)),
@@ -180,7 +185,7 @@ impl Repository {
 
     /// Like `authorOrSetFallback`, but uses a generic fallback identity when nothing is configured.
     #[napi]
-    pub fn author_or_set_generic_fallback(&self) -> Result<Signature> {
+    pub fn author_or_set_generic_fallback(&self) -> napi::Result<Signature> {
         let r = thread_local(&self.inner);
         match r.author().and_then(|res| res.ok()) {
             Some(s) => Ok(signature_from_actor(&s)),

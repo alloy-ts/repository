@@ -5,7 +5,6 @@
 //! filtering work) and drains the resulting stream into a [`Buffer`] for the FFI boundary.
 use std::io::Read;
 
-use napi::Result;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
@@ -37,7 +36,7 @@ impl FilterPipeline {
     /// Create a pipeline bound to `repo`. The underlying [`gix_filter::Pipeline`] (driver state,
     /// buffers, resolved options) is constructed once here and reused for every conversion.
     #[napi(constructor)]
-    pub fn new(repo: &Repository) -> Result<Self> {
+    pub fn new(repo: &Repository) -> napi::Result<Self> {
         let r = thread_local(&repo.inner);
         let options = build_options(&r)?;
         let context = r.command_context().map_err(|e| err("command_context", e))?;
@@ -53,7 +52,7 @@ impl FilterPipeline {
     /// Convert `src` (located at repo-relative `rela_path`) from the working-tree representation
     /// to the representation stored in `git`. Returns the (possibly filtered) bytes.
     #[napi]
-    pub fn convert_to_git(&mut self, src: Buffer, rela_path: String) -> Result<Buffer> {
+    pub fn convert_to_git(&mut self, src: Buffer, rela_path: String) -> napi::Result<Buffer> {
         self.convert_to_git_read(src.as_ref(), &rela_path)
             .map(Buffer::from)
     }
@@ -73,7 +72,7 @@ impl FilterPipeline {
         rela_path: String,
         can_delay: Option<bool>,
         unknown_encoding: Option<String>,
-    ) -> Result<Buffer> {
+    ) -> napi::Result<Buffer> {
         let r = thread_local(&self.repo.inner);
         let index = r.index_or_empty().map_err(|e| err("index_or_empty", e))?;
         let mut cache = r
@@ -163,7 +162,7 @@ impl FilterPipeline {
     /// waiting for them to exit. Returns per-process outcomes. After this call the pipeline can
     /// launch fresh processes for subsequent conversions.
     #[napi]
-    pub fn shutdown(&mut self) -> Result<FilterShutdownOutcome> {
+    pub fn shutdown(&mut self) -> napi::Result<FilterShutdownOutcome> {
         let out = self
             .pipeline
             .driver_state_mut()
@@ -206,7 +205,7 @@ impl FilterPipeline {
         ref_name: Option<String>,
         treeish: Option<String>,
         blob: Option<String>,
-    ) -> Result<()> {
+    ) -> napi::Result<()> {
         let ctx = self.pipeline.driver_context_mut();
         ctx.ref_name = ref_name.map(|s| gix::bstr::BString::from(s));
         ctx.treeish = match treeish {
@@ -236,7 +235,7 @@ impl FilterPipeline {
     pub fn worktree_file_to_object(
         &mut self,
         rela_path: String,
-    ) -> Result<Option<FilterFileObject>> {
+    ) -> napi::Result<Option<FilterFileObject>> {
         let r = thread_local(&self.repo.inner);
         let worktree_dir = r.workdir().ok_or_else(|| {
             err_str(
@@ -298,7 +297,7 @@ impl FilterPipeline {
     ///
     /// Returns `null` if the file does not exist or is of an untrackable type (e.g. a directory).
     #[napi]
-    pub fn convert_to_git_file(&mut self, rela_path: String) -> Result<Option<Buffer>> {
+    pub fn convert_to_git_file(&mut self, rela_path: String) -> napi::Result<Option<Buffer>> {
         let r = thread_local(&self.repo.inner);
         let worktree_dir = r.workdir().ok_or_else(|| {
             err_str(
@@ -334,10 +333,9 @@ impl FilterPipeline {
         rela_path: String,
         can_delay: Option<bool>,
         unknown_encoding: Option<String>,
-    ) -> Result<Buffer> {
+    ) -> napi::Result<Buffer> {
         let r = thread_local(&self.repo.inner);
-        let oid =
-            gix::hash::ObjectId::from_hex(id.as_bytes()).map_err(|e| err("parse_oid", e))?;
+        let oid = gix::hash::ObjectId::from_hex(id.as_bytes()).map_err(|e| err("parse_oid", e))?;
         let blob = r.find_blob(oid).map_err(|e| err("find_blob", e))?;
         self.convert_to_worktree(
             Buffer::from(blob.data.clone()),
@@ -349,7 +347,7 @@ impl FilterPipeline {
 }
 
 impl FilterPipeline {
-    fn convert_to_git_read<R: Read>(&mut self, src: R, rela_path: &str) -> Result<Vec<u8>> {
+    fn convert_to_git_read<R: Read>(&mut self, src: R, rela_path: &str) -> napi::Result<Vec<u8>> {
         let r = thread_local(&self.repo.inner);
         let index = r.index_or_empty().map_err(|e| err("index_or_empty", e))?;
         let mut cache = r
@@ -385,7 +383,7 @@ impl FilterPipeline {
     }
 }
 
-fn drain_git(outcome: ToGitOutcome<impl Read>) -> Result<Vec<u8>> {
+fn drain_git(outcome: ToGitOutcome<impl Read>) -> napi::Result<Vec<u8>> {
     let mut buf = Vec::new();
     match outcome {
         ToGitOutcome::Unchanged(mut r) => {
@@ -401,7 +399,7 @@ fn drain_git(outcome: ToGitOutcome<impl Read>) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn drain_worktree(outcome: ToWorktreeOutcome) -> Result<Vec<u8>> {
+fn drain_worktree(outcome: ToWorktreeOutcome) -> napi::Result<Vec<u8>> {
     let mut buf = Vec::new();
     match outcome {
         ToWorktreeOutcome::Unchanged(b) => buf.extend_from_slice(b),
@@ -424,7 +422,7 @@ fn drain_worktree(outcome: ToWorktreeOutcome) -> Result<Vec<u8>> {
 /// Extract pipeline options from `repo`'s configuration (core.safecrlf, core.autocrlf, core.eol,
 /// core.checkRoundtripEncoding, and filter drivers). Leniency is treated as strict so that
 /// malformed configuration surfaces as an error rather than being silently ignored.
-fn build_options(r: &gix::Repository) -> Result<gix_filter::pipeline::Options> {
+fn build_options(r: &gix::Repository) -> napi::Result<gix_filter::pipeline::Options> {
     let config = r.config_snapshot();
     let encodings = Core::CHECK_ROUND_TRIP_ENCODING
         .try_into_encodings(config.string("core.checkRoundtripEncoding"))
@@ -456,7 +454,7 @@ fn build_options(r: &gix::Repository) -> Result<gix_filter::pipeline::Options> {
 }
 
 /// Collect the configured filter drivers from all `filter.*` sections.
-fn extract_drivers(r: &gix::Repository) -> Result<Vec<gix_filter::Driver>> {
+fn extract_drivers(r: &gix::Repository) -> napi::Result<Vec<gix_filter::Driver>> {
     let config = r.config_snapshot();
     let mut drivers: Vec<gix_filter::Driver> = Vec::new();
     for section in config.sections_by_name("filter").into_iter().flatten() {
