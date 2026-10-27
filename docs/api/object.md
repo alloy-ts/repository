@@ -7,23 +7,77 @@ All object ids are lowercase 40-character SHA-1 hex strings (matching
 `repo.objectHash()`). Methods that look objects up by id throw when the object
 is missing, unless documented as returning `null`.
 
+## Object ids
+
+Object ids are plain hex strings — 40 characters for SHA-1, 64 for SHA-256
+repositories. For a first-class wrapper there is the `Oid` class:
+
+```ts
+const oid = new Oid(repo.headId()); // parse hex; throws on abbreviations/non-hex
+oid.hex; // "c859dbe6…" — lowercase hex
+String(oid); // hex, so template literals work
+JSON.stringify(oid); // '"c859dbe6…"' — toJSON returns the hex id
+oid.format(); // "sha1" | "sha256"
+oid.isZero(); // false
+oid.toBytes(); // Buffer — raw 20/32-byte digest
+Oid.fromBytes(oid.toBytes()).equals(oid); // true
+oid.compare(Oid.zero()); // 1 — byte-wise (git_oid_cmp); -1/0/1
+Oid.zero("sha256").hex.length; // 64
+```
+
+`Oid` is a convenience wrapper: repository methods still take hex strings, so
+pass `oid.hex` (or `String(oid)`) wherever an id is expected.
+
+The free functions (no repository needed) complement it:
+
+| Function       | Signature                                    | Notes                                                                                             |
+| -------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `oidIsValid`   | `(id: string, format?: string) => boolean`   | Strict: full digest length only; with `format` the length must match. Abbreviations are not oids. |
+| `oidFormat`    | `(id: string) => "sha1" \| "sha256" \| null` | Inferred from the hex length; `null` when `id` is not a valid object id.                          |
+| `oidIsZero`    | `(id: string) => boolean`                    | All-zero id check (`git_oid_is_zero`); `false` for invalid strings.                               |
+| `oidZero`      | `(format?: string) => string`                | The all-zero id (40 or 64 `0`s); libgit2's `Oid::ZERO_SHA1`/`Oid::ZERO_SHA256`.                   |
+| `oidToBytes`   | `(id: string) => Buffer`                     | Raw digest bytes (20/32); throws on invalid ids.                                                  |
+| `oidFromBytes` | `(bytes: Buffer) => string`                  | Hex id of a raw digest; throws unless `bytes` is 20 or 32 bytes.                                  |
+
+The `Oid` class (`new Oid(hex)`, `Oid.fromBytes(bytes)`, `Oid.zero(format?)`)
+exposes the same checks as methods — `hex`, `format()`, `isZero()`, `toBytes()`,
+`equals(other)`, `compare(other)` — plus `toString()`/`toJSON()` returning the
+hex id.
+
+Every entry point that takes a hash-kind string (`ObjectStore`'s constructor,
+`Graph.at`, `oidIsValid`, `oidZero`) accepts any casing — `"sha1"`, `"Sha1"`,
+`"sha256"`, `"Sha256"`. `Repository.objectHash()` still returns the `Debug`
+casing (`"Sha1"`).
+
+```ts
+oidIsValid(repo.headId()); // true
+oidIsValid(repo.headId().slice(0, 7)); // false — prefixes are resolved via revParseSingle
+oidFormat(repo.headId()); // "sha1"
+oidToBytes(repo.headId()).length; // 20
+```
+
 ## Raw object store
 
 Raw methods treat objects as opaque bytes of a known kind — no decoding happens.
 
 ### `Repository`
 
-| Method          | Signature                                | Notes                                                                                                                       |
-| --------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `findObject`    | `(id: string) => GitObject`              | Throws when the object is missing.                                                                                          |
-| `tryFindObject` | `(id: string) => GitObject \| null`      | `null` when missing or when `id` is not a valid hex id.                                                                     |
-| `objectExists`  | `(id: string) => boolean`                | `false` for malformed ids.                                                                                                  |
-| `readObject`    | `(id: string) => ObjectData`             | `{ kind: string, data: Buffer }` — the raw, decompressed body without the loose-object header.                              |
-| `writeObject`   | `(kind: string, data: Buffer) => string` | `kind` is one of `commit`, `tree`, `blob`, `tag`. Writes raw bytes as-is (inverse of `readObject`). Returns the id.         |
-| `computeHash`   | `(kind: string, data: Buffer) => string` | Computes the id without writing anything to the object database.                                                            |
-| `findHeader`    | `(id: string) => ObjectHeader`           | `{ kind: string, size: number }` — size of the encoded body in bytes; cheaper than `readObject`. Throws when missing.       |
-| `tryFindHeader` | `(id: string) => ObjectHeader \| null`   | `null` when missing or malformed.                                                                                           |
-| `peel`          | `(id: string, kind: string) => string`   | Follows tag→commit→tree chains until an object of `kind` is reached; returns its id. Throws if that kind cannot be reached. |
+| Method            | Signature                                | Notes                                                                                                                        |
+| ----------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `findObject`      | `(id: string) => GitObject`              | Throws when the object is missing.                                                                                           |
+| `tryFindObject`   | `(id: string) => GitObject \| null`      | `null` when missing or when `id` is not a valid hex id.                                                                      |
+| `objectExists`    | `(id: string) => boolean`                | `false` for malformed ids.                                                                                                   |
+| `readObject`      | `(id: string) => ObjectData`             | `{ kind: string, data: Buffer }` — the raw, decompressed body without the loose-object header.                               |
+| `writeObject`     | `(kind: string, data: Buffer) => string` | `kind` is one of `commit`, `tree`, `blob`, `tag`. Writes raw bytes as-is (inverse of `readObject`). Returns the id.          |
+| `computeHash`     | `(kind: string, data: Buffer) => string` | Computes the id without writing anything to the object database.                                                             |
+| `computeHashFile` | `(kind: string, path: string) => string` | Computes the id of the file at `path` without writing anything (libgit2's `Oid::hash_file`); streams, so files may be large. |
+| `findHeader`      | `(id: string) => ObjectHeader`           | `{ kind, size, isPacked, numDeltas }` — size of the encoded body in bytes; cheaper than `readObject`. Throws when missing.   |
+| `tryFindHeader`   | `(id: string) => ObjectHeader \| null`   | `null` when missing or malformed.                                                                                            |
+| `peel`            | `(id: string, kind: string) => string`   | Follows tag→commit→tree chains until an object of `kind` is reached; returns its id. Throws if that kind cannot be reached.  |
+
+`ObjectHeader` reports where the object was found: `isPacked` is `true` for
+objects that came out of a pack (with `numDeltas` counting the deltas decoded)
+and `false` for loose objects (where `numDeltas` is `undefined`).
 
 ### `GitObject`
 
@@ -34,6 +88,7 @@ const obj = repo.findObject(commitId);
 obj.kind; // "commit" | "tree" | "blob" | "tag"
 obj.id; // hex id
 obj.data(); // Buffer — raw body
+obj.shortId(); // "a1b2c3d" — shortest unambiguous abbreviation (core.abbrev aware)
 
 obj.asCommit(); // Commit | null
 obj.asTree(); // Tree | null
@@ -42,11 +97,27 @@ obj.asTag(); // Tag | null
 
 obj.peelToCommit(); // Commit — follows tags until a commit
 obj.peelToTree(); // Tree — follows tags/commits until a tree
+obj.peelToBlob(); // Blob
+obj.peelToTag(); // Tag
+obj.peelToKind("tree"); // GitObject — peel to any of "commit" | "tree" | "blob" | "tag" | "any"
+obj.peelToEnd(); // GitObject — follows tag chains to the first non-tag object
+
+obj.findHeader(); // ObjectHeader — kind/size/isPacked without decoding
+obj.describe({ idAsFallback: true }); // DescribeOutcome | null — `git describe`
 ```
 
 Downcasts check the object's kind and return `null` on mismatch. The well-known
 empty tree id is resolvable via `findTree`/`findObject` even when the object is
 not stored in the database (`git` itself leaves it out of most repositories).
+
+### Peeling
+
+`peelToKind("any")` and `peelToEnd()` are the `git rev-parse <rev>^{}`
+operation: they follow tag chains only, so a tag on a commit yields that
+_commit_, never its tree. The other `peelToX` methods peel as far as needed —
+`peelToTree()` walks a tag→commit→tree chain to the end. Peeling throws when the
+chain cannot reach the requested kind (e.g. `peelToCommit()` on a tag pointing
+at a blob).
 
 ### Object cache
 
@@ -249,7 +320,10 @@ const treeId = repo.editTree(head.treeId, [
   },
 ]);
 const commitId = repo.commit("HEAD", "Update main.ts", treeId, [head.id]);
-repo.createTag("v2.0.0", commitId, "Second release\n", true);
+repo.createTag("v2.0.0", commitId, {
+  message: "Second release\n",
+  force: true,
+});
 
 // Round-trip raw objects
 const raw = repo.readObject(treeId);
@@ -265,5 +339,16 @@ console.log(sameId === treeId); // true
   including for malformed hex ids.
 - `objectExists` returns `false` for malformed ids; `writeObject`/`computeHash`
   throw on an invalid `kind`.
+- The `oid*` helpers throw only where documented (`oidToBytes`/`oidFromBytes`);
+  `oidIsValid`/`oidFormat`/`oidIsZero` return `false`/`null` for invalid input,
+  and `oidZero` throws on an unknown hash kind.
+- `computeHashFile` throws when the file cannot be opened or read; it never
+  writes to the object database.
+- Peeling throws when the requested kind is unreachable, and `peelToKind` throws
+  on an unknown kind string (`invalid object kind bogus`).
+- `shortId()` falls back to the full 40-hex id when the prefix cannot be
+  shortened, so it never throws for a valid handle.
+- `describe()` throws when the object is not a commit; it returns `null` when no
+  candidate name is found and `idAsFallback` is off.
 - `editTree` throws on an invalid `mode`, an invalid `removeMode`, a missing
   `id` for an upsert, or `removeMode: "leaf"` when the target is a tree.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { CancellationToken, Process, createCancellationToken } from "./main.ts";
+import { CancellationToken, createCancellationToken, Process } from "./main.ts";
 
 // `yes`/`sleep`/`echo`/`cat` are POSIX utilities; the tests below assume a
 // POSIX shell is on PATH (macOS/Linux). The Windows equivalents are noted where

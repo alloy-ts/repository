@@ -1,7 +1,8 @@
-use napi::Result;
+use crate::error::RepositoryResult as Result;
 use napi_derive::napi;
 
 use crate::error::{err, err_str, parse_oid, thread_local};
+use crate::object::{Object, build_object};
 use crate::repository::Repository;
 
 /// A parsed revision specification (result of [`Repository::rev_parse`]).
@@ -20,45 +21,59 @@ pub struct RevSpec {
 /// Options controlling [`Repository::rev_walk`].
 #[napi(object)]
 pub struct WalkOptions {
-    /// Sort order: `breadth-first` (default), `time-newest`, or `time-oldest`.
+    /// Sort order: `breadth-first` (default), `time-newest`, or `time-oldest`. Unknown
+    /// values are rejected. (There is no topological order — libgit2's `Sort::TOPOLOGICAL`
+    /// has no equivalent in gix's walk.)
     pub sort: Option<String>,
     /// Reverse the resulting commit list.
     pub reverse: Option<bool>,
     /// Traverse only the first parent of each commit.
     pub first_parent: Option<bool>,
+    /// Revision specs (`HEAD~10`, `v1.0.0`, `<oid>`, ...) whose commits *and ancestors*
+    /// are removed from the walk — libgit2's `hide`/`hide_head`/`hide_ref`.
+    pub exclude: Option<Vec<String>>,
+    /// A glob of references whose targets are added as walk tips — libgit2's `push_glob`.
+    /// An implied `refs/` prefix and `/*` suffix follow git's rules, so `"tags/v"` matches
+    /// `refs/tags/*`. Tags pointing at other objects are peeled by the walk.
+    pub glob: Option<String>,
+    /// A revision range: `to` is pushed and `from` is hidden — libgit2's `push_range`.
+    /// `<from>..<to>` walks commits in `to` but not in `from`; the symmetric range
+    /// `<from>...<to>` walks commits reachable from either side but not from both
+    /// (the merge base of the two is hidden).
+    pub range: Option<String>,
+    /// Cap the number of commits returned (no limit when omitted).
+    pub limit: Option<f64>,
 }
 
-/// Options controlling [`Repository::describe`].
+/// The result of [`Repository::rev_parse_ext`].
 #[napi(object)]
-pub struct DescribeOptions {
-    /// Which references contribute candidate names:
-    /// `annotatedTags` (default, like `git describe`), `allTags` or `allRefs`.
-    pub names: Option<String>,
-    /// Traverse only the first parent of merge commits (faster, less accurate).
-    pub first_parent: Option<bool>,
-    /// Maximum number of candidate names to track (default 10, max 32).
-    pub max_candidates: Option<u32>,
-    /// Always produce a result even when no name is found (falls back to the id).
-    pub id_as_fallback: Option<bool>,
-}
-
-/// The result of a `git describe`-style operation.
-#[napi(object)]
-pub struct DescribeOutcome {
-    /// The name of the closest tag or branch, or `null` if none was found
-    /// (only possible with `idAsFallback`).
-    pub name: Option<String>,
-    /// The described commit id.
+pub struct RevParseExt {
+    /// The resolved object id.
     pub id: String,
-    /// Number of commits between the named reference and the commit.
-    pub depth: u32,
-    /// `true` if the commit lies directly on the named reference.
-    pub exact_match: bool,
-    /// The typical `git describe` rendering (`v1.0.0`, `v1.0.0-3-gabcdef0` or
-    /// the abbreviated hash as fallback).
-    pub format: String,
-    /// Number of commits traversed during the operation.
-    pub commits_seen: u32,
+    /// The full name of the reference that provided the object — `refs/heads/main` for
+    /// `main`, `HEAD` for `HEAD` — or `null` when the spec did not directly name one
+    /// (e.g. `HEAD~1`, a hex id). Pass it to `findReference` for a reference handle.
+    pub reference_name: Option<String>,
+}
+
+/// Split a revision range into its sides. `a..b` yields `symmetric == false`, `a...b`
+/// yields `symmetric == true`; empty sides are rejected.
+fn split_range(range: &str, what: &str) -> napi::Result<(String, String, bool)> {
+    let invalid = |detail: &str| err_str(what, format!("invalid range {range:?} ({detail})"));
+    let (from, to) = range
+        .split_once("..")
+        .ok_or_else(|| invalid("expected \"<from>..<to>\" or \"<from>...<to>\""))?;
+    let (symmetric, to) = match to.strip_prefix('.') {
+        Some(rest) => (true, rest),
+        None => (false, to),
+    };
+    if to.starts_with('.') {
+        return Err(invalid("too many dots"));
+    }
+    if from.is_empty() || to.is_empty() {
+        return Err(invalid("empty side"));
+    }
+    Ok((from.to_string(), to.to_string(), symmetric))
 }
 
 fn rev_spec_to_info(spec: &gix::revision::Spec) -> RevSpec {
@@ -92,7 +107,7 @@ fn rev_spec_to_info(spec: &gix::revision::Spec) -> RevSpec {
 impl Repository {
     /// Resolve a single revision specification (e.g. `HEAD~1`, `main`, `<sha>`) to an id.
     #[napi]
-    pub fn rev_parse_single(&self, spec: String) -> Result<String> {
+    pub fn rev_parse_single(&self, spec: String) -> napi::Result<String> {
         let r = thread_local(&self.inner);
         let id = r
             .rev_parse_single(spec.as_str())
@@ -102,7 +117,7 @@ impl Repository {
 
     /// Resolve revision specification to hex object ID string.
     #[napi]
-    pub fn rev_parse_hex(&self, spec: String) -> Result<String> {
+    pub fn rev_parse_hex(&self, spec: String) -> napi::Result<String> {
         self.rev_parse_single(spec)
     }
 
@@ -111,7 +126,7 @@ impl Repository {
     /// Unlike [`rev_parse_single`](Self::rev_parse_single), this distinguishes ranges (`a..b`),
     /// merges (`a...b`) and exclusions (`^a`).
     #[napi]
-    pub fn rev_parse(&self, spec: String) -> Result<RevSpec> {
+    pub fn rev_parse(&self, spec: String) -> napi::Result<RevSpec> {
         let r = thread_local(&self.inner);
         let parsed = r
             .rev_parse(spec.as_str())
@@ -119,109 +134,165 @@ impl Repository {
         Ok(rev_spec_to_info(&parsed))
     }
 
-    /// Walk reachable commits from the given tip ids, with optional sort/reverse/first-parent control.
+    /// Resolve a single revision specification and return its id along with the reference
+    /// that provided it, mirroring libgit2's `git_revparse_ext`.
+    ///
+    /// The reference is looked up by the spec's own name, with short names expanded the way
+    /// git does (`main` → `refs/heads/main`, `v1` → `refs/tags/v1`, `origin/main` →
+    /// `refs/remotes/origin/main`). Specs that are not a reference name (`HEAD~1`, a hex
+    /// id) yield a `null` reference.
     #[napi]
-    pub fn rev_walk(&self, tips: Vec<String>, options: Option<WalkOptions>) -> Result<Vec<String>> {
+    pub fn rev_parse_ext(&self, spec: String) -> napi::Result<RevParseExt> {
         let r = thread_local(&self.inner);
-        let tip_ids: Vec<gix::ObjectId> = tips
+        let id = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("rev_parse_ext", e))?;
+        let reference_name = r
+            .try_find_reference(spec.as_str())
+            .map_err(|e| err("rev_parse_ext", e))?
+            .map(|reference| String::from_utf8_lossy(reference.name().as_bstr()).into_owned());
+        Ok(RevParseExt {
+            id: id.to_string(),
+            reference_name,
+        })
+    }
+
+    /// Walk reachable commits from the given tips, with optional sort/reverse/first-parent
+    /// control, exclusions, reference globs, and ranges.
+    ///
+    /// Tips and every spec in `exclude`/`range` accept anything
+    /// [`rev_parse_single`](Self::rev_parse_single) does — object ids, `HEAD`, branch or
+    /// tag names, `~`/`^`/`^{}` expressions — see [`WalkOptions`] for the rest.
+    #[napi]
+    pub fn rev_walk(
+        &self,
+        tips: Vec<String>,
+        options: Option<WalkOptions>,
+    ) -> napi::Result<Vec<String>> {
+        let what = "rev_walk";
+        let r = thread_local(&self.inner);
+        let resolve = |spec: &str| -> napi::Result<gix::ObjectId> {
+            r.rev_parse_single(spec)
+                .map(|id| id.detach())
+                .map_err(|e| err(what, e))
+        };
+        let mut tip_ids = tips
             .iter()
-            .map(|t| parse_oid(t))
+            .map(|t| resolve(t))
             .collect::<Result<Vec<_>>>()?;
-        let mut platform = r.rev_walk(tip_ids);
+        let mut hidden: Vec<gix::ObjectId> = Vec::new();
         let mut reverse = false;
+        let mut first_parent = false;
+        let mut sorting: Option<gix::revision::walk::Sorting> = None;
+        let mut limit: Option<usize> = None;
+
         if let Some(opts) = options {
-            if opts.first_parent.unwrap_or(false) {
-                platform = platform.first_parent_only();
+            for spec in opts.exclude.into_iter().flatten() {
+                hidden.push(resolve(&spec)?);
+            }
+            if let Some(glob) = opts.glob.as_deref() {
+                tip_ids.extend(self.glob_tips(glob)?);
+            }
+            if let Some(range) = opts.range.as_deref() {
+                let (from, to, symmetric) = split_range(range, what)?;
+                let from = resolve(&from)?;
+                let to = resolve(&to)?;
+                tip_ids.push(from);
+                tip_ids.push(to);
+                if symmetric {
+                    // `a...b`: commits reachable from either side but not from both —
+                    // hide the merge base, like libgit2's push_range.
+                    match r.merge_base(from, to).map_err(|e| err(what, e))? {
+                        Some(base) => hidden.push(base.detach()),
+                        None => {
+                            return Err(err_str(
+                                what,
+                                format!("no merge base between {from} and {to}"),
+                            ));
+                        }
+                    }
+                } else {
+                    hidden.push(from);
+                }
             }
             if let Some(sort) = opts.sort.as_deref() {
-                let sorting = match sort {
+                sorting = Some(match sort {
+                    "breadth-first" => gix::revision::walk::Sorting::BreadthFirst,
                     "time-newest" => gix::revision::walk::Sorting::ByCommitTime(
                         gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
                     ),
                     "time-oldest" => gix::revision::walk::Sorting::ByCommitTime(
                         gix::traverse::commit::simple::CommitTimeOrder::OldestFirst,
                     ),
-                    _ => gix::revision::walk::Sorting::BreadthFirst,
-                };
-                platform = platform.sorting(sorting);
+                    other => {
+                        return Err(err_str(
+                            what,
+                            format!(
+                                "invalid sort {other:?} (expected \"breadth-first\", \
+                                 \"time-newest\" or \"time-oldest\")"
+                            ),
+                        ));
+                    }
+                });
             }
+            first_parent = opts.first_parent.unwrap_or(false);
             reverse = opts.reverse.unwrap_or(false);
+            limit = opts.limit.map(|l| l as usize);
+        }
+
+        let mut platform = r.rev_walk(tip_ids);
+        if first_parent {
+            platform = platform.first_parent_only();
+        }
+        if let Some(sorting) = sorting {
+            platform = platform.sorting(sorting);
+        }
+        if !hidden.is_empty() {
+            platform = platform.with_hidden(hidden);
         }
         let mut ids: Vec<String> = platform
             .all()
-            .map_err(|e| err("rev_walk", e))?
+            .map_err(|e| err(what, e))?
             .map(|id| id.map(|i| i.id.to_string()))
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| err("rev_walk item", e))?;
+        if let Some(n) = limit {
+            ids.truncate(n);
+        }
         if reverse {
             ids.reverse();
         }
         Ok(ids)
     }
 
-    /// Describe a commit the way `git describe` does: find the closest tag or
-    /// branch that contains it and count the commits in between.
-    ///
-    /// Returns `null` when no candidate name exists and `idAsFallback` is off.
+    /// Resolve a single revision specification (e.g. `HEAD~1`, `main`, `<sha>`)
+    /// directly to an [`Object`], in one step. This is the object-returning
+    /// counterpart of [`rev_parse_single`](Self::rev_parse_single) and avoids a
+    /// follow-up `findObject` call.
     #[napi]
-    pub fn describe(
-        &self,
-        commit: String,
-        options: Option<DescribeOptions>,
-    ) -> Result<Option<DescribeOutcome>> {
-        let what = "describe";
+    pub fn resolve(&self, spec: String) -> napi::Result<Object> {
         let r = thread_local(&self.inner);
-        let oid = parse_oid(&commit)?;
-        let commit_object = r.find_object(oid).map_err(|e| err("find_object", e))?;
-        let commit = commit_object.try_into_commit().map_err(|e| err(what, e))?;
-        let mut platform = commit.describe();
-        if let Some(o) = &options {
-            if let Some(names) = o.names.as_deref() {
-                let select = match names {
-                    "annotatedTags" => gix::commit::describe::SelectRef::AnnotatedTags,
-                    "allTags" => gix::commit::describe::SelectRef::AllTags,
-                    "allRefs" => gix::commit::describe::SelectRef::AllRefs,
-                    other => {
-                        return Err(err_str(
-                            what,
-                            format!(
-                                "invalid names {other:?} (expected \"annotatedTags\", \"allTags\" or \"allRefs\")"
-                            ),
-                        ));
-                    }
-                };
-                platform = platform.names(select);
-            }
-            if let Some(first_parent) = o.first_parent {
-                platform = platform.traverse_first_parent(first_parent);
-            }
-            if let Some(max_candidates) = o.max_candidates {
-                platform = platform.max_candidates(max_candidates as usize);
-            }
-            if let Some(id_as_fallback) = o.id_as_fallback {
-                platform = platform.id_as_fallback(id_as_fallback);
-            }
+        let id = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("resolve", e))?;
+        build_object(&self.inner, id.detach())
+    }
+
+    /// Resolve a `push_glob`-style reference glob into tip object ids: an implied `refs/`
+    /// prefix and `/*` suffix follow git's rules, and matching references contribute their
+    /// target ids (tags pointing at other objects are peeled by the walk itself).
+    fn glob_tips(&self, glob: &str) -> napi::Result<Vec<gix::ObjectId>> {
+        let mut pattern = glob.trim().to_string();
+        if !pattern.contains(['?', '*', '[']) {
+            pattern.push_str("/*");
         }
-        let resolution = match platform.try_resolve().map_err(|e| err(what, e))? {
-            Some(resolution) => resolution,
-            None => return Ok(None),
-        };
-        let name = resolution
-            .outcome
-            .name
-            .as_ref()
-            .map(|name| name.to_string());
-        let depth = resolution.outcome.depth;
-        let id = resolution.outcome.id.to_string();
-        let commits_seen = resolution.outcome.commits_seen;
-        let format = resolution.format().map_err(|e| err(what, e))?;
-        Ok(Some(DescribeOutcome {
-            name,
-            id,
-            depth,
-            exact_match: format.is_exact_match(),
-            format: format.to_string(),
-            commits_seen,
-        }))
+        if !pattern.starts_with("refs/") {
+            pattern = format!("refs/{pattern}");
+        }
+        let references = self.references_glob(pattern)?;
+        references
+            .iter()
+            .map(|reference| parse_oid(&reference.target()))
+            .collect()
     }
 }

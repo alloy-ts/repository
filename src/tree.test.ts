@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { Repository } from "./main.ts";
+import { Repository, Tree, TreeBuilder } from "./main.ts";
 
 const realRoot = process.cwd();
 let base: string;
@@ -251,5 +251,128 @@ describe("Repository trees", () => {
       const twoTree = repo.diffTreeToTree(prev.treeId, head.treeId);
       expect(Array.isArray(twoTree)).toBe(true);
     }
+  });
+});
+
+describe("TreeBuilder", () => {
+  test("Tree.build() builds on the empty tree, nested paths included", () => {
+    const blobId = repo.writeBlob(Buffer.from("builder content\n"));
+    const builder = Tree.build(repo);
+    builder.upsert("file.txt", blobId);
+    builder.upsert("a/b/c.txt", blobId);
+    const tree = builder.write();
+
+    expect(tree.entryByPath("file.txt")?.id).toBe(blobId);
+    expect(tree.entryByPath("a/b/c.txt")?.id).toBe(blobId);
+    expect(tree.entryByPath("a/b")?.isTree()).toBe(true);
+
+    // Deterministic serialization: same edits via editTree produce the same id.
+    const viaEditTree = repo.editTree(repo.emptyTree().id, [
+      { path: "file.txt", id: blobId },
+      { path: "a/b/c.txt", id: blobId },
+    ]);
+    expect(tree.id).toBe(viaEditTree);
+  });
+
+  test("new TreeBuilder(repo, baseTreeId) applies edits on top of a base tree", () => {
+    const { treeId, blobId } = makeEntryTree();
+    const replacement = repo.writeBlob(Buffer.from("replacement\n"));
+
+    const builder = new TreeBuilder(repo, treeId);
+    builder.upsert("file.txt", replacement);
+    const tree = builder.write();
+    expect(tree.entries.length).toBe(1);
+    expect(tree.entries[0].id).toBe(replacement);
+
+    const removed = new TreeBuilder(repo, treeId);
+    removed.remove("file.txt");
+    expect(removed.write().entries.length).toBe(0);
+    expect(removed.write().id).toBe(repo.emptyTree().id);
+
+    // Still resolvable through the base entry's id.
+    expect(blobId).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  test("write() rejects a missing object by default; validate:false skips the check", () => {
+    const missing = "1".repeat(40);
+    const builder = Tree.build(repo);
+    builder.upsert("file.txt", missing);
+    expect(() => builder.write()).toThrow(/could not be found/);
+
+    const unchecked = Tree.build(repo);
+    unchecked.upsert("file.txt", missing);
+    const tree = unchecked.write({ validate: false });
+    expect(tree.entryByPath("file.txt")?.id).toBe(missing);
+  });
+
+  test("upsert() fails fast on an invalid mode or object id", () => {
+    const blobId = repo.writeBlob(Buffer.from("fail fast\n"));
+    expect(() => Tree.build(repo).upsert("f.txt", blobId, "999999")).toThrow(
+      /invalid file mode 999999/,
+    );
+    expect(() => Tree.build(repo).upsert("f.txt", "nothex")).toThrow();
+  });
+
+  test("remove() rejects an invalid removeMode eagerly", () => {
+    expect(() => Tree.build(repo).remove("f.txt", "bogus")).toThrow(/invalid removeMode bogus/);
+  });
+
+  test("removeMode leaf errors on trees, ifLeaf leaves trees untouched", () => {
+    const blobId = repo.writeBlob(Buffer.from("leaf modes\n"));
+    const base = repo.editTree(repo.emptyTree().id, [
+      {
+        path: "d/x.txt",
+        id: blobId,
+      },
+    ]);
+
+    const leaf = new TreeBuilder(repo, base);
+    leaf.remove("d", "leaf");
+    expect(() => leaf.write()).toThrow(/is a tree/);
+
+    const ifLeaf = new TreeBuilder(repo, base);
+    ifLeaf.remove("d", "ifLeaf");
+    expect(ifLeaf.write().entryByPath("d/x.txt")?.id).toBe(blobId);
+  });
+
+  test("get() overlays recorded edits on the base tree", () => {
+    const { treeId, blobId } = makeEntryTree();
+    const other = repo.writeBlob(Buffer.from("other\n"));
+
+    const builder = new TreeBuilder(repo, treeId);
+    // Base fallback before any edit.
+    expect(builder.get("file.txt")?.id).toBe(blobId);
+    expect(builder.get("missing.txt")).toBeNull();
+
+    // Last upsert wins.
+    builder.upsert("file.txt", other);
+    expect(builder.get("file.txt")?.id).toBe(other);
+    expect(builder.get("file.txt")?.filename).toBe("file.txt");
+
+    // Removing an ancestor hides everything below it.
+    const nested = Tree.build(repo);
+    const deep = repo.writeBlob(Buffer.from("deep\n"));
+    nested.upsert("a/b/c.txt", deep);
+    expect(nested.get("a/b/c.txt")?.id).toBe(deep);
+    nested.remove("a");
+    expect(nested.get("a/b/c.txt")).toBeNull();
+  });
+
+  test("clear() resets to the empty tree base and drops edits", () => {
+    const blobId = repo.writeBlob(Buffer.from("to be cleared\n"));
+    const builder = Tree.build(repo);
+    builder.upsert("file.txt", blobId);
+    builder.clear();
+    expect(builder.get("file.txt")).toBeNull();
+    expect(builder.write().id).toBe(repo.emptyTree().id);
+  });
+
+  test("Tree.build() with a base tree id matches new TreeBuilder()", () => {
+    const { treeId, blobId } = makeEntryTree();
+    const viaStatic = Tree.build(repo, treeId);
+    viaStatic.upsert("extra.txt", blobId);
+    const viaCtor = new TreeBuilder(repo, treeId);
+    viaCtor.upsert("extra.txt", blobId);
+    expect(viaStatic.write().id).toBe(viaCtor.write().id);
   });
 });
