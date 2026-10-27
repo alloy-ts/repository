@@ -89,10 +89,55 @@ describe("ObjectStore (src/store.rs)", () => {
     expect(objectStore.objectHash).toBe("sha1");
   });
 
-  test("unsupported object hash is rejected", () => {
+  test("sha256 object hash is supported", () => {
     const dir = join(base, "sha256-loose");
     mkdirSync(dir, { recursive: true });
-    expect(() => new ObjectStore(dir, "sha256")).toThrow();
+    const store = new ObjectStore(dir, "sha256");
+    expect(store.objectHash).toBe("sha256");
+    const id = store.writeObject("blob", data);
+    expect(id).toMatch(/^[0-9a-f]{64}$/);
+    expect(store.contains(id)).toBe(true);
+    const found = store.tryFind(id);
+    expect(found).not.toBeNull();
+    expect(found!.kind).toBe("blob");
+    expect(Buffer.from(found!.data).equals(data)).toBe(true);
+  });
+
+  test("reader() streams a loose object in chunks", () => {
+    const id = objectStore.writeObject("blob", data);
+    const reader = objectStore.reader(id);
+    expect(reader.kind).toBe("blob");
+    expect(reader.size).toBe(data.length);
+
+    const chunks: Buffer[] = [];
+    let chunk = reader.read(4);
+    while (chunk.length > 0) {
+      chunks.push(Buffer.from(chunk));
+      chunk = reader.read(4);
+    }
+    expect(Buffer.concat(chunks).equals(data)).toBe(true);
+  });
+
+  test("reader() throws for a missing object", () => {
+    expect(() => objectStore.reader(MISSING_ID)).toThrow();
+  });
+
+  test("writer() buffers writes and finalizes to an id", () => {
+    const writer = objectStore.writer("blob", data.length);
+    writer.write(data.subarray(0, 3));
+    writer.write(data.subarray(3));
+    const id = writer.finalize();
+    expect(id).toMatch(/^[0-9a-f]{40}$/);
+    expect(objectStore.contains(id)).toBe(true);
+    const found = objectStore.tryFind(id);
+    expect(found).not.toBeNull();
+    expect(Buffer.from(found!.data).equals(data)).toBe(true);
+  });
+
+  test("writer() enforces the declared size", () => {
+    const writer = objectStore.writer("blob", 999);
+    writer.write(data);
+    expect(() => writer.finalize()).toThrow();
   });
 });
 
@@ -260,7 +305,72 @@ describe("ObjectDatabase / ObjectHandle (src/store.rs)", () => {
     expect(info2.objectHash).toBe("sha1");
   });
 
-  test("unsupported object hash is rejected", () => {
-    expect(() => new ObjectDatabase(objectsDir, { objectHash: "sha256" })).toThrow();
+  test("sha256 object hash is accepted", () => {
+    const dir = join(base, "sha256-db");
+    mkdirSync(dir, { recursive: true });
+    const db256 = new ObjectDatabase(dir, { objectHash: "sha256" });
+    expect(db256.objectHash).toBe("sha256");
+  });
+
+  test("reader() streams a commit object from the real database", () => {
+    const reader = db.reader(headId);
+    expect(reader.kind).toBe("commit");
+    expect(reader.size).toBeGreaterThan(0);
+
+    let bytes = 0;
+    let chunk = reader.read(256);
+    while (chunk.length > 0) {
+      bytes += chunk.length;
+      chunk = reader.read(256);
+    }
+    expect(bytes).toBe(reader.size);
+  });
+
+  test("ObjectHandle reader()/writer() round-trip a blob in a temp db", () => {
+    const dir = join(base, "handle-rw");
+    mkdirSync(dir, { recursive: true });
+    const tmpDb = new ObjectDatabase(dir);
+    const handle: ObjectHandle = tmpDb.intoInner();
+    const blob = Buffer.from("handle-writer-blob\n");
+
+    const writer = handle.writer("blob", blob.length);
+    writer.write(blob.subarray(0, 5));
+    writer.write(blob.subarray(5));
+    const id = writer.finalize();
+    expect(id).toMatch(/^[0-9a-f]{40}$/);
+    expect(handle.contains(id)).toBe(true);
+
+    const reader = handle.reader(id);
+    expect(reader.kind).toBe("blob");
+    expect(reader.size).toBe(blob.length);
+    const chunks: Buffer[] = [];
+    let chunk = reader.read(3);
+    while (chunk.length > 0) {
+      chunks.push(Buffer.from(chunk));
+      chunk = reader.read(3);
+    }
+    expect(Buffer.concat(chunks).equals(blob)).toBe(true);
+  });
+
+  test("ObjectDatabase reader()/writer() round-trip a blob", () => {
+    const dir = join(base, "db-rw");
+    mkdirSync(dir, { recursive: true });
+    const tmpDb = new ObjectDatabase(dir);
+    const blob = Buffer.from("db-writer-blob\n");
+
+    const writer = tmpDb.writer("blob", blob.length);
+    writer.write(blob);
+    const id = writer.finalize();
+    expect(tmpDb.contains(id)).toBe(true);
+
+    const reader = tmpDb.reader(id);
+    expect(reader.kind).toBe("blob");
+    const chunks: Buffer[] = [];
+    let chunk = reader.read(7);
+    while (chunk.length > 0) {
+      chunks.push(Buffer.from(chunk));
+      chunk = reader.read(7);
+    }
+    expect(Buffer.concat(chunks).equals(blob)).toBe(true);
   });
 });

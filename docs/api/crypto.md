@@ -1,31 +1,48 @@
 # Cryptography and GPG API
 
-The cryptography subsystem provides symmetric encryption, repository vault key management, and GPG / OpenPGP operations backed by `rPGP`.
+The cryptography subsystem provides symmetric encryption, repository vault key
+management, and GPG / OpenPGP operations backed by `rPGP`.
 
 ## Overview
 
-The cryptography capabilities in `@alloy-ts/repository` consist of two primary areas:
+The cryptography capabilities in `@alloy-ts/repository` consist of two primary
+areas:
 
 1. **Symmetric Repository Encryption & Key Vault (`src/crypto.rs`)**:
-   - `CryptoMode`: Modes for repository encryption — `Filter` (0), `EntireRepo` (1), and default `Hybrid` (2).
-   - `SymmetricCryptoKey`: ChaCha20-Poly1305 / AES 256-bit symmetric encryption/decryption, raw byte access (`asBytes`), and random key generation.
-   - `Crypto`: Repository-bound crypt handle managing `git-crypt` worktree filter drivers, `git-remote-gcrypt` compatible entire repository encryption, manifest creation/decryption, and packfile AES / ChaCha20-Poly1305 payload encryption.
-   - `RepoManifest` & Manifest Functions: `serializeManifest` and `parseManifest` for `git-remote-gcrypt` manifest handling (refs, packs, keep list, remote repository ID).
-   - `CryptFilterOptions`: Configuration for `clean`, `smudge`, and `diff` Git filters.
+   - `CryptoMode`: Modes for repository encryption — `Filter` (0), `EntireRepo`
+     (1), and default `Hybrid` (2).
+   - `SymmetricCryptoKey`: ChaCha20-Poly1305 / AES 256-bit symmetric
+     encryption/decryption, raw byte access (`asBytes`), and random key
+     generation.
+   - `Crypto`: Repository-bound crypt handle managing `git-crypt` worktree
+     filter drivers, `git-remote-gcrypt` compatible entire repository
+     encryption, manifest creation/decryption, and packfile AES /
+     ChaCha20-Poly1305 payload encryption.
+   - `RepoManifest` & Manifest Functions: `serializeManifest` and
+     `parseManifest` for `git-remote-gcrypt` manifest handling (refs, packs,
+     keep list, remote repository ID).
+   - `CryptFilterOptions`: Configuration for `clean`, `smudge`, and `diff` Git
+     filters.
 
 2. **OpenPGP & GPG Keyring Operations (`src/gpg.rs`)**:
-   - `Context`: High-level cryptographic operations including encryption, decryption, signing, and signature verification.
-   - `Key`: Inspection of OpenPGP public and secret keys (key ID, fingerprint, user IDs, secret status).
-   - `Data`: Wrapper for plaintext or ciphertext buffers, supporting binary and ASCII armor forms.
+   - `Context`: High-level cryptographic operations including encryption,
+     decryption, signing, and signature verification.
+   - `Key`: Inspection of OpenPGP public and secret keys (key ID, fingerprint,
+     user IDs, secret status).
+   - `Data`: Wrapper for plaintext or ciphertext buffers, supporting binary and
+     ASCII armor forms.
    - `VerificationResult`: Structured signature verification results.
    - `Protocol`: Protocol selection (`OpenPgp` or `Cms`).
    - GPG CLI / Keyring Utilities:
-     - `gpg_get_executable`: Resolves configured `gpg.program` or defaults to `"gpg"`.
+     - `gpg_get_executable`: Resolves configured `gpg.program` or defaults to
+       `"gpg"`.
      - `gpg_nth_column`: Parses colon-separated (`--with-colons`) output lines.
      - `gpg_get_uid`: Retrieves the primary User ID for a key fingerprint.
      - `gpg_lookup_key`: Searches public keyring by query string.
-     - `gpg_list_secret_keys`: Returns fingerprints of all available secret keys.
-     - `gpg_encrypt_to_file`: Encrypts data to a file for a recipient fingerprint using GPG CLI.
+     - `gpg_list_secret_keys`: Returns fingerprints of all available secret
+       keys.
+     - `gpg_encrypt_to_file`: Encrypts data to a file for a recipient
+       fingerprint using GPG CLI.
      - `gpg_decrypt_from_file`: Decrypts a file using GPG CLI.
 
 ---
@@ -45,7 +62,8 @@ enum Protocol {
 
 ### `Data`
 
-Represents binary or ASCII-armored data passed to and returned from cryptographic operations.
+Represents binary or ASCII-armored data passed to and returned from
+cryptographic operations.
 
 ```ts
 class Data {
@@ -112,7 +130,12 @@ function gpg_nth_column(line: string, col: number): string;
 function gpg_get_uid(fingerprint: string): string;
 function gpg_lookup_key(query: string): string[];
 function gpg_list_secret_keys(): string[];
-function gpg_encrypt_to_file(filename: string, recipient_fingerprint: string, key_is_trusted: boolean, input: Uint8Array): void;
+function gpg_encrypt_to_file(
+  filename: string,
+  recipient_fingerprint: string,
+  key_is_trusted: boolean,
+  input: Uint8Array,
+): void;
 function gpg_decrypt_from_file(filename: string): Uint8Array;
 ```
 
@@ -126,9 +149,9 @@ Enum representing repository active encryption modes:
 
 ```ts
 enum CryptoMode {
-  Filter = 0,     // Worktree filter drivers (git-crypt compatible)
+  Filter = 0, // Worktree filter drivers (git-crypt compatible)
   EntireRepo = 1, // Full repository remote pack & manifest encryption (git-remote-gcrypt compatible)
-  Hybrid = 2,     // Layered / Default mode combining git-crypt filters and gcrypt full repo encryption
+  Hybrid = 2, // Layered / Default mode combining git-crypt filters and gcrypt full repo encryption
 }
 ```
 
@@ -150,7 +173,8 @@ class SymmetricCryptoKey {
 
 ### `Crypto`
 
-Bound to a Git repository handle to manage encrypted repository state, worktree filters, manifest handling, and packfile encryption.
+Bound to a Git repository handle to manage encrypted repository state, worktree
+filters, manifest handling, and packfile encryption.
 
 ```ts
 class Crypto {
@@ -242,7 +266,7 @@ console.log(`Signature valid: ${result.is_valid}`);
 ### GPG CLI Keyring Lookup
 
 ```ts
-import { gpg_lookup_key, gpg_get_uid, gpg_list_secret_keys } from "@alloy-ts/repository";
+import { gpg_get_uid, gpg_list_secret_keys, gpg_lookup_key } from "@alloy-ts/repository";
 
 // Search keyring for fingerprints
 const fps = gpg_lookup_key("jsmith@example.com");

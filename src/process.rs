@@ -26,15 +26,15 @@
 //! - [`crate::output::{CommandOutput, ProcessStatus}`] must be `napi`-compatible
 //!   (`#[napi(object)]` / enum) so they cross the FFI boundary.
 
-use crate::error::{Error, Result};
+use crate::error::{Error, RepositoryResult, Result};
 use crate::output::{CommandOutput, ProcessStatus};
 use napi_derive::napi;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::pending;
 use std::io;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -59,9 +59,12 @@ pub struct CancellationToken {
 }
 
 /// Live cancellation state, kept outside the `napi` handle.
+///
+/// `cancelled` is shared rather than owned so native operations can poll it directly via
+/// [`cancellation_flag`] without holding the registry lock.
 #[derive(Default)]
 struct CancellationInner {
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
     notify: Notify,
 }
 
@@ -122,6 +125,19 @@ impl CancellationToken {
     }
 }
 
+/// Resolve the interrupt flag backing `token`.
+///
+/// Long-running native operations (pack writing, traversal, counting) poll an [`AtomicBool`]
+/// rather than awaiting a future; this exposes the shared flag so cancellation actually reaches
+/// them. Returns `None` if the token is unknown to the registry.
+pub fn cancellation_flag(token: &CancellationToken) -> Option<Arc<AtomicBool>> {
+    registry()
+        .lock()
+        .unwrap()
+        .get(&token.id)
+        .map(|inner| Arc::clone(&inner.cancelled))
+}
+
 /// Allocate a fresh cancellation token and return its opaque handle.
 #[napi]
 pub fn create_cancellation_token() -> CancellationToken {
@@ -144,7 +160,9 @@ impl napi::bindgen_prelude::FromNapiValue for CancellationToken {
         napi_val: napi::sys::napi_value,
     ) -> napi::Result<Self> {
         let instance = unsafe {
-            napi::bindgen_prelude::ClassInstance::<CancellationToken>::from_napi_value(env, napi_val)?
+            napi::bindgen_prelude::ClassInstance::<CancellationToken>::from_napi_value(
+                env, napi_val,
+            )?
         };
         Ok(*instance)
     }
@@ -833,7 +851,9 @@ impl WindowsTask {
     fn assign(child: &Child) -> io::Result<Self> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle};
         use std::ptr::null;
-        use windows_sys::Win32::System::TaskObjects::{AssignProcessToTaskObject, CreateTaskObjectW};
+        use windows_sys::Win32::System::TaskObjects::{
+            AssignProcessToTaskObject, CreateTaskObjectW,
+        };
         let raw = unsafe { CreateTaskObjectW(null(), null()) };
         if raw.is_null() {
             return Err(io::Error::last_os_error());
@@ -861,7 +881,7 @@ impl WindowsTask {
         use std::ptr::addr_of;
         use windows_sys::Win32::System::TaskObjects::{
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            TaskObjectExtendedLimitInformation, SetInformationTaskObject,
+            SetInformationTaskObject, TaskObjectExtendedLimitInformation,
         };
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
         if enabled {
@@ -1037,9 +1057,7 @@ pub struct ExecutionFailureJs {
 impl From<&ExecutionFailure> for ExecutionFailureJs {
     fn from(f: &ExecutionFailure) -> Self {
         let (kind, message, stream, limit, timeout_ms) = match &f.kind {
-            ExecutionFailureKind::Cancelled => {
-                ("cancelled".to_string(), None, None, None, None)
-            }
+            ExecutionFailureKind::Cancelled => ("cancelled".to_string(), None, None, None, None),
             ExecutionFailureKind::TimedOut { timeout } => (
                 "timed out".to_string(),
                 None,
@@ -1047,9 +1065,13 @@ impl From<&ExecutionFailure> for ExecutionFailureJs {
                 None,
                 Some(timeout.as_secs_f64() * 1000.0),
             ),
-            ExecutionFailureKind::Input { message } => {
-                ("stdin failure".to_string(), Some(message.clone()), None, None, None)
-            }
+            ExecutionFailureKind::Input { message } => (
+                "stdin failure".to_string(),
+                Some(message.clone()),
+                None,
+                None,
+                None,
+            ),
             ExecutionFailureKind::Read { stream, message } => (
                 "output read failure".to_string(),
                 Some(message.clone()),
@@ -1064,9 +1086,13 @@ impl From<&ExecutionFailure> for ExecutionFailureJs {
                 Some(*limit as f64),
                 None,
             ),
-            ExecutionFailureKind::Wait { message } => {
-                ("child wait failure".to_string(), Some(message.clone()), None, None, None)
-            }
+            ExecutionFailureKind::Wait { message } => (
+                "child wait failure".to_string(),
+                Some(message.clone()),
+                None,
+                None,
+                None,
+            ),
             ExecutionFailureKind::Containment { message } => (
                 "process containment failure".to_string(),
                 Some(message.clone()),
@@ -1190,19 +1216,6 @@ fn termination_label(o: &TerminationOutcome) -> &'static str {
     }
 }
 
-impl From<Error> for napi::Error {
-    fn from(e: Error) -> Self {
-        // `Execution` is normally surfaced to JS as a `CommandResult` with
-        // `success: false`; this mapping is only reached when an `Error` is
-        // converted to a rejected promise (e.g. from `?`).
-        let status = match &e {
-            Error::InvalidConfig { .. } => napi::Status::InvalidArg,
-            _ => napi::Status::GenericFailure,
-        };
-        napi::Error::new(status, e.to_string())
-    }
-}
-
 /// Spawn a command, stream its stdin/stdout/stderr with byte caps, honor an
 /// optional cancellation token and execution timeout, and resolve with whether
 /// the child finished normally or stopped early.
@@ -1216,7 +1229,15 @@ pub async fn run_command(
     cancellation: Option<CancellationToken>,
 ) -> napi::Result<CommandResult> {
     let (command, input, timeout, limits, cleanup) = prepare(&options);
-    execute(command, input, timeout, limits, cleanup, cancellation.as_ref()).await
+    execute(
+        command,
+        input,
+        timeout,
+        limits,
+        cleanup,
+        cancellation.as_ref(),
+    )
+    .await
 }
 
 /// A spawnable, cancellable, byte-bounded subprocess.
@@ -1257,7 +1278,13 @@ impl Process {
 /// timeout, output limits and cleanup timeout derived from JS options.
 fn prepare(
     options: &CommandOptions,
-) -> (Command, Option<Vec<u8>>, Option<Duration>, OutputLimits, Duration) {
+) -> (
+    Command,
+    Option<Vec<u8>>,
+    Option<Duration>,
+    OutputLimits,
+    Duration,
+) {
     use std::process::Stdio;
 
     let mut command = Command::new(&options.program);
