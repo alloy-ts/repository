@@ -101,9 +101,9 @@ impl Task for CloneTask {
             ));
         }
 
-        // Try a gix-native clone first. gix can't honor depth/filter here, so route those to git.
-        let use_git_for_depth = depth.is_some() || filter.is_some();
-        let gix_repo = if use_git_for_depth {
+        // Try a gix-native clone first. gix can't honor depth/filter/branch here, so route those to git.
+        let use_git_fallback = depth.is_some() || filter.is_some() || self.branch.is_some();
+        let gix_repo = if use_git_fallback {
             None
         } else {
             (|| {
@@ -113,9 +113,6 @@ impl Task for CloneTask {
                     gix::prepare_clone(url.as_str(), &path)
                 }
                 .ok()?;
-                if let Some(branch) = &self.branch {
-                    prepare = prepare.with_branch(branch.as_str());
-                }
                 let interrupt = AtomicBool::new(false);
                 let progress = ProgressCallback::new(self.progress.clone());
                 let (repo, _outcome) = prepare.fetch_only(progress, &interrupt).ok()?;
@@ -265,7 +262,7 @@ pub struct CloneOptions {
     /// Create a bare repository (no worktree). Defaults to `false`.
     pub bare: Option<bool>,
     /// Progress callback receiving [`ProgressEvent`]s during the fetch.
-    pub progress: Option<Function<ProgressEvent, ()>>,
+    pub progress: Option<Function<'static, ProgressEvent, ()>>,
     /// Per-call authenticator; overrides any authenticator configured on the `Cloner`.
     pub auth: Option<AuthOpts>,
     /// Create a shallow clone with at most this many commits of history. `None` (default) clones

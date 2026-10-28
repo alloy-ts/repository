@@ -495,16 +495,28 @@ impl RefStore {
             for line in iter {
                 let line = line.map_err(|e| err("reflog line", e))?;
                 let t = line.signature.time().map_err(|e| err("reflog time", e))?;
+                let hash = line.new_oid.to_string();
+                let abbreviated_hash = hash.chars().take(7).collect();
+                let subject = lossy(&line.message);
+                let (action, message) = match subject.split_once(": ") {
+                    Some((a, b)) => (a.to_string(), b.to_string()),
+                    None => (subject.clone(), String::new()),
+                };
                 out.push(ReflogEntry {
                     previous_oid: line.previous_oid.to_string(),
                     new_oid: line.new_oid.to_string(),
+                    hash,
+                    abbreviated_hash,
+                    selector: format!("{}@{{{}}}", ref_name, out.len()),
                     signature: to_signature(
                         &line.signature.name,
                         &line.signature.email,
                         t.seconds,
                         t.offset,
                     ),
-                    message: lossy(&line.message),
+                    subject,
+                    action,
+                    message,
                 });
             }
         }

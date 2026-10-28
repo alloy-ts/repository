@@ -70,7 +70,7 @@ impl Repository {
     pub fn init_bare(path: String) -> napi::Result<Repository> {
         let ts = gix::init_bare(path).map_err(|e| err("init_bare", e))?;
         Ok(Repository {
-            inner: Arc::new(ts),
+            inner: Arc::new(ts.into()),
         })
     }
 

@@ -445,7 +445,7 @@ impl Commit {
     #[napi(getter)]
     pub fn short_sha(&self) -> napi::Result<String> {
         let r = thread_local(&self.repo);
-        Ok(crate::object::short_sha(r, &self.id))
+        Ok(crate::object::short_sha(&r, &self.id))
     }
 
     /// The raw first line of the commit message (the subject), without the whitespace folding that
@@ -499,7 +499,7 @@ impl Commit {
     #[napi]
     pub fn info(&self) -> napi::Result<CommitInfo> {
         let r = thread_local(&self.repo);
-        Ok(log_summary(r, self.id)?.0)
+        Ok(log_summary(&r, self.id)?.0)
     }
 
     /// The full message exactly as stored, without the leading-newline

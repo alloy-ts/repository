@@ -206,6 +206,8 @@ impl Task for PullTask {
             interrupt: Arc::clone(&self.interrupt),
             auth: self.auth.take(),
             tags: self.tags.take(),
+            prune: None,
+            override_refspecs: None,
         };
         let fetch_outcome = fetch_task.compute()?;
 

@@ -646,12 +646,6 @@ impl Repository {
         self.find_object_by_prefix_of_kind(prefix, gix::object::Kind::Commit)
     }
 
-    /// Like [`find_object_by_prefix`](Self::find_object_by_prefix), but only returns the id when
-    /// the resolved object is a tag.
-    #[napi]
-    pub fn find_tag_by_prefix(&self, prefix: String) -> napi::Result<Option<String>> {
-        self.find_object_by_prefix_of_kind(prefix, gix::object::Kind::Tag)
-    }
 
     /// Resolve `spec` to a full object id string, or `null` if it cannot be resolved.
     ///

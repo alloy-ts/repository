@@ -154,7 +154,7 @@ fn commit_touches_paths(
             .diff_tree_to_tree(pt, Some(commit_tree), None)
             .map_err(|e| err("diff_tree_to_tree", e))?;
         for change in changes {
-            if path_matches(change.location, paths) {
+            if path_matches(change.location(), paths) {
                 return Ok(true);
             }
         }

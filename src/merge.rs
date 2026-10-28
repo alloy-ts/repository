@@ -4,7 +4,7 @@ use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
 use std::collections::HashMap;
 
-use gix::bstr::BStr;
+use gix::bstr::{BStr, ByteSlice};
 use gix::diff::tree_with_rewrites::Change;
 use gix::merge::blob::builtin_driver::text;
 use gix::merge::tree::{Resolution, ResolutionFailure, TreatAsUnresolved, apply_index_entries};
@@ -165,11 +165,11 @@ pub struct MergeConflict {
     pub their_entry: Option<MergeConflictEntry>,
     /// Raw blob content of the ancestor (stage 1) side, when this conflict is
     /// unresolved and the ancestor entry is present. `null` otherwise.
-    pub base_content: Option<Buffer>,
+    pub base_content: Option<Vec<u8>>,
     /// Raw blob content of the "our" (stage 2) side, when unresolved and present.
-    pub left_content: Option<Buffer>,
+    pub left_content: Option<Vec<u8>>,
     /// Raw blob content of the "their" (stage 3) side, when unresolved and present.
-    pub right_content: Option<Buffer>,
+    pub right_content: Option<Vec<u8>>,
     /// Conflict regions parsed from the merged blob's markers, for building a
     /// custom conflict UI. Empty when there is no content-merge marker output.
     pub hunks: Vec<ConflictHunk>,
@@ -424,11 +424,11 @@ pub(crate) fn conflict_to_dto(
     };
     // Raw triple content for unresolved conflicts (stage 1/2/3 blobs).
     let read_blob =
-        |entry: &Option<gix::merge::plumbing::tree::ConflictIndexEntry>| -> Option<Buffer> {
+        |entry: &Option<gix::merge::plumbing::tree::ConflictIndexEntry>| -> Option<Vec<u8>> {
             entry.as_ref().and_then(|e| {
                 r.find_object(e.id)
                     .ok()
-                    .map(|o| Buffer::from(o.detach().data))
+                    .map(|o| o.detach().data)
             })
         };
     let base_content = read_blob(&base);
@@ -565,19 +565,20 @@ fn collect_tree_entries(
         tree: &gix::Tree,
     ) -> napi::Result<()> {
         for entry in tree.iter() {
-            let name = entry.filename().to_string_lossy().into_owned();
+            let entry = entry.map_err(|e| err("tree_entry", e))?;
+            let name = entry.filename().to_str_lossy().into_owned();
             let path = if prefix.is_empty() {
                 name
             } else {
                 format!("{}/{}", prefix, name)
             };
-            match entry.mode() {
-                gix::object::tree::EntryMode::Tree => {
+            match entry.mode().kind() {
+                gix::object::tree::EntryKind::Tree => {
                     let sub = r.find_tree(entry.id()).map_err(|e| err("find_tree", e))?;
                     recurse(r, map, &path, &sub)?;
                 }
                 _ => {
-                    map.insert(path, entry.id());
+                    map.insert(path, entry.id().detach());
                 }
             }
         }
@@ -660,23 +661,23 @@ fn parse_conflict_hunks(text: &str) -> Vec<ConflictHunk> {
                 if l.starts_with("<<<<<<<") {
                     depth += 1;
                     section = Section::Ours;
-                    ours.push(l);
+                    ours.push(l.to_string());
                 } else if l.starts_with(">>>>>>>") {
                     depth -= 1;
                     if depth == 0 {
                         i += 1;
                         break;
                     }
-                    theirs.push(l);
+                    theirs.push(l.to_string());
                 } else if l.starts_with("|||||||") {
                     section = Section::Base;
                 } else if l.starts_with("=======") {
                     section = Section::Theirs;
                 } else {
                     match section {
-                        Section::Base => base.push(l),
-                        Section::Ours => ours.push(l),
-                        Section::Theirs => theirs.push(l),
+                        Section::Base => base.push(l.to_string()),
+                        Section::Ours => ours.push(l.to_string()),
+                        Section::Theirs => theirs.push(l.to_string()),
                     }
                 }
                 i += 1;

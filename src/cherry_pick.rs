@@ -1,3 +1,4 @@
+use gix::bstr::ByteSlice;
 use napi_derive::napi;
 
 use crate::error::{err, err_str, parse_oid, thread_local};
@@ -178,7 +179,7 @@ impl Repository {
         // Committer: explicit override, else the repository's configured committer.
         let committer = match options.committer.clone() {
             Some(c) => c,
-            None => match r.committer().ok().and_then(|res| res.ok()) {
+            None => match r.committer().and_then(|res| res.ok()) {
                 Some(cs) => {
                     let ct = cs.time().ok();
                     to_signature(

@@ -475,31 +475,22 @@ impl Repository {
     #[napi]
     pub fn find_tag_by_prefix(&self, prefix: String) -> napi::Result<Tag> {
         let r = thread_local(&self.inner);
-        let prefix = match gix::hash::Prefix::from_hex(prefix.as_bytes()) {
+        let prefix = match gix::hash::Prefix::from_hex(prefix.as_str()) {
             Ok(p) => p,
             Err(_) => return Err(err_str("find_tag_by_prefix", "invalid prefix")),
         };
         let outcome = r
             .objects
-            .lookup_prefix(prefix, |_| true)
+            .lookup_prefix(prefix, None)
             .map_err(|e| err("find_tag_by_prefix", e))?;
         match outcome {
-            Some(outcome) => {
-                if outcome.candidate.is_some() {
-                    return Err(err_str("find_tag_by_prefix", "prefix is ambiguous"));
-                }
-                if outcome.object.kind != gix::objs::Kind::Tag {
-                    return Err(err_str(
-                        "find_tag_by_prefix",
-                        "prefix does not resolve to a tag object",
-                    ));
-                }
+            Some(Ok(oid)) => {
                 let tag = r
-                    .find_tag(outcome.object.id)
+                    .find_tag(oid)
                     .map_err(|e| err("find_tag", e))?;
                 build_tag(&self.inner, tag)
             }
-            None => Err(err_str("find_tag_by_prefix", "no object matches prefix")),
+            _ => Err(err_str("find_tag_by_prefix", "no tag object matches prefix")),
         }
     }
 
