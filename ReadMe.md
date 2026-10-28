@@ -11,7 +11,8 @@ async support and full type definitions.
 ## Features
 
 - **Git Operations**: Repositories, commits, trees, blobs, diffs, blame, status,
-  worktrees, branches, tags, and remotes.
+  worktrees, branches, tags, remotes, reflog, and revision walking.
+- **Extended Repository API**: `checkoutHead`, `checkoutIndex`, `checkoutTree`, `refResolve`, `refList`, `refUpdate`, `fetchRefspec`, `pushRefspec`, `aheadBehind`, and `cherryPick`.
 - **Cryptography & Vault**: Symmetric ChaCha20-Poly1305 / AES encryption,
   ref-backed key vaults, git-crypt worktree filter drivers, and
   git-remote-gcrypt entire repository mode (packfile & manifest encryption).
