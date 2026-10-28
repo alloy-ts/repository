@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
 use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::Either;
 use napi_derive::napi;
 
 use crate::commit::Commit;
@@ -85,6 +86,25 @@ fn to_remove_force(force: Option<WorktreeRemoveForce>) -> gix::worktree::remove:
         Some(WorktreeRemoveForce::OverrideLock) => gix::worktree::remove::Force::OverrideLock,
         _ => gix::worktree::remove::Force::Never,
     }
+}
+
+/// Options for scanning files in a worktree.
+#[napi(object)]
+pub struct WorktreeScanOptions {
+    pub collect_ignored: Option<bool>,
+}
+
+/// Result of scanning files in a worktree.
+#[napi(object)]
+pub struct WorktreeScanResult {
+    pub files: Vec<String>,
+    pub ignored: Vec<String>,
+}
+
+/// Options for writing files in a worktree.
+#[napi(object)]
+pub struct WorktreeFileOptions {
+    pub mode: Option<u32>,
 }
 
 /// Options controlling how a worktree is pruned, mirroring git2's
@@ -785,6 +805,109 @@ impl Worktree {
             repaired.push(p);
         }
         Ok(repaired)
+    }
+
+    /// Read a file relative to the worktree root.
+    #[napi]
+    pub fn read_file(&self, path: String) -> napi::Result<Buffer> {
+        let full = std::path::Path::new(&self.path).join(&path);
+        let bytes = std::fs::read(&full).map_err(|e| err("worktree.read_file", e))?;
+        Ok(Buffer::from(bytes))
+    }
+
+    /// Write a file relative to the worktree root, creating directories if needed.
+    #[napi]
+    pub fn write_file(
+        &self,
+        path: String,
+        content: Either<String, Buffer>,
+        options: Option<WorktreeFileOptions>,
+    ) -> napi::Result<()> {
+        let full = std::path::Path::new(&self.path).join(&path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err("worktree.write_file", e))?;
+        }
+        let bytes = match content {
+            Either::A(s) => s.into_bytes(),
+            Either::B(b) => b.to_vec(),
+        };
+        std::fs::write(&full, &bytes).map_err(|e| err("worktree.write_file", e))?;
+        if let Some(opts) = options {
+            if let Some(mode) = opts.mode {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(mode);
+                    let _ = std::fs::set_permissions(&full, perms);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a file relative to the worktree root.
+    #[napi]
+    pub fn remove_file(&self, path: String) -> napi::Result<()> {
+        let full = std::path::Path::new(&self.path).join(&path);
+        if full.exists() {
+            std::fs::remove_file(&full).map_err(|e| err("worktree.remove_file", e))?;
+        }
+        Ok(())
+    }
+
+    /// Check if file stat data matches index without reading file content.
+    #[napi]
+    pub fn is_stat_clean(&self, path: String) -> napi::Result<bool> {
+        let r = thread_local(&self.repo);
+        let index = match r.index() {
+            Ok(idx) => idx,
+            Err(_) => return Ok(false),
+        };
+        let bpath = gix::bstr::BString::from(path.as_bytes());
+        let entry = match index.entry_by_path(&bpath) {
+            Some(e) => e,
+            None => return Ok(false),
+        };
+        let full = std::path::Path::new(&self.path).join(&path);
+        let meta = match std::fs::symlink_metadata(&full) {
+            Ok(m) => m,
+            Err(_) => return Ok(false),
+        };
+        Ok(entry.stat.size == meta.len() as u32)
+    }
+
+    /// Scan working tree files (tracked/untracked and optionally ignored).
+    #[napi]
+    pub fn scan(&self, options: Option<WorktreeScanOptions>) -> napi::Result<WorktreeScanResult> {
+        let r = thread_local(&self.repo);
+        let collect_ignored = options.and_then(|o| o.collect_ignored).unwrap_or(false);
+        let platform = r
+            .status(gix::progress::Discard)
+            .map_err(|e| err("worktree.scan", e))?
+            .untracked_files(gix::status::UntrackedFiles::Files);
+        let platform = if collect_ignored {
+            platform.dirwalk_options(|o| o.emit_ignored(Some(gix::dir::walk::EmissionMode::Matching)))
+        } else {
+            platform
+        };
+        let iter = platform
+            .into_index_worktree_iter(std::iter::empty::<gix::bstr::BString>())
+            .map_err(|e| err("worktree.scan", e))?;
+
+        let mut files = Vec::new();
+        let mut ignored = Vec::new();
+        for item in iter {
+            let item = item.map_err(|e| err("worktree.scan", e))?;
+            if let gix::status::index_worktree::Item::DirectoryContents { entry, .. } = item {
+                let path = String::from_utf8_lossy(&entry.rela_path).into_owned();
+                match entry.status {
+                    gix::dir::entry::Status::Untracked => files.push(path),
+                    gix::dir::entry::Status::Ignored(_) => ignored.push(path),
+                    _ => {}
+                }
+            }
+        }
+        Ok(WorktreeScanResult { files, ignored })
     }
 
     /// Materialize the worktree stream of the tree at `tree_id` into entries

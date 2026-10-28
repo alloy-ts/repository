@@ -105,4 +105,19 @@ describe("Worktree (src/worktree.rs)", () => {
     expect(wtRepo).toBeInstanceOf(Repository);
     await added.remove();
   });
+
+  test("file I/O and scan methods on Worktree", async () => {
+    const path = join(base, "wt-io");
+    const added = await repo.addWorktree(path, "detached", head.id, false);
+    added.writeFile("test-file.txt", "hello worktree");
+    const content = added.readFile("test-file.txt");
+    expect(content.toString("utf8")).toBe("hello worktree");
+
+    const scanRes = added.scan({ collectIgnored: false });
+    expect(scanRes.files).toContain("test-file.txt");
+
+    expect(added.isStatClean("test-file.txt")).toBe(false);
+    added.removeFile("test-file.txt");
+    await added.remove();
+  });
 });

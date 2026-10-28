@@ -146,6 +146,18 @@ impl Repository {
         self.reset_to(target, ResetMode::Mixed)?;
         Ok(())
     }
+
+    /// Reset index and tracked working tree files to HEAD (hard reset).
+    #[napi]
+    pub fn reset_to_head(&self) -> napi::Result<String> {
+        self.reset_to("HEAD".to_string(), ResetMode::Hard)
+    }
+
+    /// Hard reset tracked working tree files and index to HEAD.
+    #[napi]
+    pub fn reset_hard(&self) -> napi::Result<String> {
+        self.reset_to_head()
+    }
 }
 
 /// Resolve `spec` to a commit, returning `(commit id, tree id)`. The spec is

@@ -68,6 +68,58 @@ pub struct RewritesOptions {
     pub copies: Option<bool>,
 }
 
+/// Conflict classification matching git status porcelain v2.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum ConflictKind {
+    BothDeleted,
+    AddedByUs,
+    DeletedByThem,
+    AddedByThem,
+    DeletedByUs,
+    BothAdded,
+    BothModified,
+}
+
+/// Change state for HEAD vs index (index) or index vs worktree (worktree).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum ChangeState {
+    Unmodified,
+    Modified,
+    TypeChanged,
+    Added,
+    Deleted,
+}
+
+/// Detailed status entry with granular change states and file modes.
+#[derive(Clone)]
+#[napi(object)]
+pub struct DetailedStatusEntry {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub code: String,
+    pub index_state: ChangeState,
+    pub worktree_state: ChangeState,
+    pub conflict_kind: Option<ConflictKind>,
+    pub is_staged: bool,
+    pub is_unstaged: bool,
+    pub head_mode: Option<u32>,
+    pub index_mode: Option<u32>,
+    pub worktree_mode: Option<u32>,
+}
+
+/// Detailed working-tree status result.
+#[napi(object)]
+pub struct DetailedStatusResult {
+    pub branch: Option<String>,
+    pub tracking: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub is_clean: bool,
+    pub entries: Vec<DetailedStatusEntry>,
+}
+
 /// A single status entry, one per changed path, merging the staged
 /// (HEAD→index) and unstaged (index→worktree) sides.
 #[derive(Clone)]
@@ -522,6 +574,59 @@ fn merge(map: &mut BTreeMap<BString, Half>, half: Half) {
     entry.directory |= half.directory;
 }
 
+fn kind_to_change_state(kind: Option<Kind>) -> ChangeState {
+    match kind {
+        Some(Kind::Added | Kind::IntentToAdd) => ChangeState::Added,
+        Some(Kind::Modified) => ChangeState::Modified,
+        Some(Kind::Deleted) => ChangeState::Deleted,
+        Some(Kind::TypeChange) => ChangeState::TypeChanged,
+        Some(Kind::Renamed | Kind::Copied) => ChangeState::Added,
+        Some(Kind::Untracked) => ChangeState::Added,
+        Some(Kind::Ignored) => ChangeState::Unmodified,
+        None => ChangeState::Unmodified,
+    }
+}
+
+fn conflict_code_to_kind(code: Option<&str>) -> Option<ConflictKind> {
+    match code {
+        Some("DD") => Some(ConflictKind::BothDeleted),
+        Some("AU") => Some(ConflictKind::AddedByUs),
+        Some("UD") => Some(ConflictKind::DeletedByThem),
+        Some("UA") => Some(ConflictKind::AddedByThem),
+        Some("DU") => Some(ConflictKind::DeletedByUs),
+        Some("AA") => Some(ConflictKind::BothAdded),
+        Some("UU") => Some(ConflictKind::BothModified),
+        _ => None,
+    }
+}
+
+fn finish_detailed(map: BTreeMap<BString, Half>) -> Vec<DetailedStatusEntry> {
+    map.into_values()
+        .map(|h| {
+            let index_state = kind_to_change_state(h.index);
+            let worktree_state = kind_to_change_state(h.worktree);
+            let conflict_kind = conflict_code_to_kind(h.conflict);
+            let code = porcelain(&h);
+            let is_staged = index_state != ChangeState::Unmodified;
+            let is_unstaged = worktree_state != ChangeState::Unmodified
+                || h.worktree == Some(Kind::Untracked);
+            DetailedStatusEntry {
+                path: lossy(&h.path),
+                old_path: h.old_path.as_deref().map(|p| lossy(p)),
+                code,
+                index_state,
+                worktree_state,
+                conflict_kind,
+                is_staged,
+                is_unstaged,
+                head_mode: None,
+                index_mode: None,
+                worktree_mode: None,
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tasks
 // ---------------------------------------------------------------------------
@@ -530,6 +635,94 @@ fn merge(map: &mut BTreeMap<BString, Half>, half: Half) {
 pub struct StatusTask {
     repo: Arc<gix::ThreadSafeRepository>,
     cfg: StatusCfg,
+}
+
+pub struct DetailedStatusTask {
+    repo: Arc<gix::ThreadSafeRepository>,
+    cfg: StatusCfg,
+}
+
+impl Task for DetailedStatusTask {
+    type Output = DetailedStatusResult;
+    type JsValue = DetailedStatusResult;
+
+    fn compute(&mut self) -> napi::Result<DetailedStatusResult> {
+        let r = thread_local(&self.repo);
+        let platform = r
+            .status(gix::progress::Discard)
+            .map_err(|e| err("status", e))?;
+        let task_helper = StatusTask {
+            repo: Arc::clone(&self.repo),
+            cfg: StatusCfg {
+                show: self.cfg.show,
+                untracked: self.cfg.untracked,
+                ignored: self.cfg.ignored,
+                pathspec: self.cfg.pathspec.clone(),
+                exclude_submodules: self.cfg.exclude_submodules,
+                head: self.cfg.head.clone(),
+                h2i_renames: self.cfg.h2i_renames,
+                i2w_rewrites: self.cfg.i2w_rewrites.clone(),
+                update_index: self.cfg.update_index,
+                pick: self.cfg.pick.clone(),
+            },
+        };
+        let platform = task_helper.configure(platform, &r)?;
+        let mut map: BTreeMap<BString, Half> = BTreeMap::new();
+
+        match self.cfg.show {
+            Show::Worktree => {
+                let mut iter = platform
+                    .into_index_worktree_iter(self.cfg.pathspec.clone())
+                    .map_err(|e| err("status iter", e))?;
+                for item in iter.by_ref() {
+                    let item = item.map_err(|e| err("status item", e))?;
+                    if let Some(half) = half_from_index_worktree(item) {
+                        merge(&mut map, half);
+                    }
+                }
+                let outcome = iter.into_outcome();
+                task_helper.write_index(outcome)?;
+            }
+            Show::All | Show::Index => {
+                let mut iter = platform
+                    .into_iter(self.cfg.pathspec.clone())
+                    .map_err(|e| err("status iter", e))?;
+                for item in iter.by_ref() {
+                    let item = item.map_err(|e| err("status item", e))?;
+                    match item {
+                        StatusItem::TreeIndex(change) => {
+                            if let Some(half) = half_from_tree_index(change) {
+                                merge(&mut map, half);
+                            }
+                        }
+                        StatusItem::IndexWorktree(item) => {
+                            if let Some(half) = half_from_index_worktree(item) {
+                                merge(&mut map, half);
+                            }
+                        }
+                    }
+                }
+                let outcome = iter.into_outcome();
+                task_helper.write_index(outcome)?;
+            }
+        }
+
+        let entries = finish_detailed(map);
+        let (branch, tracking, ahead, behind) = compute_header(&r);
+        let is_clean = entries.is_empty();
+        Ok(DetailedStatusResult {
+            branch,
+            tracking,
+            ahead,
+            behind,
+            is_clean,
+            entries,
+        })
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: DetailedStatusResult) -> napi::Result<DetailedStatusResult> {
+        Ok(output)
+    }
 }
 
 impl StatusTask {
@@ -814,6 +1007,23 @@ impl Repository {
             None => StatusCfg::default(),
         };
         Ok(AsyncTask::new(StatusTask {
+            repo: Arc::clone(&self.inner),
+            cfg,
+        }))
+    }
+
+    /// Compute detailed working tree status asynchronously with granular change states
+    /// and porcelain codes for each path.
+    #[napi(ts_return_type = "Promise<DetailedStatusResult>")]
+    pub fn status_detailed(
+        &self,
+        options: Option<StatusOptions>,
+    ) -> napi::Result<AsyncTask<DetailedStatusTask>> {
+        let cfg = match &options {
+            Some(o) => parse_options(o)?,
+            None => StatusCfg::default(),
+        };
+        Ok(AsyncTask::new(DetailedStatusTask {
             repo: Arc::clone(&self.inner),
             cfg,
         }))

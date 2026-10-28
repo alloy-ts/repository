@@ -181,4 +181,10 @@ describe("Repository.reset / resetDefault (backward-compatible delegates)", () =
     expect(read("a.txt")).toBe("tip\n"); // worktree kept
     expect(tracked("b.txt")).toBe(false); // b removed from index
   });
+
+  test("resetToHead / resetHard resets worktree to HEAD", () => {
+    write("a.txt", "uncommitted modification\n");
+    repo.resetToHead();
+    expect(read("a.txt")).toBe("tip\n");
+  });
 });

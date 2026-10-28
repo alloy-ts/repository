@@ -265,6 +265,83 @@ impl Repository {
         Ok(ids)
     }
 
+    /// Resolve a short reference name using Git's DWIM lookup order
+    /// (`refs/{}`, `refs/tags/{}`, `refs/heads/{}`, `refs/remotes/{}`).
+    #[napi]
+    pub fn dwim_ref(&self, name: String) -> napi::Result<Option<String>> {
+        use gix::bstr::ByteSlice;
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let r = thread_local(&self.inner);
+        if let Ok(Some(rf)) = r.try_find_reference(&name) {
+            return Ok(Some(String::from_utf8_lossy(rf.name().as_bstr()).into_owned()));
+        }
+        for pattern in [
+            "refs/{}",
+            "refs/tags/{}",
+            "refs/heads/{}",
+            "refs/remotes/{}",
+            "refs/remotes/{}/HEAD",
+        ] {
+            let candidate = pattern.replace("{}", &name);
+            if let Ok(Some(rf)) = r.try_find_reference(&candidate) {
+                return Ok(Some(String::from_utf8_lossy(rf.name().as_bstr()).into_owned()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Resolve `@{-n}`: the n-th branch/commit checked out before the current one from HEAD reflog.
+    #[napi]
+    pub fn previous_checkout(&self, n: u32) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let git_dir = r.git_dir();
+        let log_path = std::path::Path::new(&git_dir).join("logs").join("HEAD");
+        if !log_path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&log_path).map_err(|e| err("previous_checkout", e))?;
+        let skip = (n as usize).checked_sub(1).unwrap_or(0);
+        let mut count = 0;
+        for line in content.lines().rev() {
+            if let Some(msg_idx) = line.find('\t') {
+                let msg = &line[msg_idx + 1..];
+                if let Some(rest) = msg.strip_prefix("checkout: moving from ") {
+                    if let Some((from, _)) = rest.rsplit_once(" to ") {
+                        if count == skip {
+                            return Ok(Some(from.to_string()));
+                        }
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Peel a revision/object specification to a target object kind (`commit`, `tree`, `blob`, `tag`).
+    #[napi]
+    pub fn peel_to(&self, spec: String, target_kind: String) -> napi::Result<String> {
+        let r = thread_local(&self.inner);
+        let id: gix::ObjectId = r
+            .rev_parse_single(&spec)
+            .map_err(|e| err("peel_to", e))?
+            .into();
+        let kind = match target_kind.as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            other => return Err(err_str("peel_to", format!("invalid target kind {other:?}"))),
+        };
+        let obj = r.find_object(id).map_err(|e| err("peel_to", e))?;
+        let peeled = obj
+            .peel_to_kind(kind)
+            .map_err(|e| err("peel_to", e))?;
+        Ok(peeled.id.to_string())
+    }
+
     /// Resolve a single revision specification (e.g. `HEAD~1`, `main`, `<sha>`)
     /// directly to an [`Object`], in one step. This is the object-returning
     /// counterpart of [`rev_parse_single`](Self::rev_parse_single) and avoids a

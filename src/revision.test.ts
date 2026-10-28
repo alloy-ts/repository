@@ -169,6 +169,21 @@ describe("Repository revision specs (src/revision.rs)", () => {
     expect(repo.findObject(oid).id).toBe(obj.id);
   });
 
+  test("dwimRef, previousCheckout, peelTo", () => {
+    const fullRef = repo.dwimRef("HEAD");
+    expect(fullRef).toBe("HEAD");
+
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: cloneDir,
+      encoding: "utf8",
+    }).trim();
+    expect(repo.dwimRef(branch)).toBe(`refs/heads/${branch}`);
+
+    const peeledTree = repo.peelTo("HEAD", "tree");
+    expect(typeof peeledTree).toBe("string");
+    expect(peeledTree.length).toBe(40);
+  });
+
   test("revWalk() accepts a limit option", () => {
     const head = repo.revParseSingle("HEAD");
     const full = repo.revWalk([head]);

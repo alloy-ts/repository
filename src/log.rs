@@ -57,6 +57,90 @@ pub enum LogOrder {
     Topo,
 }
 
+/// One commit's row in a history graph layout.
+#[derive(Clone)]
+#[napi(object)]
+pub struct GraphRow {
+    pub commit: String,
+    pub column: u32,
+    pub columns_before: Vec<String>,
+    pub columns_after: Vec<String>,
+    pub parent_columns: Vec<u32>,
+    pub column_mapping: Vec<Option<u32>>,
+}
+
+/// Computes history graph column layouts similar to `git log --graph`.
+#[napi]
+pub struct Graph {
+    columns: Vec<String>,
+}
+
+#[napi]
+impl Graph {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self { columns: Vec::new() }
+    }
+
+    /// Add a commit and its parent IDs to compute graph layout for this row.
+    #[napi]
+    pub fn push(&mut self, commit: String, parents: Vec<String>) -> GraphRow {
+        let before = std::mem::take(&mut self.columns);
+        let mut after: Vec<String> = Vec::with_capacity(before.len() + parents.len());
+
+        let insert = |after: &mut Vec<String>, item: String| {
+            if !after.contains(&item) {
+                after.push(item);
+            }
+        };
+
+        let mut column = None;
+        for i in 0..=before.len() {
+            let line = match before.get(i) {
+                Some(s) => s.clone(),
+                None if column.is_some() => break,
+                None => commit.clone(),
+            };
+            if line == commit {
+                column = Some(i as u32);
+                for p in &parents {
+                    insert(&mut after, p.clone());
+                }
+            } else {
+                insert(&mut after, line);
+            }
+        }
+
+        self.columns = after.clone();
+        let col = column.unwrap_or(0);
+
+        let parent_columns: Vec<u32> = parents
+            .iter()
+            .map(|p| after.iter().position(|oid| oid == p).unwrap_or(0) as u32)
+            .collect();
+
+        let column_mapping: Vec<Option<u32>> = before
+            .iter()
+            .map(|oid| {
+                if oid == &commit {
+                    None
+                } else {
+                    after.iter().position(|a| a == oid).map(|idx| idx as u32)
+                }
+            })
+            .collect();
+
+        GraphRow {
+            commit,
+            column: col,
+            columns_before: before,
+            columns_after: after,
+            parent_columns,
+            column_mapping,
+        }
+    }
+}
+
 /// Options for [`Repository::log`], replacing the older positional arguments with a single,
 /// extensible, JS-friendly object.
 #[derive(Default)]
@@ -263,6 +347,19 @@ impl Repository {
             out.reverse();
         }
         Ok(out)
+    }
+
+    /// Read commit history and layout graph rows for rendering ASCII/UI commit trees.
+    #[napi]
+    pub fn log_graph(&self, options: Option<LogOptions>) -> napi::Result<Vec<GraphRow>> {
+        let commits = self.log(options)?;
+        let mut graph = Graph::new();
+        let mut rows = Vec::with_capacity(commits.len());
+        for c in commits {
+            let row = graph.push(c.sha, c.parent_ids);
+            rows.push(row);
+        }
+        Ok(rows)
     }
 }
 

@@ -279,6 +279,12 @@ describe("Repository rebase (src/rebase.rs)", () => {
     expect(outcome.headId).toBe(mainTip);
   });
 
+  test("isRebasing & rebasePlan", () => {
+    expect(repo.isRebasing()).toBe(false);
+    const plan = repo.rebasePlan(baseId);
+    expect(plan.length).toBeGreaterThan(0);
+  });
+
   test("one-shot rebase() defaults upstream/onto to the fork point and HEAD", () => {
     git(`branch feature4 ${featureTip}`);
     // HEAD is main; feature4 forked at baseId.

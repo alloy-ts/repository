@@ -219,6 +219,14 @@ test("log returns commit summaries newest-first (JS log reading example)", () =>
   }
 });
 
+test("logGraph returns graph rows for commit tree layout", () => {
+  const rows = repo.logGraph({ limit: 5 });
+  expect(Array.isArray(rows)).toBe(true);
+  expect(rows.length).toBeGreaterThan(0);
+  expect(typeof rows[0].commit).toBe("string");
+  expect(typeof rows[0].column).toBe("number");
+});
+
 // --- merge options / virtual merge base / state / pathspec / location -------
 describe("Repository merge options, virtual merge base, state, pathspec & location", () => {
   test("state() reports no in-progress operation on a clean clone", () => {

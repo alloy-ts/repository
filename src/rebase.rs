@@ -440,6 +440,87 @@ impl Rebase {
 
 #[napi]
 impl Repository {
+    /// Returns true if a rebase is currently in progress on disk
+    /// (`.git/rebase-merge` or `.git/rebase-apply` directory exists).
+    #[napi]
+    pub fn is_rebasing(&self) -> bool {
+        let r = thread_local(&self.inner);
+        let git_dir = r.git_dir();
+        git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
+    }
+
+    /// Get default todo list of operations for a rebase onto upstream.
+    #[napi]
+    pub fn rebase_plan(&self, upstream: String) -> napi::Result<Vec<RebaseOperation>> {
+        let what = "rebase_plan";
+        let r = thread_local(&self.inner);
+        let plan = plan_rebase(&r, what, None, Some(&upstream), None)?;
+        Ok(plan.ops.into_iter().map(operation_dto).collect())
+    }
+
+    /// Abort an in-progress disk rebase (`git rebase --abort`).
+    #[napi]
+    pub fn rebase_abort(&self) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let git = crate::repository::find_git()
+            .ok_or_else(|| err_str("rebase_abort", "no system git binary found"))?;
+        let mut cmd = std::process::Command::new(&git);
+        cmd.arg("rebase").arg("--abort");
+        if let Some(wd) = r.workdir() {
+            cmd.current_dir(wd);
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(err_str(
+                "rebase_abort",
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )),
+            Err(e) => Err(err("rebase_abort", e)),
+        }
+    }
+
+    /// Continue an in-progress disk rebase (`git rebase --continue`).
+    #[napi]
+    pub fn rebase_continue(&self) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let git = crate::repository::find_git()
+            .ok_or_else(|| err_str("rebase_continue", "no system git binary found"))?;
+        let mut cmd = std::process::Command::new(&git);
+        cmd.arg("rebase").arg("--continue");
+        if let Some(wd) = r.workdir() {
+            cmd.current_dir(wd);
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(err_str(
+                "rebase_continue",
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )),
+            Err(e) => Err(err("rebase_continue", e)),
+        }
+    }
+
+    /// Skip current commit in an in-progress disk rebase (`git rebase --skip`).
+    #[napi]
+    pub fn rebase_skip(&self) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let git = crate::repository::find_git()
+            .ok_or_else(|| err_str("rebase_skip", "no system git binary found"))?;
+        let mut cmd = std::process::Command::new(&git);
+        cmd.arg("rebase").arg("--skip");
+        if let Some(wd) = r.workdir() {
+            cmd.current_dir(wd);
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(err_str(
+                "rebase_skip",
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )),
+            Err(e) => Err(err("rebase_skip", e)),
+        }
+    }
+
     /// Start an in-memory rebase session: plan the commits to replay and
     /// return a step-driven `Rebase` handle.
     ///

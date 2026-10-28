@@ -36,6 +36,22 @@ pub enum StashFlags {
     NoRefresh = 16,
 }
 
+/// Options for applying or popping a stash.
+#[napi(object)]
+pub struct StashApplyOptions {
+    /// Restore the staged state to the index (`git stash apply --index`).
+    pub restore_index: Option<bool>,
+}
+
+/// Result of applying or popping a stash.
+#[napi(object)]
+pub struct StashApplyResult {
+    /// `true` if applied cleanly without conflicts.
+    pub applied: bool,
+    /// List of conflicted paths if conflicts occurred.
+    pub conflicts: Option<Vec<String>>,
+}
+
 /// Options for [`Repository::saveStash`].
 #[napi(object)]
 pub struct StashSaveOptions {
@@ -274,24 +290,18 @@ impl Repository {
     }
 
     /// Restore the stash at `index` (0 = most recent) into the working tree and the index.
-    ///
-    /// The stash commit is `stash^0` (the working-tree state at stash time), with parents
-    /// `stash^1` (HEAD, the base), `stash^2` (the staged/index state at stash time), and
-    /// optionally `stash^3` (untracked files). This restores the working tree from `stash^0`
-    /// (and `stash^3` for untracked files) and the index from `stash^2`.
-    ///
-    /// This is a tree-walk restore, not a three-way merge. Before overwriting, each path is
-    /// checked against its base (`stash^1`) version: if the current working-tree file differs
-    /// from the base, the operation fails with a conflict error instead of clobbering local
-    /// work. Deletion of files present locally but absent from the stash, and `KeepIndex`
-    /// interactions on apply, are not yet handled beyond this guard.
     #[napi]
-    pub fn apply_stash(&self, index: u32) -> napi::Result<()> {
+    pub fn apply_stash(
+        &self,
+        index: u32,
+        options: Option<StashApplyOptions>,
+    ) -> napi::Result<StashApplyResult> {
         let repo = thread_local(&self.inner);
         let workdir = repo
             .workdir()
             .ok_or_else(|| err_str("apply_stash", "apply requires a working tree"))?;
 
+        let restore_index = options.and_then(|o| o.restore_index).unwrap_or(false);
         let stash_id = stash_commit_id_at(&repo, index)?;
         let commit = repo
             .find_commit(stash_id)
@@ -299,12 +309,11 @@ impl Repository {
         let work_tree_id = commit.tree_id().map_err(|e| err("tree_id", e))?.detach();
         let parents: Vec<gix::ObjectId> = commit.parent_ids().map(|p| p.detach()).collect();
 
-        // stash^1 = base (HEAD at stash time); stash^2 = index tree; stash^3 = untracked tree.
         let base_tree_id = parents.first().copied();
         let index_tree_id = parents.get(1).copied();
         let untracked_tree_id = parents.get(2).copied();
 
-        // Conflict-protective guard: refuse to overwrite local modifications.
+        let mut conflicts = Vec::new();
         if let Some(base) = base_tree_id {
             let base_map: HashMap<Vec<String>, gix::ObjectId> = tree_entries(&repo, base)?
                 .into_iter()
@@ -312,48 +321,54 @@ impl Repository {
                 .collect();
             for (path, stash0_oid, _) in tree_entries(&repo, work_tree_id)? {
                 let Some(&base_oid) = base_map.get(&path) else {
-                    // New in the stash: cannot clobber a base path.
                     continue;
                 };
                 if stash0_oid == base_oid {
-                    // The stash did not change this path relative to the base.
                     continue;
                 }
                 let base_bytes = read_blob(&repo, base_oid)?;
                 let current = worktree_file_bytes(workdir, &path);
                 if current.as_deref() != Some(&base_bytes[..]) {
-                    return Err(err_str(
-                        "apply_stash",
-                        format!(
-                            "conflict at '{}': local changes would be overwritten by the stash",
-                            path.join("/")
-                        ),
-                    )
-                    .into());
+                    conflicts.push(path.join("/"));
                 }
             }
         }
 
-        // Restore the working tree from the stash's worktree tree (stash^0).
+        if !conflicts.is_empty() {
+            return Ok(StashApplyResult {
+                applied: false,
+                conflicts: Some(conflicts),
+            });
+        }
+
         restore_tree_to_worktree(&repo, workdir, work_tree_id)?;
-        // Untracked files (stash^3) go to the working tree only.
         if let Some(ut) = untracked_tree_id {
             restore_tree_to_worktree(&repo, workdir, ut)?;
         }
-        // Restore the index from the stash's index tree (stash^2).
-        if let Some(it) = index_tree_id {
-            restore_index_from_tree(&repo, it)?;
+        if restore_index {
+            if let Some(it) = index_tree_id {
+                restore_index_from_tree(&repo, it)?;
+            }
         }
-        Ok(())
+        Ok(StashApplyResult {
+            applied: true,
+            conflicts: None,
+        })
     }
 
     /// Apply the stash at `index` and then remove it from the stash list (equivalent to
     /// `git stash pop`).
     #[napi]
-    pub fn pop_stash(&self, index: u32) -> napi::Result<()> {
-        self.apply_stash(index)?;
-        self.drop_stash(index)?;
-        Ok(())
+    pub fn pop_stash(
+        &self,
+        index: u32,
+        options: Option<StashApplyOptions>,
+    ) -> napi::Result<StashApplyResult> {
+        let res = self.apply_stash(index, options)?;
+        if res.applied {
+            self.drop_stash(index)?;
+        }
+        Ok(res)
     }
 
     /// Remove every stash, deleting the `refs/stash` reference entirely. Equivalent to

@@ -464,4 +464,22 @@ describe("Repository.status — option validation", () => {
     utimesSync(join(fixture, "b.txt"), new Date(), new Date(Date.now() + 5_000));
     await expect(repo.status({ updateIndex: true, untracked: "none" })).resolves.toEqual([]);
   });
+
+  test("statusDetailed returns detailed change states and flags", async () => {
+    write("b.txt", "detailed modified\n");
+    write("detailed_untracked.txt", "untracked\n");
+    const res = await repo.statusDetailed({ untracked: "files" });
+    expect(res.entries.length).toBeGreaterThan(0);
+    const bEntry = res.entries.find((e) => e.path === "b.txt");
+    expect(bEntry).toBeDefined();
+    expect(bEntry!.worktreeState).toBe("modified");
+    expect(bEntry!.isUnstaged).toBe(true);
+
+    const uEntry = res.entries.find((e) => e.path === "detailed_untracked.txt");
+    expect(uEntry).toBeDefined();
+    expect(uEntry!.code).toBe("??");
+    expect(uEntry!.isUnstaged).toBe(true);
+    remove("detailed_untracked.txt");
+    resetHard();
+  });
 });
