@@ -375,4 +375,11 @@ describe("Repository newly added trait-parity NAPI bindings", () => {
     const index = repo.cherryPick(head);
     expect(typeof index.writeTree).toBe("function");
   });
+
+  test("checkoutHead, checkoutIndex, and checkoutTree update working directory", () => {
+    expect(() => repo.checkoutHead()).not.toThrow();
+    expect(() => repo.checkoutIndex()).not.toThrow();
+    const head = repo.headId();
+    expect(() => repo.checkoutTree(head)).not.toThrow();
+  });
 });

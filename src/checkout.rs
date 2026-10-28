@@ -19,11 +19,13 @@ use napi_derive::napi;
 use crate::error::{err, err_str, thread_local};
 use crate::repository::{Repository, find_git};
 
-/// Options controlling [`Repository::checkout`].
+/// Options controlling [`Repository::checkout`], [`Repository::checkout_head`], [`Repository::checkout_index`], and [`Repository::checkout_tree`].
 #[napi(object)]
 pub struct CheckoutOptions {
     /// Overwrite local modifications in the working tree (like `git checkout --force`).
     pub force: Option<bool>,
+    /// Limit the checkout to specific file paths or pathspecs.
+    pub paths: Option<Vec<String>>,
 }
 
 /// Options controlling [`Repository::checkout_branch`].
@@ -209,8 +211,75 @@ impl Repository {
         Ok(AsyncTask::new(CheckoutTask {
             repo: Arc::clone(&self.inner),
             target,
-            force: options.and_then(|o| o.force).unwrap_or(false),
+            force: options.as_ref().and_then(|o| o.force).unwrap_or(false),
         }))
+    }
+
+    /// Update files in the index and working tree to match `HEAD`.
+    ///
+    /// Mirrors git2's `checkout_head`.
+    #[napi(js_name = "checkoutHead")]
+    pub fn checkout_head(&self, options: Option<CheckoutOptions>) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let dir = r.workdir().unwrap_or_else(|| r.path());
+        let mut args = vec!["checkout".to_string()];
+        if options.as_ref().and_then(|o| o.force).unwrap_or(false) {
+            args.push("--force".to_string());
+        }
+        args.push("HEAD".to_string());
+        if let Some(paths) = options.as_ref().and_then(|o| o.paths.as_ref()) {
+            if !paths.is_empty() {
+                args.push("--".to_string());
+                args.extend(paths.clone());
+            }
+        }
+        git_run(dir, &args)
+    }
+
+    /// Update files in the working tree to match the content of the index.
+    ///
+    /// Mirrors git2's `checkout_index`.
+    #[napi(js_name = "checkoutIndex")]
+    pub fn checkout_index(&self, options: Option<CheckoutOptions>) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let dir = r.workdir().unwrap_or_else(|| r.path());
+        let mut args = vec!["checkout-index".to_string()];
+        if options.as_ref().and_then(|o| o.force).unwrap_or(false) {
+            args.push("-f".to_string());
+        }
+        args.push("-a".to_string());
+        if let Some(paths) = options.as_ref().and_then(|o| o.paths.as_ref()) {
+            if !paths.is_empty() {
+                args.retain(|a| a != "-a");
+                args.extend(paths.clone());
+            }
+        }
+        git_run(dir, &args)
+    }
+
+    /// Update files in the index and working tree to match a treeish revision.
+    ///
+    /// Mirrors git2's `checkout_tree`. `treeish` can be a tree SHA, commit SHA, or rev spec.
+    #[napi(js_name = "checkoutTree")]
+    pub fn checkout_tree(
+        &self,
+        treeish: String,
+        options: Option<CheckoutOptions>,
+    ) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let dir = r.workdir().unwrap_or_else(|| r.path());
+        let mut args = vec!["checkout".to_string()];
+        if options.as_ref().and_then(|o| o.force).unwrap_or(false) {
+            args.push("--force".to_string());
+        }
+        args.push(treeish);
+        if let Some(paths) = options.as_ref().and_then(|o| o.paths.as_ref()) {
+            if !paths.is_empty() {
+                args.push("--".to_string());
+                args.extend(paths.clone());
+            }
+        }
+        git_run(dir, &args)
     }
 
     /// Checkout a branch by name asynchronously, updating `HEAD`, the index, and
