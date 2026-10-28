@@ -485,6 +485,16 @@ impl Repository {
     pub fn push_branch(&self, options: Option<PushOptions>) -> napi::Result<PushOutcome> {
         self.push(None, options)
     }
+
+    /// Push a single specific refspec (e.g. `refs/heads/main:refs/heads/main`) to a remote.
+    #[napi(js_name = "pushRefspec")]
+    pub fn push_refspec(
+        &self,
+        refspec: String,
+        options: Option<PushOptions>,
+    ) -> napi::Result<PushOutcome> {
+        self.push(Some(vec![refspec]), options)
+    }
 }
 
 /// Resolve the refspecs to push from either an explicit `refspecs` list or the

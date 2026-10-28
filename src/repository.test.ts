@@ -382,4 +382,10 @@ describe("Repository newly added trait-parity NAPI bindings", () => {
     const head = repo.headId();
     expect(() => repo.checkoutTree(head)).not.toThrow();
   });
+
+  test("pushRefspec and Remote.push", () => {
+    expect(typeof repo.pushRefspec).toBe("function");
+    const remote = repo.findRemote("origin");
+    expect(typeof remote.push).toBe("function");
+  });
 });

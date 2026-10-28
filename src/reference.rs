@@ -1039,19 +1039,29 @@ impl Repository {
     pub fn ref_list(&self, pattern: Option<String>) -> napi::Result<Vec<RefInfo>> {
         let r = thread_local(&self.inner);
         let platform = r.references().map_err(|e| err("references", e))?;
-        let iter = match pattern {
-            Some(ref p) => platform.prefixed(p.as_str()).map_err(|e| err("ref_list", e))?,
-            None => platform.all().map_err(|e| err("ref_list", e))?,
-        };
         let mut out = Vec::new();
-        for reference in iter {
-            let reference = reference.map_err(|e| err("reference", e))?;
-            let name = reference.name().as_bstr().to_string();
-            let target = match reference.target() {
-                gix::refs::TargetRef::Object(id) => id.to_string(),
-                gix::refs::TargetRef::Symbolic(s) => s.as_bstr().to_string(),
-            };
-            out.push(RefInfo { name, target });
+        if let Some(ref p) = pattern {
+            let iter = platform.prefixed(p.as_str()).map_err(|e| err("ref_list", e))?;
+            for reference in iter {
+                let reference = reference.map_err(|e| err("reference", e))?;
+                let name = reference.name().as_bstr().to_string();
+                let target = match reference.target() {
+                    gix::refs::TargetRef::Peeled(id) => id.to_string(),
+                    gix::refs::TargetRef::Symbolic(s) => s.as_bstr().to_string(),
+                };
+                out.push(RefInfo { name, target });
+            }
+        } else {
+            let iter = platform.all().map_err(|e| err("ref_list", e))?;
+            for reference in iter {
+                let reference = reference.map_err(|e| err("reference", e))?;
+                let name = reference.name().as_bstr().to_string();
+                let target = match reference.target() {
+                    gix::refs::TargetRef::Peeled(id) => id.to_string(),
+                    gix::refs::TargetRef::Symbolic(s) => s.as_bstr().to_string(),
+                };
+                out.push(RefInfo { name, target });
+            }
         }
         Ok(out)
     }

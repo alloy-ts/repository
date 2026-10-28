@@ -227,11 +227,15 @@ impl Repository {
             args.push("--force".to_string());
         }
         args.push("HEAD".to_string());
+        args.push("--".to_string());
         if let Some(paths) = options.as_ref().and_then(|o| o.paths.as_ref()) {
             if !paths.is_empty() {
-                args.push("--".to_string());
                 args.extend(paths.clone());
+            } else {
+                args.push(".".to_string());
             }
+        } else {
+            args.push(".".to_string());
         }
         git_run(dir, &args)
     }
@@ -273,11 +277,15 @@ impl Repository {
             args.push("--force".to_string());
         }
         args.push(treeish);
+        args.push("--".to_string());
         if let Some(paths) = options.as_ref().and_then(|o| o.paths.as_ref()) {
             if !paths.is_empty() {
-                args.push("--".to_string());
                 args.extend(paths.clone());
+            } else {
+                args.push(".".to_string());
             }
+        } else {
+            args.push(".".to_string());
         }
         git_run(dir, &args)
     }

@@ -203,6 +203,23 @@ impl Remote {
         }))
     }
 
+    /// Push refspecs to this remote using the repository's push mechanism.
+    #[napi]
+    pub fn push(
+        &self,
+        refspecs: Option<Vec<String>>,
+        options: Option<crate::push::PushOptions>,
+    ) -> napi::Result<crate::push::PushOutcome> {
+        let repo = Repository {
+            inner: Arc::clone(&self.repo),
+        };
+        let mut opts = options.unwrap_or_default();
+        if opts.remote.is_none() {
+            opts.remote = self.name.clone();
+        }
+        repo.push(refspecs, Some(opts))
+    }
+
     /// List references advertised by the remote, mirroring `git ls-remote`.
     ///
     /// With no `refspecs`, every ref the server advertises is returned (the V2 `ls-refs`

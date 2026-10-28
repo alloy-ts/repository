@@ -283,7 +283,9 @@ impl Repository {
     #[napi]
     pub fn config_get_bool(&self, key: String) -> Option<bool> {
         let r = thread_local(&self.inner);
-        r.config_snapshot().boolean(key.as_str()).ok().flatten()
+        r.config_snapshot()
+            .boolean(key.as_str())
+            .and_then(|res| res.ok())
     }
 
     /// Remove a configuration key from the repository's local config file. This mirrors
