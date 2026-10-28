@@ -195,7 +195,7 @@ impl Task for FetchTask {
             gix::remote::fetch::Status::Change { .. } => ("change", true, false, true),
             gix::remote::fetch::Status::NoPackReceived {
                 dry_run, negotiate, ..
-            } => ("noPackReceived", false, dry_run, negotiate.is_some()),
+            } => ("noPackReceived", false, *dry_run, negotiate.is_some()),
         };
 
         let update_refs = match &outcome.status {

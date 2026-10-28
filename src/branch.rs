@@ -14,7 +14,7 @@ use crate::repository::Repository;
 /// Convert a full (`refs/heads/topic`) or short (`topic`) branch name into a `FullName`,
 /// normalizing short names to the local-branch category.
 fn to_branch_full_name(name: &str) -> Result<FullName> {
-    branch_full_name(name, Category::LocalBranch)
+    branch_full_name(name, Category::LocalBranch).map_err(Into::into)
 }
 
 /// Like [`to_branch_full_name`], but for an explicit branch `category`.
@@ -668,7 +668,7 @@ impl Repository {
         let head = r.head_name().map_err(|e| err("head_name", e))?;
         let mut out = Vec::new();
         for reference in iter {
-            let reference = reference.map_err(|e| err("branches", e))?;
+            let mut reference = reference.map_err(|e| err("branches", e))?;
             let full = reference.name().to_string();
             let short = String::from_utf8_lossy(reference.name().shorten()).into_owned();
             let commit = reference.peel_to_commit().map_err(|e| err("branches", e))?;
@@ -677,13 +677,13 @@ impl Repository {
             let is_head = head.as_ref().map(|h| h.as_bstr()) == Some(reference.name().as_bstr());
             let upstream = match category {
                 Category::LocalBranch => match r.branch_remote_tracking_ref_name(
-                    reference.name().to_owned(),
+                    reference.name(),
                     gix::remote::Direction::Fetch,
                 ) {
                     Some(Ok(name)) => Some(name.to_string()),
                     _ => None,
                 },
-                Category::RemoteBranch => None,
+                _ => None,
             };
             out.push(BranchListItem {
                 name: short,

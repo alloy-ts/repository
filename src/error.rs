@@ -430,7 +430,7 @@ fn suggestion_for(category: ErrorCategory) -> Option<String> {
 
 /// Parse a hex object id string into a [`gix::ObjectId`].
 pub fn parse_oid(s: &str) -> napi::Result<gix::ObjectId> {
-    gix::ObjectId::from_hex(s.as_bytes()).map_err(|e| err_repo("parse_oid", e))
+    gix::ObjectId::from_hex(s.as_bytes()).map_err(|e| err_repo("parse_oid", e).into())
 }
 
 /// Obtain a cheap thread-local view of the repository for synchronous methods.

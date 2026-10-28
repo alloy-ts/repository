@@ -445,7 +445,7 @@ impl Commit {
     #[napi(getter)]
     pub fn short_sha(&self) -> napi::Result<String> {
         let r = thread_local(&self.repo);
-        Ok(crate::object::short_sha(r, &self.id))
+        Ok(crate::object::short_sha(&r, &self.id))
     }
 
     /// The raw first line of the commit message (the subject), without the whitespace folding that
@@ -499,7 +499,7 @@ impl Commit {
     #[napi]
     pub fn info(&self) -> napi::Result<CommitInfo> {
         let r = thread_local(&self.repo);
-        Ok(log_summary(r, self.id)?.0)
+        Ok(log_summary(&r, self.id)?.0)
     }
 
     /// The full message exactly as stored, without the leading-newline
@@ -1041,7 +1041,7 @@ impl Repository {
             .parents
             .iter()
             .map(|p| parse_oid(p))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
 
         let default_author = r.author().and_then(|res| res.ok());
         let default_committer = r.committer().and_then(|res| res.ok());
@@ -1096,7 +1096,7 @@ impl Repository {
         let parent_ids: Vec<gix::ObjectId> = parents
             .iter()
             .map(|p| parse_oid(p))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let id = r
             .commit(reference, message.as_str(), parse_oid(&tree)?, parent_ids)
             .map_err(|e| err("commit", e))?;
@@ -1119,7 +1119,7 @@ impl Repository {
         let parent_ids: Vec<gix::ObjectId> = parents
             .iter()
             .map(|p| parse_oid(p))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let mut committer_buf = String::new();
         let mut author_buf = String::new();
         let id = r
@@ -1148,7 +1148,7 @@ impl Repository {
         let parent_ids: Vec<gix::ObjectId> = parents
             .iter()
             .map(|p| parse_oid(p))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let commit = r
             .new_commit(message.as_str(), parse_oid(&tree)?, parent_ids)
             .map_err(|e| err("new_commit", e))?;
@@ -1170,7 +1170,7 @@ impl Repository {
         let parent_ids: Vec<gix::ObjectId> = parents
             .iter()
             .map(|p| parse_oid(p))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let mut committer_buf = String::new();
         let mut author_buf = String::new();
         let commit = r

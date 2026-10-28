@@ -8,7 +8,7 @@ use napi_derive::napi;
 
 use gix::refs::transaction::PreviousValue;
 
-use crate::auth::GitAuthenticator;
+use crate::auth::{AuthenticatorOptions, GitAuthenticator};
 use crate::error::{err, err_str, thread_local};
 use crate::repository::{Repository, find_git};
 
@@ -67,7 +67,7 @@ pub struct PushOptions {
     /// `branch`/`remoteBranch` drive the push).
     pub set_upstream: Option<bool>,
     /// Authenticator supplying credentials / SSH keys / agent / credential helper for network pushes.
-    pub auth: Option<GitAuthenticator>,
+    pub auth: Option<AuthenticatorOptions>,
 }
 
 /// The result of a push operation.
@@ -510,9 +510,9 @@ fn resolve_push_refspecs(
         Some(b) => b.clone(),
         None => {
             let head = r.head().map_err(|e| err("push", e))?;
-            head.shorthand()
+            head.referent_name()
+                .map(|n| n.shorten().to_string())
                 .ok_or_else(|| err_str("push", "could not determine the current branch from HEAD"))?
-                .to_owned()
         }
     };
     let branch_short = branch
@@ -599,7 +599,8 @@ fn git_push(
             .unwrap_or_else(|| "origin".to_string()),
     );
     cmd.args(refspecs);
-    if let Some(auth) = options.auth.as_ref() {
+    if let Some(auth_opts) = options.auth.as_ref() {
+        let auth = GitAuthenticator::new(Some(auth_opts.clone()));
         auth.apply_to_command(&mut cmd);
     }
     cmd.current_dir(r.path());

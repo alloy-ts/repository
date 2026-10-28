@@ -654,7 +654,7 @@ impl Task for LsRefsTask {
                     .map(|spec| spec.to_owned())
                     .map_err(|e| err("refspec.parse", e))
                 })
-                .collect::<Result<Vec<_>>>()?,
+                .collect::<napi::Result<Vec<_>>>()?,
             None => Vec::new(),
         };
         let options = gix::remote::ref_map::Options {

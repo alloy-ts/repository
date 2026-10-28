@@ -548,7 +548,7 @@ impl Pack {
         let tip_ids: Vec<gix::ObjectId> = tips
             .iter()
             .map(|t| parse_oid(t))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let mut platform = r.rev_walk(tip_ids);
         if let Some(opts) = options {
             if opts.first_parent.unwrap_or(false) {

@@ -7,7 +7,7 @@ use napi::bindgen_prelude::{AsyncTask, Function};
 use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 
-use crate::auth::GitAuthenticator;
+use crate::auth::{AuthenticatorOptions, GitAuthenticator};
 use crate::error::RepositoryResult as Result;
 use crate::progress::{ProgressCallback, ProgressEvent};
 use crate::repository::{Repository, find_git};
@@ -164,7 +164,7 @@ impl Repository {
         bare: Option<bool>,
         _env: Env,
         progress: Option<Function<ProgressEvent, ()>>,
-        auth: Option<GitAuthenticator>,
+        auth: Option<AuthenticatorOptions>,
     ) -> napi::Result<AsyncTask<CloneTask>> {
         let destination = match path {
             Some(p) => p,
@@ -182,12 +182,13 @@ impl Repository {
             }
             None => None,
         };
+        let git_auth = auth.map(|a| GitAuthenticator::new(Some(a)));
         Ok(AsyncTask::new(CloneTask {
             url,
             path: destination,
             bare: bare.unwrap_or(false),
             progress: tsfn,
-            auth,
+            auth: git_auth,
         }))
     }
 
@@ -214,14 +215,13 @@ impl Repository {
 }
 
 /// Options for [`Cloner::clone`].
+#[derive(Default)]
 #[napi(object)]
 pub struct CloneOptions {
     /// Create a bare repository (no worktree). Defaults to `false`.
     pub bare: Option<bool>,
-    /// Progress callback receiving [`ProgressEvent`]s during the fetch.
-    pub progress: Option<Function<ProgressEvent, ()>>,
     /// Per-call authenticator; overrides any authenticator configured on the `Cloner`.
-    pub auth: Option<GitAuthenticator>,
+    pub auth: Option<AuthenticatorOptions>,
 }
 
 /// A configurable clone entry point, mirroring the ergonomics of `git clone`.
@@ -231,14 +231,14 @@ pub struct CloneOptions {
 /// derived from `url`, exactly like `git clone <url>`.
 #[napi]
 pub struct Cloner {
-    auth: Option<GitAuthenticator>,
+    auth: Option<AuthenticatorOptions>,
 }
 
 #[napi]
 impl Cloner {
     /// Create a `Cloner`. `auth` is applied to every clone unless overridden per call.
     #[napi(constructor)]
-    pub fn new(auth: Option<GitAuthenticator>) -> Self {
+    pub fn new(auth: Option<AuthenticatorOptions>) -> Self {
         Self { auth }
     }
 
@@ -266,19 +266,13 @@ impl Cloner {
                 "destination already exists: {destination}"
             )));
         }
-        let auth = options.auth.clone().or_else(|| self.auth.clone());
-        let tsfn = match options.progress {
-            Some(f) => {
-                let builder = f.build_threadsafe_function::<ProgressEvent>();
-                Some(Arc::new(builder.callee_handled().build()?))
-            }
-            None => None,
-        };
+        let auth_opts = options.auth.clone().or_else(|| self.auth.clone());
+        let auth = auth_opts.map(|a| GitAuthenticator::new(Some(a)));
         Ok(AsyncTask::new(CloneTask {
             url,
             path: destination,
             bare: options.bare.unwrap_or(false),
-            progress: tsfn,
+            progress: None,
             auth,
         }))
     }

@@ -1,10 +1,9 @@
 use crate::error::RepositoryResult;
-use crate::error::RepositoryResult as Result;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::collections::HashMap;
 
-use gix::bstr::BStr;
+use gix::bstr::{BStr, ByteSlice};
 use gix::diff::tree_with_rewrites::Change;
 use gix::merge::blob::builtin_driver::text;
 use gix::merge::tree::{Resolution, ResolutionFailure, TreatAsUnresolved, apply_index_entries};
@@ -131,7 +130,6 @@ pub struct ConflictHunk {
 }
 
 /// A conflict encountered during a tree merge, including auto-resolved ones.
-#[derive(Clone)]
 #[napi(object)]
 pub struct MergeConflict {
     /// `true` if this conflict would need resolution before the merged tree is
@@ -172,6 +170,29 @@ pub struct MergeConflict {
     /// Conflict regions parsed from the merged blob's markers, for building a
     /// custom conflict UI. Empty when there is no content-merge marker output.
     pub hunks: Vec<ConflictHunk>,
+}
+
+impl Clone for MergeConflict {
+    fn clone(&self) -> Self {
+        Self {
+            unresolved: self.unresolved,
+            resolution: self.resolution.clone(),
+            final_location: self.final_location.clone(),
+            merged_mode: self.merged_mode.clone(),
+            merged_blob_id: self.merged_blob_id.clone(),
+            merged_blob_resolution: self.merged_blob_resolution.clone(),
+            renamed_unique_path: self.renamed_unique_path.clone(),
+            ours: self.ours.clone(),
+            theirs: self.theirs.clone(),
+            base_entry: self.base_entry.clone(),
+            our_entry: self.our_entry.clone(),
+            their_entry: self.their_entry.clone(),
+            base_content: self.base_content.as_ref().map(|b| Buffer::from(b.as_ref().to_vec())),
+            left_content: self.left_content.as_ref().map(|b| Buffer::from(b.as_ref().to_vec())),
+            right_content: self.right_content.as_ref().map(|b| Buffer::from(b.as_ref().to_vec())),
+            hunks: self.hunks.clone(),
+        }
+    }
 }
 
 /// The result of a merge operation.
@@ -524,7 +545,7 @@ pub(crate) fn merge_outcome_to_dto(
         .iter()
         .map(|c| conflict_to_dto(r, c, how))
         .collect();
-    let tree_obj_id = outcome.tree.write().map_err(|e| err(what, e))?;
+    let tree_obj_id = outcome.tree.write().map_err(|e| err(what, e))?.detach();
     let conflicted = outcome
         .conflicts
         .iter()
@@ -563,20 +584,18 @@ fn collect_tree_entries(
         tree: &gix::Tree,
     ) -> napi::Result<()> {
         for entry in tree.iter() {
-            let name = entry.filename().to_string_lossy().into_owned();
+            let entry = entry.map_err(|e| err("tree_entry", e))?;
+            let name = entry.filename().to_str_lossy().into_owned();
             let path = if prefix.is_empty() {
                 name
             } else {
                 format!("{}/{}", prefix, name)
             };
-            match entry.mode() {
-                gix::object::tree::EntryMode::Tree => {
-                    let sub = r.find_tree(entry.id()).map_err(|e| err("find_tree", e))?;
-                    recurse(r, map, &path, &sub)?;
-                }
-                _ => {
-                    map.insert(path, entry.id());
-                }
+            if entry.mode().is_tree() {
+                let sub = r.find_tree(entry.id()).map_err(|e| err("find_tree", e))?;
+                recurse(r, map, &path, &sub)?;
+            } else {
+                map.insert(path, entry.id().detach());
             }
         }
         Ok(())
@@ -647,9 +666,9 @@ fn parse_conflict_hunks(text: &str) -> Vec<ConflictHunk> {
     while i < lines.len() {
         let line = lines[i];
         if line.starts_with("<<<<<<<") {
-            let mut base = Vec::new();
-            let mut ours = Vec::new();
-            let mut theirs = Vec::new();
+            let mut base: Vec<String> = Vec::new();
+            let mut ours: Vec<String> = Vec::new();
+            let mut theirs: Vec<String> = Vec::new();
             let mut section = Section::Ours;
             let mut depth = 1;
             i += 1;
@@ -658,23 +677,23 @@ fn parse_conflict_hunks(text: &str) -> Vec<ConflictHunk> {
                 if l.starts_with("<<<<<<<") {
                     depth += 1;
                     section = Section::Ours;
-                    ours.push(l);
+                    ours.push(l.to_string());
                 } else if l.starts_with(">>>>>>>") {
                     depth -= 1;
                     if depth == 0 {
                         i += 1;
                         break;
                     }
-                    theirs.push(l);
+                    theirs.push(l.to_string());
                 } else if l.starts_with("|||||||") {
                     section = Section::Base;
                 } else if l.starts_with("=======") {
                     section = Section::Theirs;
                 } else {
                     match section {
-                        Section::Base => base.push(l),
-                        Section::Ours => ours.push(l),
-                        Section::Theirs => theirs.push(l),
+                        Section::Base => base.push(l.to_string()),
+                        Section::Ours => ours.push(l.to_string()),
+                        Section::Theirs => theirs.push(l.to_string()),
                     }
                 }
                 i += 1;
@@ -710,7 +729,7 @@ impl Repository {
         let ids: Vec<gix::ObjectId> = commits
             .iter()
             .map(|c| parse_oid(c))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let base = r
             .merge_base_octopus(ids)
             .map_err(|e| err("merge_base_octopus", e))?;
@@ -739,7 +758,7 @@ impl Repository {
         let others_ids: Vec<gix::ObjectId> = others
             .iter()
             .map(|o| parse_oid(o))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let bases = r
             .merge_bases_many(one_id, &others_ids)
             .map_err(|e| err("merge_bases_many", e))?;
@@ -758,7 +777,7 @@ impl Repository {
         let others_ids: Vec<gix::ObjectId> = others
             .iter()
             .map(|o| parse_oid(o))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let cache = r
             .commit_graph_if_enabled()
             .map_err(|e| err("commit_graph_if_enabled", e))?;
@@ -779,7 +798,7 @@ impl Repository {
         let ids: Vec<gix::ObjectId> = commits
             .iter()
             .map(|c| parse_oid(c))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let cache = r
             .commit_graph_if_enabled()
             .map_err(|e| err("commit_graph_if_enabled", e))?;
@@ -833,7 +852,7 @@ impl Repository {
         let ids: Vec<gix::ObjectId> = merge_bases
             .iter()
             .map(|b| parse_oid(b))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let options = r
             .tree_merge_options()
             .map_err(|e| err("tree_merge_options", e))?;
@@ -861,7 +880,7 @@ impl Repository {
         let ids: Vec<gix::ObjectId> = merge_bases
             .iter()
             .map(|b| parse_oid(b))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let options = r
             .tree_merge_options()
             .map_err(|e| err("tree_merge_options", e))?;
@@ -925,7 +944,7 @@ impl Repository {
             .merge_commits(ours, theirs, owned.borrowed(), commit_options)
             .map_err(|e| err("merge_commits", e))?;
         let base_tree = match r.merge_base(ours, theirs) {
-            Ok(Some(id)) => r.find_commit(id).ok().map(|c| c.tree_id().to_owned()),
+            Ok(Some(id)) => r.find_commit(id).ok().and_then(|c| c.tree_id().ok().map(|t| t.detach())),
             _ => None,
         };
         merge_outcome_to_dto(

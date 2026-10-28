@@ -76,7 +76,7 @@ impl RefPrefixes {
                     .map_err(|e| err("refspec.parse", e))
                     .map(|r| r.to_owned())
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
 
         let mut seen = HashSet::new();
         let mut raw = Vec::new();

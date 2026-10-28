@@ -9,7 +9,7 @@ use gix::refs::TargetRef;
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::identity::{Signature, signature_from_dto, to_signature};
 use crate::reference::{Reference, build_reference};
-use crate::reflog::ReflogEntry;
+use crate::reflog::{ReflogEntry, read_reflog};
 use crate::repository::Repository;
 
 /// Maximum symbolic-reference nesting depth that [`RefStore::resolve`] will
@@ -482,33 +482,7 @@ impl RefStore {
     /// has no reflog (including when the ref does not exist).
     #[napi]
     pub fn reflog_read(&self, ref_name: String) -> napi::Result<Vec<ReflogEntry>> {
-        let r = thread_local(&self.repo);
-        let full_name =
-            gix::refs::FullName::try_from(ref_name.as_str()).map_err(|e| err("reflog_read", e))?;
-        let mut platform = gix::refs::file::log::iter::Platform {
-            store: &r.refs,
-            name: full_name.as_ref(),
-            buf: Vec::new(),
-        };
-        let mut out = Vec::new();
-        if let Some(iter) = platform.all().map_err(|e| err("reflog_read", e))? {
-            for line in iter {
-                let line = line.map_err(|e| err("reflog line", e))?;
-                let t = line.signature.time().map_err(|e| err("reflog time", e))?;
-                out.push(ReflogEntry {
-                    previous_oid: line.previous_oid.to_string(),
-                    new_oid: line.new_oid.to_string(),
-                    signature: to_signature(
-                        &line.signature.name,
-                        &line.signature.email,
-                        t.seconds,
-                        t.offset,
-                    ),
-                    message: lossy(&line.message),
-                });
-            }
-        }
-        Ok(out)
+        read_reflog(&self.repo, &ref_name, None)
     }
 
     /// Whether a reflog entry should be written when updating `refName`.

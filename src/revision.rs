@@ -179,7 +179,7 @@ impl Repository {
         let mut tip_ids = tips
             .iter()
             .map(|t| resolve(t))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let mut hidden: Vec<gix::ObjectId> = Vec::new();
         let mut reverse = false;
         let mut first_parent = false;

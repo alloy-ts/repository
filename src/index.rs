@@ -1,4 +1,5 @@
 use crate::error::RepositoryResult as Result;
+use gix::bstr::ByteSlice;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::collections::BTreeMap;
@@ -1234,7 +1235,7 @@ impl Repository {
             .map_err(|e| err("add_all", e))?;
         index
             .inner
-            .remove_entries(|_i, path, _e| !present.iter().any(|p| p.as_slice() == path.as_ref()));
+            .remove_entries(|_i, path, _e| !present.iter().any(|p| p.as_slice() == path.as_bytes()));
         index.inner.sort_entries();
         index.inner.remove_tree();
         Ok(())

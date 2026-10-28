@@ -5,6 +5,7 @@ use std::process::Command;
 use napi_derive::napi;
 
 /// A single plaintext credential entry keyed by domain (use `"*"` for a fallback).
+#[derive(Clone)]
 #[napi(object)]
 pub struct CredentialEntry {
     pub domain: String,
@@ -13,6 +14,7 @@ pub struct CredentialEntry {
 }
 
 /// A per-domain username to try when a URL omits one.
+#[derive(Clone)]
 #[napi(object)]
 pub struct UsernameEntry {
     pub domain: String,
@@ -20,6 +22,7 @@ pub struct UsernameEntry {
 }
 
 /// An SSH private key file with an optional passphrase.
+#[derive(Clone)]
 #[napi(object)]
 pub struct SshKeyEntry {
     pub path: String,
@@ -28,6 +31,7 @@ pub struct SshKeyEntry {
 
 /// JS-friendly configuration for a [`GitAuthenticator`]. All fields optional; omitted fields fall
 /// back to sensible headless defaults (interactive prompts off, SSH agent + default SSH keys on).
+#[derive(Clone)]
 #[napi(object)]
 pub struct AuthenticatorOptions {
     /// Domain (or `"*"`) → plaintext credentials.

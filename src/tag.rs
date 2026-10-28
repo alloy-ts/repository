@@ -726,7 +726,7 @@ impl Repository {
         let full_names = names
             .iter()
             .map(|n| to_tag_full_name(n))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<napi::Result<Vec<_>>>()?;
         let edits = full_names
             .iter()
             .map(|n| {
