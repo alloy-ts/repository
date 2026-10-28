@@ -18,6 +18,7 @@ use crate::repository::{IndexEntryInput, Repository};
 /// existed in the common ancestor, while the presence of stages 2/3 reflects
 /// which side touched it.
 #[napi(string_enum)]
+#[derive(Clone, Copy)]
 pub enum ConflictKind {
     /// Both sides modified the path (stages 1+2+3 present).
     BothModified,

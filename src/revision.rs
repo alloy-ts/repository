@@ -265,6 +265,34 @@ impl Repository {
         Ok(ids)
     }
 
+    /// Return the full reference name that `name` denotes using Git's DWIM lookup rules,
+    /// or `null` if no matching reference exists.
+    #[napi]
+    pub fn dwim_ref(&self, name: String) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let reference = r.try_find_reference(name.as_str()).map_err(|e| err("dwim_ref", e))?;
+        Ok(reference.map(|rf| String::from_utf8_lossy(rf.name().as_bstr()).into_owned()))
+    }
+
+    /// Return what was checked out before the `n`-th last checkout (`@{-n}`): a branch name or commit.
+    #[napi]
+    pub fn previous_checkout(&self, n: u32) -> napi::Result<Option<String>> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let entries = crate::reflog::read_reflog(&self.inner, "HEAD", Some(true))?;
+        let mut checkouts = Vec::new();
+        for entry in entries {
+            if let Some(rest) = entry.subject.strip_prefix("checkout: moving from ") {
+                if let Some((from, _)) = rest.split_once(" to ") {
+                    checkouts.push(from.to_string());
+                }
+            }
+        }
+        let skip = (n as usize) - 1;
+        Ok(checkouts.get(skip).cloned())
+    }
+
     /// Resolve a single revision specification (e.g. `HEAD~1`, `main`, `<sha>`)
     /// directly to an [`Object`], in one step. This is the object-returning
     /// counterpart of [`rev_parse_single`](Self::rev_parse_single) and avoids a

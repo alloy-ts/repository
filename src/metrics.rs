@@ -10,7 +10,7 @@ use crate::error::{RepositoryResult as Result, err};
 /// Status of a changed file, mirroring git's delta classification.
 #[derive(Copy, Clone)]
 #[napi(string_enum)]
-pub enum FileStatus {
+pub enum DeltaStatus {
     Added,
     Modified,
     Deleted,
@@ -23,7 +23,7 @@ pub enum FileStatus {
 #[napi(object)]
 pub struct FileChange {
     pub path: String,
-    pub status: FileStatus,
+    pub status: DeltaStatus,
     pub insertions: u32,
     pub deletions: u32,
 }
@@ -163,17 +163,17 @@ impl Metrics {
             for change in changes {
                 let (location, status, old_id, new_id) = match change {
                     ChangeDetached::Addition { location, id, .. } => {
-                        (location, FileStatus::Added, None, Some(id))
+                        (location, DeltaStatus::Added, None, Some(id))
                     }
                     ChangeDetached::Deletion { location, id, .. } => {
-                        (location, FileStatus::Deleted, Some(id), None)
+                        (location, DeltaStatus::Deleted, Some(id), None)
                     }
                     ChangeDetached::Modification {
                         location,
                         previous_id,
                         id,
                         ..
-                    } => (location, FileStatus::Modified, Some(previous_id), Some(id)),
+                    } => (location, DeltaStatus::Modified, Some(previous_id), Some(id)),
                     ChangeDetached::Rewrite {
                         location,
                         source_id,
@@ -183,9 +183,9 @@ impl Metrics {
                     } => (
                         location,
                         if copy {
-                            FileStatus::Copied
+                            DeltaStatus::Copied
                         } else {
-                            FileStatus::Renamed
+                            DeltaStatus::Renamed
                         },
                         Some(source_id),
                         Some(id),
@@ -260,7 +260,7 @@ impl Metrics {
     }
 
     #[napi]
-    pub fn file_statuses(&self) -> napi::Result<HashMap<String, FileStatus>> {
+    pub fn file_statuses(&self) -> napi::Result<HashMap<String, DeltaStatus>> {
         Ok(get_file_statuses(&self.inner))
     }
 
@@ -303,8 +303,8 @@ impl Metrics {
         let mut entries: Vec<CouplingEntry> = coupling
             .into_iter()
             .filter(|((a, b), p)| {
-                !matches!(file_statuses.get(a), Some(FileStatus::Deleted))
-                    && !matches!(file_statuses.get(b), Some(FileStatus::Deleted))
+                !matches!(file_statuses.get(a), Some(DeltaStatus::Deleted))
+                    && !matches!(file_statuses.get(b), Some(DeltaStatus::Deleted))
                     && *p > min_coupling_percent / 100.0
             })
             .map(|((file_a, file_b), percent)| CouplingEntry {
@@ -430,7 +430,7 @@ fn combinations2<T: Clone>(items: &[T]) -> Vec<(T, T)> {
 pub fn get_summary(commits: &[CommitInfo]) -> SummaryStats {
     let files = get_file_statuses(commits)
         .iter()
-        .filter(|(_, s)| !matches!(s, FileStatus::Deleted))
+        .filter(|(_, s)| !matches!(s, DeltaStatus::Deleted))
         .count();
     let file_changes: u32 = commits.iter().map(|p| p.file_changes.len() as u32).sum();
     let authors = get_user_last_active(commits).len();
@@ -472,8 +472,8 @@ pub fn get_owner_summary(commits: &[CommitInfo]) -> HashMap<String, OwnerStats> 
         .collect()
 }
 
-pub fn get_file_statuses(commits: &[CommitInfo]) -> HashMap<String, FileStatus> {
-    let mut out: HashMap<String, FileStatus> = HashMap::new();
+pub fn get_file_statuses(commits: &[CommitInfo]) -> HashMap<String, DeltaStatus> {
+    let mut out: HashMap<String, DeltaStatus> = HashMap::new();
     for commit in commits {
         for f in &commit.file_changes {
             out.entry(f.path.clone()).or_insert(f.status);
@@ -599,7 +599,7 @@ pub fn filter_deleted<V>(files: HashMap<String, V>, commits: &[CommitInfo]) -> H
     let file_statuses = get_file_statuses(commits);
     files
         .into_iter()
-        .filter(|(p, _)| !matches!(file_statuses.get(p), Some(FileStatus::Deleted)))
+        .filter(|(p, _)| !matches!(file_statuses.get(p), Some(DeltaStatus::Deleted)))
         .collect()
 }
 

@@ -283,6 +283,7 @@ impl Task for PullTask {
                     message: Some(format!("pull: auto-stash before integrating {branch}")),
                     flags: None,
                     pathspecs: None,
+                    author: None,
                 })?
             } else {
                 None
@@ -341,7 +342,7 @@ impl Task for PullTask {
             // Restore the auto-stash, unless conflicts were left in the working tree
             // (the caller must resolve them, then pop the stash themselves, like git).
             if stash_id.is_some() && !skip_stash_pop {
-                repo.pop_stash(0)?;
+                repo.pop_stash(0, None)?;
             }
         }
 

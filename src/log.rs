@@ -103,6 +103,67 @@ pub struct GraphRow {
     pub is_merge: bool,
 }
 
+/// Interactive graph layout renderer.
+#[napi]
+#[derive(Default)]
+pub struct LogGraph {
+    lanes: Vec<Option<String>>,
+}
+
+#[napi]
+impl LogGraph {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Lays out the next commit and its parents into a graph row.
+    #[napi]
+    pub fn push(&mut self, commit: String, parents: Vec<String>) -> GraphRow {
+        let col = if let Some(l) = self.lanes.iter().position(|o| o.as_deref() == Some(&commit)) {
+            l as u32
+        } else if let Some(l) = self.lanes.iter().position(|o| o.is_none()) {
+            l as u32
+        } else {
+            self.lanes.push(Some(commit.clone()));
+            (self.lanes.len() - 1) as u32
+        };
+        for (i, o) in self.lanes.iter_mut().enumerate() {
+            if i != col as usize && o.as_deref() == Some(&commit) {
+                *o = None;
+            }
+        }
+        if (col as usize) >= self.lanes.len() {
+            self.lanes.push(None);
+        }
+        self.lanes[col as usize] = Some(commit.clone());
+        let mut pcols = Vec::with_capacity(parents.len());
+        for (i, p) in parents.iter().enumerate() {
+            if i == 0 {
+                self.lanes[col as usize] = Some(p.clone());
+                pcols.push(col);
+            } else if let Some(l) = self.lanes.iter().position(|o| o.is_none()) {
+                self.lanes[l] = Some(p.clone());
+                pcols.push((l) as u32);
+            } else {
+                self.lanes.push(Some(p.clone()));
+                pcols.push((self.lanes.len() - 1) as u32);
+            }
+        }
+        if parents.is_empty() {
+            self.lanes[col as usize] = None;
+        }
+        let is_merge = parents.len() > 1;
+        GraphRow {
+            commit,
+            column: col,
+            parent_columns: pcols,
+            parents,
+            is_merge,
+        }
+    }
+}
+
 /// Parse a date filter value: Unix timestamp, RFC 3339, or `YYYY-MM-DD` (midnight UTC).
 fn parse_date(s: &str) -> Option<i64> {
     let s = s.trim();
@@ -171,7 +232,7 @@ fn commit_touches_paths(
             .diff_tree_to_tree(pt, Some(commit_tree), None)
             .map_err(|e| err("diff_tree_to_tree", e))?;
         for change in changes {
-            if path_matches(change.location, paths) {
+            if path_matches(change.location(), paths) {
                 return Ok(true);
             }
         }
@@ -322,24 +383,24 @@ fn assign_columns(items: &[&GraphItem]) -> Vec<(u32, Vec<u32>)> {
     let mut out: Vec<(u32, Vec<u32>)> = Vec::with_capacity(items.len());
     for (_c, parents, oid) in items {
         // Continue the lane already owned by this commit (handed down by one of its children).
-        let col = if let Some(l) = lanes.iter().position(|o| *o == Some(**oid)) {
+        let col = if let Some(l) = lanes.iter().position(|o| *o == Some(*oid)) {
             l as u32
         } else if let Some(l) = lanes.iter().position(|o| o.is_none()) {
             l as u32
         } else {
-            lanes.push(Some(**oid));
+            lanes.push(Some(*oid));
             (lanes.len() - 1) as u32
         };
         // Free any other lanes that were owned by this commit (e.g. a merge's side lanes).
         for (i, o) in lanes.iter_mut().enumerate() {
-            if i != col as usize && *o == Some(**oid) {
+            if i != col as usize && *o == Some(*oid) {
                 *o = None;
             }
         }
         if (col as usize) >= lanes.len() {
             lanes.push(None);
         }
-        lanes[col as usize] = Some(**oid);
+        lanes[col as usize] = Some(*oid);
         let mut pcols = Vec::with_capacity(parents.len());
         for (i, p) in parents.iter().enumerate() {
             if i == 0 {
@@ -506,7 +567,7 @@ impl Repository {
                 let kept: Vec<(String, u32)> = parents
                     .iter()
                     .zip(pcols.iter())
-                    .filter(|(p, _)| present.contains(p))
+                    .filter(|(p, _)| present.contains(*p))
                     .map(|(p, pc)| (p.to_string(), *pc))
                     .collect();
                 GraphRow {

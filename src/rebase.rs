@@ -12,7 +12,7 @@ use crate::identity::Signature;
 use crate::merge::{
     MergeOptions, MergeOutcome, build_tree_options, merge_outcome_to_dto, owned_labels,
 };
-use crate::repository::{Repository, lossy};
+use crate::repository::{Repository, find_git, lossy};
 
 /// Options controlling an in-memory rebase.
 #[napi(object)]
@@ -440,6 +440,107 @@ impl Rebase {
 
 #[napi]
 impl Repository {
+    /// Returns `true` when a rebase is in progress.
+    #[napi]
+    pub fn is_rebasing(&self) -> bool {
+        let r = thread_local(&self.inner);
+        let git_dir = r.git_dir();
+        git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
+    }
+
+    /// Get the planned list of rebase operations for `upstream`.
+    #[napi]
+    pub fn rebase_plan(&self, upstream: String) -> napi::Result<Vec<RebaseOperation>> {
+        let what = "rebase_plan";
+        let r = thread_local(&self.inner);
+        let plan = plan_rebase(&r, what, None, Some(upstream.as_str()), None)?;
+        Ok(plan.ops.into_iter().map(operation_dto).collect())
+    }
+
+    /// Abort an in-progress disk-based or state rebase.
+    #[napi]
+    pub fn rebase_abort(&self) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let git_dir = r.git_dir();
+        let merge_dir = git_dir.join("rebase-merge");
+        let apply_dir = git_dir.join("rebase-apply");
+
+        let mut orig_head = None;
+        let mut head_name = None;
+
+        if merge_dir.is_dir() {
+            if let Ok(c) = std::fs::read_to_string(merge_dir.join("orig-head")) {
+                let trimmed = c.trim();
+                if !trimmed.is_empty() {
+                    orig_head = parse_oid(trimmed).ok();
+                }
+            }
+            if let Ok(c) = std::fs::read_to_string(merge_dir.join("head-name")) {
+                let trimmed = c.trim();
+                if !trimmed.is_empty() && trimmed != "detached HEAD" {
+                    head_name = Some(trimmed.to_string());
+                }
+            }
+        } else if apply_dir.is_dir() {
+            if let Ok(c) = std::fs::read_to_string(apply_dir.join("orig-head")) {
+                let trimmed = c.trim();
+                if !trimmed.is_empty() {
+                    orig_head = parse_oid(trimmed).ok();
+                }
+            }
+            if let Ok(c) = std::fs::read_to_string(apply_dir.join("head-name")) {
+                let trimmed = c.trim();
+                if !trimmed.is_empty() && trimmed != "detached HEAD" {
+                    head_name = Some(trimmed.to_string());
+                }
+            }
+        }
+
+        if let Some(target) = orig_head {
+            // Restore HEAD / branch ref
+            let label = "rebase (abort)";
+            if let Some(refname) = head_name {
+                let _ = r.reference(refname.as_str(), target, PreviousValue::Any, label);
+                let edit = gix::refs::transaction::RefEdit {
+                    change: gix::refs::transaction::Change::Update {
+                        log: gix::refs::transaction::LogChange {
+                            mode: gix::refs::transaction::RefLog::AndReference,
+                            force_create_reflog: false,
+                            message: label.into(),
+                        },
+                        expected: PreviousValue::Any,
+                        new: gix::refs::Target::Symbolic(gix::refs::FullName::try_from(refname.as_str()).unwrap()),
+                    },
+                    name: "HEAD".try_into().unwrap(),
+                    deref: false,
+                };
+                let _ = r.edit_reference(edit);
+            } else {
+                let _ = r.reference("HEAD", target, PreviousValue::Any, label);
+            }
+
+            // Reset working tree & index using system git reset --hard
+            if let Some(git) = find_git() {
+                let mut cmd = std::process::Command::new(git);
+                cmd.arg("reset").arg("--hard").arg(target.to_string());
+                if let Some(wd) = r.workdir() {
+                    cmd.current_dir(wd);
+                }
+                let _ = cmd.output();
+            }
+        }
+
+        if merge_dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&merge_dir);
+        }
+        if apply_dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&apply_dir);
+        }
+        let _ = std::fs::remove_file(git_dir.join("REBASE_HEAD"));
+        let _ = std::fs::remove_file(git_dir.join("MERGE_MSG"));
+        Ok(())
+    }
+
     /// Start an in-memory rebase session: plan the commits to replay and
     /// return a step-driven `Rebase` handle.
     ///

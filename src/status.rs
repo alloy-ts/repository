@@ -68,6 +68,13 @@ pub struct RewritesOptions {
     pub copies: Option<bool>,
 }
 
+fn opt_str_or_null(s: Option<String>) -> Either<String, napi::bindgen_prelude::Null> {
+    match s {
+        Some(val) => Either::A(val),
+        None => Either::B(napi::bindgen_prelude::Null),
+    }
+}
+
 /// A single status entry, one per changed path, merging the staged
 /// (HEAD→index) and unstaged (index→worktree) sides.
 #[derive(Clone)]
@@ -76,11 +83,11 @@ pub struct StatusEntry {
     /// Current location of the entry (the rename destination, if renamed).
     pub path: String,
     /// Rename/copy source path, or `null`.
-    pub old_path: Option<String>,
+    pub old_path: Either<String, napi::bindgen_prelude::Null>,
     /// HEAD→index ("staged") change, or `null` when the index matches HEAD.
-    pub index: Option<String>,
+    pub index: Either<String, napi::bindgen_prelude::Null>,
     /// Index→worktree ("unstaged") change, or `null` when the worktree matches the index.
-    pub worktree: Option<String>,
+    pub worktree: Either<String, napi::bindgen_prelude::Null>,
     /// Two-letter `git status --porcelain` code, e.g. `" M"`, `"M "`, `"AM"`, `"R "`, `"??"`, `"UU"`.
     pub porcelain: String,
     /// `true` when the entry is a collapsed untracked/ignored *directory*.
@@ -130,27 +137,7 @@ pub struct Status {
     pub entries: Vec<StatusEntry>,
 }
 
-/// The kind of an unresolved merge conflict, derived from the index stages
-/// present. Mirrors git's `DD`/`AU`/`UD`/`UA`/`DU`/`AA`/`UU` codes and
-/// `zerogit`'s `ConflictKind`. The two-letter code is also available on
-/// [`StatusEntry::porcelain`].
-#[napi(string_enum)]
-pub enum ConflictKind {
-    /// Both sides deleted the file (`DD`: stage 1 only).
-    BothDeleted,
-    /// Added on our side, modified on theirs (`AU`: stage 2 only).
-    AddedByUs,
-    /// Deleted by them, we modified (`UD`: stages 1 and 2).
-    DeletedByThem,
-    /// Added by them, we modified (`UA`: stage 3 only).
-    AddedByThem,
-    /// Deleted by us, they modified (`DU`: stages 1 and 3).
-    DeletedByUs,
-    /// Added on both sides in different states (`AA`: stages 2 and 3).
-    BothAdded,
-    /// Modified on both sides (`UU`: stages 1, 2 and 3).
-    BothModified,
-}
+pub use crate::conflict::ConflictKind;
 
 impl ConflictKind {
     /// The two-letter porcelain code for this conflict.
@@ -170,6 +157,7 @@ impl ConflictKind {
 /// The kind of a filesystem object as stored in a tree or the index.
 /// Exposed on [`StatusEntry`]'s `headMode`/`indexMode`/`worktreeMode`.
 #[napi(string_enum)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileMode {
     /// A non-executable file (`100644`).
     Regular,
@@ -201,6 +189,7 @@ impl FileMode {
 /// `FileStatus`). Use this when you don't need the two-sided detail that
 /// [`StatusEntry::index`] / [`StatusEntry::worktree`] provide.
 #[napi(string_enum)]
+#[derive(Clone, Copy)]
 pub enum FileStatus {
     /// New file not tracked by Git.
     Untracked,
@@ -455,8 +444,8 @@ struct Half {
     directory: bool,
 }
 
-fn mode_kind(mode: gix::index::entry::Mode) -> Option<gix::objs::tree::EntryKind> {
-    mode.to_tree_entry_mode().map(|m| m.kind())
+fn mode_kind(mode: gix::index::entry::Mode) -> Option<FileMode> {
+    mode.to_tree_entry_mode().and_then(|m| FileMode::from_kind(m.kind()))
 }
 
 /// Map a HEAD→index change into a `Half`.
@@ -466,12 +455,12 @@ fn half_from_tree_index(change: TreeIndexChange) -> Option<Half> {
             location,
             entry_mode,
             ..
-        } => (location, None, Kind::Added, None, mode_kind(entry_mode)),
+        } => (location.into_owned(), None, Kind::Added, None, mode_kind(entry_mode)),
         TreeIndexChange::Deletion {
             location,
             entry_mode,
             ..
-        } => (location, None, Kind::Deleted, mode_kind(entry_mode), None),
+        } => (location.into_owned(), None, Kind::Deleted, mode_kind(entry_mode), None),
         TreeIndexChange::Modification {
             location,
             previous_entry_mode,
@@ -484,7 +473,7 @@ fn half_from_tree_index(change: TreeIndexChange) -> Option<Half> {
                 Kind::Modified
             };
             (
-                location,
+                location.into_owned(),
                 None,
                 kind,
                 mode_kind(previous_entry_mode),
@@ -498,16 +487,16 @@ fn half_from_tree_index(change: TreeIndexChange) -> Option<Half> {
             copy,
             ..
         } => (
-            location,
-            Some(source_location),
+            location.into_owned(),
+            Some(source_location.into_owned()),
             if copy { Kind::Copied } else { Kind::Renamed },
             None,
             mode_kind(entry_mode),
         ),
     };
     Some(Half {
-        path: path.into_owned(),
-        old_path: old_path.map(|p| p.into_owned()),
+        path,
+        old_path,
         index: Some(kind),
         worktree: None,
         conflict: None,
@@ -658,7 +647,7 @@ fn merge(map: &mut BTreeMap<BString, Half>, half: Half) {
         }
         entry.index = Some(k);
     }
-    if half.worktree == Some(Kind::IntentToAdd) {
+    if half.worktree == Some(Kind::IntentToAdd) && entry.worktree != Some(Kind::Modified) {
         // git status --porcelain shows intent-to-add as " A" with no staged side.
         entry.index = None;
     }
@@ -753,11 +742,16 @@ impl StatusTask {
             platform = platform.index_worktree_submodules(None);
         }
         if let Some(spec) = &self.cfg.head {
-            let oid: gix::ObjectId = r
+            let obj = r
                 .rev_parse_single(spec.as_str())
-                .map_err(|e| err("rev_parse_single", e))?
-                .into();
-            platform = platform.head_tree(oid);
+                .map_err(|e| err("rev_parse_single", e))?;
+            let object = obj
+                .object()
+                .map_err(|e| err("rev_parse_single object", e))?;
+            let tree = object
+                .peel_to_kind(gix::object::Kind::Tree)
+                .map_err(|e| err("peel_to_kind tree", e))?;
+            platform = platform.head_tree(tree.id);
         }
         if let Some(renames) = self.cfg.h2i_renames {
             platform = platform.tree_index_track_renames(renames);
@@ -791,9 +785,9 @@ impl StatusTask {
             )
             .map(|h| StatusEntry {
                 path: lossy(&h.path),
-                old_path: h.old_path.as_deref().map(|p| lossy(p)),
-                index: h.index.map(|k| k.as_str().to_string()),
-                worktree: h.worktree.map(|k| k.as_str().to_string()),
+                old_path: opt_str_or_null(h.old_path.as_deref().map(|p| lossy(p))),
+                index: opt_str_or_null(h.index.map(|k| k.as_str().to_string())),
+                worktree: opt_str_or_null(h.worktree.map(|k| k.as_str().to_string())),
                 porcelain: porcelain(&h),
                 directory: h.directory,
                 conflict: h.conflict.is_some(),
@@ -807,11 +801,8 @@ impl StatusTask {
     }
 }
 
-impl Task for StatusTask {
-    type Output = Status;
-    type JsValue = Status;
-
-    fn compute(&mut self) -> napi::Result<Status> {
+impl StatusTask {
+    fn compute_status(&self) -> napi::Result<Status> {
         let r = thread_local(&self.repo);
         let platform = r
             .status(gix::progress::Discard)
@@ -872,8 +863,76 @@ impl Task for StatusTask {
             entries,
         })
     }
+}
+
+impl Task for StatusTask {
+    type Output = Status;
+    type JsValue = Status;
+
+    fn compute(&mut self) -> napi::Result<Status> {
+        self.compute_status()
+    }
 
     fn resolve(&mut self, _env: napi::Env, output: Status) -> napi::Result<Status> {
+        Ok(output)
+    }
+}
+
+pub struct StatusEntriesTask {
+    repo: Arc<gix::ThreadSafeRepository>,
+    opts: Option<StatusOptions>,
+    show_override: Option<Show>,
+}
+
+impl Task for StatusEntriesTask {
+    type Output = Vec<StatusEntry>;
+    type JsValue = Vec<StatusEntry>;
+
+    fn compute(&mut self) -> napi::Result<Vec<StatusEntry>> {
+        let mut cfg = match &self.opts {
+            Some(o) => parse_options(o)?,
+            None => StatusCfg::default(),
+        };
+        if let Some(s) = self.show_override {
+            cfg.show = s;
+        }
+        let task = StatusTask {
+            repo: Arc::clone(&self.repo),
+            cfg,
+        };
+        let status = task.compute_status()?;
+        Ok(status.entries)
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Vec<StatusEntry>) -> napi::Result<Vec<StatusEntry>> {
+        Ok(output)
+    }
+}
+
+pub struct StatusFileTask {
+    repo: Arc<gix::ThreadSafeRepository>,
+    path: String,
+}
+
+impl Task for StatusFileTask {
+    type Output = Option<StatusEntry>;
+    type JsValue = Option<StatusEntry>;
+
+    fn compute(&mut self) -> napi::Result<Option<StatusEntry>> {
+        let cfg = StatusCfg {
+            pathspec: vec![format!(":(literal){}", self.path).into()],
+            pick: Some(self.path.clone().into_bytes().into()),
+            ..StatusCfg::default()
+        };
+        let task = StatusTask {
+            repo: Arc::clone(&self.repo),
+            cfg,
+        };
+        let status = task.compute_status()?;
+        Ok(status.entries.into_iter().next())
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Option<StatusEntry>) -> napi::Result<Option<StatusEntry>> {
         Ok(output)
     }
 }
@@ -997,12 +1056,26 @@ impl Task for IsDirtyTask {
 
 #[napi]
 impl Repository {
-    /// Compute the full working tree status asynchronously. Returns a [`Status`]
-    /// whose `entries` holds one element per changed path with the staged
-    /// (`index`) and unstaged (`worktree`) sides merged, plus the branch,
-    /// upstream tracking info and ahead/behind counts.
+    /// Compute working tree status entries asynchronously. Returns an array of [`StatusEntry`]
+    /// elements, one per changed path.
+    #[napi(ts_return_type = "Promise<StatusEntry[]>")]
+    pub fn status(
+        &self,
+        options: Option<StatusOptions>,
+    ) -> napi::Result<AsyncTask<StatusEntriesTask>> {
+        Ok(AsyncTask::new(StatusEntriesTask {
+            repo: Arc::clone(&self.inner),
+            opts: options,
+            show_override: None,
+        }))
+    }
+
+    /// Compute the full working tree status asynchronously with branch and tracking header info.
     #[napi(ts_return_type = "Promise<Status>")]
-    pub fn status(&self, options: Option<StatusOptions>) -> napi::Result<AsyncTask<StatusTask>> {
+    pub fn status_detailed(
+        &self,
+        options: Option<StatusOptions>,
+    ) -> napi::Result<AsyncTask<StatusTask>> {
         let cfg = match &options {
             Some(o) => parse_options(o)?,
             None => StatusCfg::default(),
@@ -1013,21 +1086,17 @@ impl Repository {
         }))
     }
 
-    /// Compute the index↔worktree status asynchronously (never touches HEAD;
-    /// the returned [`Status`] entries always have `index == null`).
-    #[napi(ts_return_type = "Promise<Status>")]
+    /// Compute the index↔worktree status entries asynchronously (never touches HEAD;
+    /// returned entries always have `index == null`).
+    #[napi(ts_return_type = "Promise<StatusEntry[]>")]
     pub fn index_worktree(
         &self,
         options: Option<StatusOptions>,
-    ) -> napi::Result<AsyncTask<StatusTask>> {
-        let mut cfg = match &options {
-            Some(o) => parse_options(o)?,
-            None => StatusCfg::default(),
-        };
-        cfg.show = Show::Worktree;
-        Ok(AsyncTask::new(StatusTask {
+    ) -> napi::Result<AsyncTask<StatusEntriesTask>> {
+        Ok(AsyncTask::new(StatusEntriesTask {
             repo: Arc::clone(&self.inner),
-            cfg,
+            opts: options,
+            show_override: Some(Show::Worktree),
         }))
     }
 
@@ -1040,24 +1109,18 @@ impl Repository {
         }))
     }
 
-    /// Compute the status of a single path asynchronously, returning a [`Status`]
-    /// whose `entries` contains at most one entry (empty when the path is clean
-    /// or unknown to git).
-    #[napi(ts_return_type = "Promise<Status>")]
-    pub fn status_file(&self, path: String) -> napi::Result<AsyncTask<StatusTask>> {
-        let mut cfg = StatusCfg {
-            pathspec: vec![format!(":(literal){path}").into()],
-            pick: Some(path.clone().into_bytes().into()),
-            ..StatusCfg::default()
-        };
-        cfg.show = Show::All;
-        Ok(AsyncTask::new(StatusTask {
+    /// Compute the status of a single path asynchronously, returning the [`StatusEntry`]
+    /// or `null` when clean/unknown.
+    #[napi(ts_return_type = "Promise<StatusEntry | null>")]
+    pub fn status_file(&self, path: String) -> napi::Result<AsyncTask<StatusFileTask>> {
+        Ok(AsyncTask::new(StatusFileTask {
             repo: Arc::clone(&self.inner),
-            cfg,
+            path,
         }))
     }
 
     /// Check synchronously whether a path is excluded by `.gitignore` rules.
+    #[napi]
     pub fn should_ignore(&self, path: String) -> napi::Result<bool> {
         let r = thread_local(&self.inner);
         let index = r.index_or_empty().map_err(|e| err("index", e))?;

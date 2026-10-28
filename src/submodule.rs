@@ -579,7 +579,7 @@ impl Submodule {
             ));
         };
         let head = sub_repo.head_id().map_err(|e| err("head_id", e))?;
-        let path = lossy(sm.path().map_err(|e| err("submodule_path", e))?);
+        let path = lossy(&sm.path().map_err(|e| err("submodule_path", e))?);
         let repo = Repository {
             inner: self.repo.clone(),
         };
@@ -643,7 +643,7 @@ impl Submodule {
         let workdir = r
             .workdir()
             .ok_or_else(|| napi::Error::from_reason("bare repository has no worktree"))?;
-        let path = lossy(sm.path().map_err(|e| err("submodule_path", e))?);
+        let path = lossy(&sm.path().map_err(|e| err("submodule_path", e))?);
         let url = sm.url().map_err(|e| err("submodule_url", e))?.to_string();
         let sub_workdir = workdir.join(&path);
         let modules_gitdir = r.git_dir().join("modules").join(&self.name);
@@ -677,7 +677,7 @@ impl Submodule {
     pub fn update(&self, options: Option<SubmoduleUpdateOptions>) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         let sm = Self::resolve(&r, &self.name)?;
-        let path = lossy(sm.path().map_err(|e| err("submodule_path", e))?);
+        let path = lossy(&sm.path().map_err(|e| err("submodule_path", e))?);
         let init = options.and_then(|o| o.init).unwrap_or(false);
         let mut args: Vec<&str> = vec!["submodule", "update", "--force", path.as_str()];
         if init {
@@ -701,7 +701,7 @@ impl Submodule {
         let workdir = r
             .workdir()
             .ok_or_else(|| napi::Error::from_reason("bare repository has no worktree"))?;
-        let path = lossy(sm.path().map_err(|e| err("submodule_path", e))?);
+        let path = lossy(&sm.path().map_err(|e| err("submodule_path", e))?);
         let sub_workdir = workdir.join(&path);
 
         if use_gitlink {
