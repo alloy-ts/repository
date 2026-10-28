@@ -286,4 +286,20 @@ impl Repository {
             auth: opts.auth,
         }))
     }
+
+    /// Convenience helper to fetch a specific refspec from a remote.
+    #[napi]
+    pub fn fetch_refspec(
+        &self,
+        remote_name: String,
+        refspec: String,
+        options: Option<RemoteFetchOptions>,
+        progress: Option<Function<ProgressEvent, ()>>,
+    ) -> napi::Result<AsyncTask<FetchTask>> {
+        let mut opts = options.unwrap_or_default();
+        let mut refspecs = opts.refspecs.unwrap_or_default();
+        refspecs.push(refspec);
+        opts.refspecs = Some(refspecs);
+        self.fetch(Some(remote_name), Some(opts), progress)
+    }
 }

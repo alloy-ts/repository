@@ -153,6 +153,55 @@ impl Repository {
         )
     }
 
+    /// Cherry-pick `sha` commit onto HEAD and return the resulting index.
+    ///
+    /// Applies `parent..sha` onto HEAD (opposite of revert).
+    #[napi(js_name = "cherryPick")]
+    pub fn cherry_pick(&self, sha: String, options: Option<RevertOptions>) -> napi::Result<Index> {
+        let r = thread_local(&self.inner);
+        let head_id = resolve_ours(&r, None)?;
+        let commit_oid = parse_oid(&sha)?;
+        let commit = r.find_commit(commit_oid).map_err(|e| err("find_commit", e))?;
+
+        let mainline = options.as_ref().and_then(|o| o.mainline).unwrap_or(0);
+        let parents: Vec<gix::ObjectId> = commit.parent_ids().map(|p| p.detach()).collect();
+        let parent_oid = if mainline == 0 {
+            *parents
+                .first()
+                .ok_or_else(|| err_str("cherry_pick", "cannot cherry-pick a commit without parents"))?
+        } else {
+            *parents.get((mainline - 1) as usize).ok_or_else(|| {
+                err_str("cherry_pick", "mainline is out of range for this commit's parents")
+            })?
+        };
+
+        let head_tree = r
+            .find_commit(parse_oid(&head_id)?)
+            .map_err(|e| err("find_commit", e))?
+            .tree()
+            .map_err(|e| err("commit_tree", e))?
+            .id;
+        let ancestor_tree = r
+            .find_commit(parent_oid)
+            .map_err(|e| err("find_commit", e))?
+            .tree()
+            .map_err(|e| err("commit_tree", e))?
+            .id;
+        let their_tree = commit.tree().map_err(|e| err("commit_tree", e))?.id;
+
+        let merge_opts = options.as_ref().and_then(|o| o.merge.as_ref());
+        let owned = owned_labels(merge_opts);
+        let tree_options = build_tree_options("cherry_pick", merge_opts)?;
+        let mut outcome = r
+            .merge_trees(ancestor_tree, head_tree, their_tree, owned.borrowed(), tree_options)
+            .map_err(|e| err("cherry_pick_merge", e))?;
+        let tree_id = outcome.tree.write().map_err(|e| err("cherry_pick_tree_write", e))?;
+        let mut index = r.index_from_tree(&tree_id).map_err(|e| err("index_from_tree", e))?;
+        let how = TreatAsUnresolved::git();
+        outcome.index_changed_after_applying_conflicts(&mut index, how, apply_index_entries::RemovalMode::Prune);
+        Ok(Index { inner: index })
+    }
+
     /// Revert `commitId` onto HEAD and return the resulting index (git2's
     /// `Repository::revert`).
     ///

@@ -342,3 +342,37 @@ describe("Repository catFile (git cat-file port)", () => {
     expect((blob as Buffer).length).toBeGreaterThan(0);
   });
 });
+
+describe("Repository newly added trait-parity NAPI bindings", () => {
+  test("configSetLocal and configGetBool", () => {
+    repo.configSetLocal("test.traitbool", "true");
+    expect(repo.configGetBool("test.traitbool")).toBe(true);
+    expect(repo.configGetBool("test.nonexistent")).toBe(null);
+  });
+
+  test("refResolve, refList, and refUpdate", () => {
+    const head = repo.refResolve("HEAD");
+    expect(typeof head).toBe("string");
+    expect(head.length).toBe(40);
+
+    const refs = repo.refList("refs/heads/");
+    expect(Array.isArray(refs)).toBe(true);
+    expect(refs.length).toBeGreaterThan(0);
+    expect(refs[0].name.startsWith("refs/heads/")).toBe(true);
+
+    repo.refUpdate("refs/tags/vtest-trait", head);
+    expect(repo.refResolve("refs/tags/vtest-trait")).toBe(head);
+  });
+
+  test("aheadBehind", () => {
+    const head = repo.headId();
+    const counts = repo.aheadBehind(head);
+    expect(counts).toEqual([0, 0]);
+  });
+
+  test("cherryPick produces a staged index from a commit", () => {
+    const head = repo.headId();
+    const index = repo.cherryPick(head);
+    expect(typeof index.writeTree).toBe("function");
+  });
+});

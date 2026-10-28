@@ -816,6 +816,18 @@ impl Repository {
         }
     }
 
+    /// List remote refs matching an optional pattern or list of refspecs asynchronously.
+    #[napi(js_name = "listRemoteRefs", ts_return_type = "Promise<Array<RefInfo>>")]
+    pub fn list_remote_refs(
+        &self,
+        remote_name: Option<String>,
+        pattern: Option<String>,
+    ) -> napi::Result<AsyncTask<LsRefsTask>> {
+        let remote = self.find_fetch_remote(remote_name)?;
+        let refspecs = pattern.map(|p| vec![p]);
+        remote.ls_refs(refspecs, Some(RemoteDirection::Fetch), None)
+    }
+
     /// Find the remote to fetch from given an optional name/URL (emulates `git fetch <name>`).
     #[napi]
     pub fn find_fetch_remote(&self, name_or_url: Option<String>) -> napi::Result<Remote> {

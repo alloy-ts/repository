@@ -879,6 +879,18 @@ impl Repository {
             .map_err(|e| err("at_path", e))?;
         Ok(platform.is_excluded())
     }
+
+    /// Return `[ahead, behind]` commit counts between `HEAD` and `upstream` ref/revision.
+    #[napi(js_name = "aheadBehind")]
+    pub fn ahead_behind(&self, upstream: String) -> napi::Result<Vec<u32>> {
+        let r = thread_local(&self.inner);
+        let upstream_id = r
+            .rev_parse_single(upstream.as_str())
+            .map_err(|e| err("rev_parse_single", e))?
+            .detach();
+        let (ahead, behind) = ahead_behind(&r, upstream_id)?;
+        Ok(vec![ahead, behind])
+    }
 }
 
 // Keep unused-import lints quiet for types only referenced by feature-gated code.

@@ -272,6 +272,20 @@ impl Repository {
         Ok(())
     }
 
+    /// Set a git config value in the local config file specifically (`.git/config`).
+    #[napi]
+    pub fn config_set_local(&self, key: String, value: String) -> napi::Result<()> {
+        self.config_set(key, value)
+    }
+
+    /// Read a boolean configuration value. Returns `null` when absent/unset or if the key
+    /// is not a valid boolean.
+    #[napi]
+    pub fn config_get_bool(&self, key: String) -> Option<bool> {
+        let r = thread_local(&self.inner);
+        r.config_snapshot().boolean(key.as_str()).ok().flatten()
+    }
+
     /// Remove a configuration key from the repository's local config file. This mirrors
     /// `configSet()` but deletes the entry instead of writing it. After this call the
     /// in-memory repository configuration is stale — call `reload()` to pick up the change.

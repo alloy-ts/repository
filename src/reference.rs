@@ -1027,6 +1027,50 @@ impl Repository {
         Ok(out)
     }
 
+    /// Resolve a ref name or revision expression to its target SHA (full hex string).
+    #[napi]
+    pub fn ref_resolve(&self, name: String) -> napi::Result<String> {
+        self.rev_parse_single(name)
+    }
+
+    /// List refs in the repository as `RefInfo` objects (name and target hex SHA),
+    /// optionally restricted by prefix/pattern (e.g. `"refs/heads/"`).
+    #[napi]
+    pub fn ref_list(&self, pattern: Option<String>) -> napi::Result<Vec<RefInfo>> {
+        let r = thread_local(&self.inner);
+        let platform = r.references().map_err(|e| err("references", e))?;
+        let iter = match pattern {
+            Some(ref p) => platform.prefixed(p.as_str()).map_err(|e| err("ref_list", e))?,
+            None => platform.all().map_err(|e| err("ref_list", e))?,
+        };
+        let mut out = Vec::new();
+        for reference in iter {
+            let reference = reference.map_err(|e| err("reference", e))?;
+            let name = reference.name().as_bstr().to_string();
+            let target = match reference.target() {
+                gix::refs::TargetRef::Object(id) => id.to_string(),
+                gix::refs::TargetRef::Symbolic(s) => s.as_bstr().to_string(),
+            };
+            out.push(RefInfo { name, target });
+        }
+        Ok(out)
+    }
+
+    /// Create or update a reference named `name` to point to target (SHA or symbolic name).
+    #[napi]
+    pub fn ref_update(&self, name: String, target: String) -> napi::Result<()> {
+        let target_id = parse_oid(&target);
+        match target_id {
+            Ok(oid) => {
+                self.create_reference(name, oid, true)?;
+            }
+            Err(_) => {
+                self.create_symbolic_reference(name, target, true)?;
+            }
+        }
+        Ok(())
+    }
+
     /// All reference names in the repository, optionally restricted to those
     /// matching `prefix` (e.g. `refs/heads/`). Cheaper than `references` because
     /// the references are not materialised into objects (mirrors libgit2's
