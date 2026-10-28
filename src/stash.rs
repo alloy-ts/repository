@@ -48,6 +48,16 @@ pub struct StashSaveOptions {
     pub pathspecs: Option<Vec<String>>,
 }
 
+/// Outcome of a stash apply or pop operation.
+#[derive(Clone)]
+#[napi(object)]
+pub struct StashApplyOutcome {
+    /// `true` if the stash applied cleanly without conflicts.
+    pub applied: bool,
+    /// Conflicted file paths if the stash apply encountered conflicts.
+    pub conflicts: Option<Vec<String>>,
+}
+
 /// A single stash, as returned by [`Repository::listStashes`].
 #[napi(object)]
 pub struct StashEntry {
@@ -345,6 +355,49 @@ impl Repository {
             restore_index_from_tree(&repo, it)?;
         }
         Ok(())
+    }
+
+    /// Apply stash at `index`, returning a structured outcome indicating whether it applied or conflicted.
+    #[napi]
+    pub fn apply_stash_with_outcome(
+        &self,
+        index: u32,
+        _restore_index: Option<bool>,
+    ) -> napi::Result<StashApplyOutcome> {
+        match self.apply_stash(index) {
+            Ok(()) => Ok(StashApplyOutcome {
+                applied: true,
+                conflicts: None,
+            }),
+            Err(e) => {
+                let err_msg = e.to_string();
+                if let Some(start) = err_msg.find("conflict at '") {
+                    let rest = &err_msg[start + 13..];
+                    if let Some(end) = rest.find('\'') {
+                        let path = &rest[..end];
+                        return Ok(StashApplyOutcome {
+                            applied: false,
+                            conflicts: Some(vec![path.to_string()]),
+                        });
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Apply stash at `index` and drop it if applied cleanly.
+    #[napi]
+    pub fn pop_stash_with_outcome(
+        &self,
+        index: u32,
+        _restore_index: Option<bool>,
+    ) -> napi::Result<StashApplyOutcome> {
+        let outcome = self.apply_stash_with_outcome(index, _restore_index)?;
+        if outcome.applied {
+            self.drop_stash(index)?;
+        }
+        Ok(outcome)
     }
 
     /// Apply the stash at `index` and then remove it from the stash list (equivalent to

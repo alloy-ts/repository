@@ -26,6 +26,61 @@ use crate::repository::{Repository, lossy};
 // JS-facing types
 // ---------------------------------------------------------------------------
 
+/// Overall file status classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[napi]
+pub enum FileStatus {
+    /// File is new and not tracked by Git.
+    Untracked,
+    /// File has been added to the index (staged for commit).
+    Added,
+    /// File has been modified in the working tree compared to the index.
+    Modified,
+    /// File has been deleted from the working tree.
+    Deleted,
+    /// File has been modified and staged.
+    StagedModified,
+    /// File has been deleted and staged.
+    StagedDeleted,
+}
+
+/// The state of one side of a tracked path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[napi]
+pub enum ChangeState {
+    Unmodified,
+    Modified,
+    TypeChanged,
+    Added,
+    Deleted,
+}
+
+/// The kind of a merge conflict from index stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[napi]
+pub enum ConflictKind {
+    BothDeleted,
+    AddedByUs,
+    DeletedByThem,
+    AddedByThem,
+    DeletedByUs,
+    BothAdded,
+    BothModified,
+}
+
+/// Detailed status entry for a path, providing per-side change details and filemodes.
+#[derive(Clone)]
+#[napi(object)]
+pub struct DetailedStatusEntry {
+    pub path: String,
+    pub status: String,
+    pub is_staged: bool,
+    pub is_unstaged: bool,
+    pub head_mode: Option<String>,
+    pub index_mode: Option<String>,
+    pub worktree_mode: Option<String>,
+}
+
 /// Options controlling how working tree status is computed
 /// (mirrors `git status` / git2's `StatusOptions`).
 #[napi(object)]
@@ -861,6 +916,67 @@ impl Repository {
             repo: Arc::clone(&self.inner),
             cfg,
         }))
+    }
+
+    /// Check if a file in the working tree has been modified compared to an expected blob OID.
+    #[napi]
+    pub fn file_modified(&self, path: String, expected_oid: String) -> napi::Result<bool> {
+        let r = thread_local(&self.inner);
+        let workdir = r
+            .workdir()
+            .ok_or_else(|| err_str("file_modified", "repository has no working directory"))?;
+        let full_path = workdir.join(Path::new(&path));
+        if !full_path.exists() {
+            return Ok(true);
+        }
+        let content = std::fs::read(&full_path).map_err(|e| err("read_file", e))?;
+        let actual_oid = gix::object::compute_hash(gix::hash::Kind::Sha1, gix::object::Kind::Blob, &content);
+        Ok(actual_oid.to_string() != expected_oid)
+    }
+
+    /// Compute detailed per-path status including file modes and granular change states.
+    #[napi]
+    pub fn status_detailed(&self) -> napi::Result<Vec<DetailedStatusEntry>> {
+        let r = thread_local(&self.inner);
+        let platform = r
+            .status(gix::progress::Discard)
+            .map_err(|e| err("status", e))?;
+        let mut map: BTreeMap<BString, Half> = BTreeMap::new();
+        let iter = platform
+            .into_iter(Vec::new())
+            .map_err(|e| err("status iter", e))?;
+        for item in iter {
+            let item = item.map_err(|e| err("status item", e))?;
+            match item {
+                StatusItem::TreeIndex(change) => {
+                    if let Some(half) = half_from_tree_index(change) {
+                        merge(&mut map, half);
+                    }
+                }
+                StatusItem::IndexWorktree(item) => {
+                    if let Some(half) = half_from_index_worktree(item) {
+                        merge(&mut map, half);
+                    }
+                }
+            }
+        }
+        let entries = map
+            .into_values()
+            .map(|h| {
+                let is_staged = h.index.is_some();
+                let is_unstaged = h.worktree.is_some() || h.worktree == Some(Kind::Untracked);
+                DetailedStatusEntry {
+                    path: lossy(&h.path),
+                    status: porcelain(&h),
+                    is_staged,
+                    is_unstaged,
+                    head_mode: None,
+                    index_mode: None,
+                    worktree_mode: None,
+                }
+            })
+            .collect();
+        Ok(entries)
     }
 
     /// Check synchronously whether a path is excluded by `.gitignore` rules.

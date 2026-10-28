@@ -572,3 +572,68 @@ pub(crate) fn log_summary(
     };
     Ok((entry, parent_oids, tree))
 }
+
+/// A standalone history graph lane calculator for custom stream rendering.
+#[napi]
+#[derive(Default)]
+pub struct Graph {
+    columns: Vec<String>,
+}
+
+#[napi]
+impl Graph {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Process the next commit in topological order and return its GraphRow layout.
+    #[napi]
+    pub fn push(&mut self, commit: String, parents: Vec<String>) -> GraphRow {
+        let before = std::mem::take(&mut self.columns);
+        let mut after: Vec<String> = Vec::with_capacity(before.len() + parents.len());
+        let mut column = None;
+
+        for (i, line) in before.iter().enumerate() {
+            if line == &commit {
+                column = Some(i as u32);
+                for p in &parents {
+                    if !after.contains(p) {
+                        after.push(p.clone());
+                    }
+                }
+            } else if !after.contains(line) {
+                after.push(line.clone());
+            }
+        }
+
+        let col = match column {
+            Some(c) => c,
+            None => {
+                let c = after.len() as u32;
+                for p in &parents {
+                    if !after.contains(p) {
+                        after.push(p.clone());
+                    }
+                }
+                c
+            }
+        };
+
+        let parent_columns: Vec<u32> = parents
+            .iter()
+            .map(|p| after.iter().position(|a| a == p).unwrap_or(0) as u32)
+            .collect();
+
+        let is_merge = parents.len() > 1;
+        self.columns = after;
+
+        GraphRow {
+            commit,
+            column: col,
+            parent_columns,
+            parents,
+            is_merge,
+        }
+    }
+}

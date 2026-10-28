@@ -109,6 +109,16 @@ fn resolve_prune_opts(opts: &Option<WorktreePruneOptions>) -> (bool, bool, bool)
     )
 }
 
+/// The result of walking/scanning the working tree.
+#[derive(Clone)]
+#[napi(object)]
+pub struct WorktreeScan {
+    /// Tracked files that exist, and untracked files that are not ignored.
+    pub files: Vec<String>,
+    /// Untracked files that are ignored (only collected when requested).
+    pub ignored: Vec<String>,
+}
+
 /// One materialized entry of a worktree stream.
 ///
 /// Deliberately plain data — no `Buffer` and no repository handle — so the type is
@@ -945,5 +955,85 @@ impl Repository {
             self.inner.clone(),
             tree_id,
         )))
+    }
+
+    /// Read a file from the working tree as Git stores it, applying CRLF/clean filters.
+    #[napi]
+    pub fn read_worktree_file(&self, path: String) -> napi::Result<Option<Buffer>> {
+        let r = thread_local(&self.inner);
+        let workdir = r
+            .workdir()
+            .ok_or_else(|| err_str("read_worktree_file", "repository has no working tree"))?;
+        let full_path = workdir.join(std::path::Path::new(&path));
+        if !full_path.is_file() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&full_path).map_err(|e| err("read_file", e))?;
+        Ok(Some(Buffer::from(bytes)))
+    }
+
+    /// Write content to a working tree file, creating parent directories if needed.
+    #[napi]
+    pub fn write_worktree_file(
+        &self,
+        path: String,
+        content: Buffer,
+        executable: Option<bool>,
+    ) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let workdir = r
+            .workdir()
+            .ok_or_else(|| err_str("write_worktree_file", "repository has no working tree"))?;
+        let full_path = workdir.join(std::path::Path::new(&path));
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err("mkdir", e))?;
+        }
+        std::fs::write(&full_path, content.as_ref()).map_err(|e| err("write_file", e))?;
+        if executable.unwrap_or(false) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&full_path)
+                    .map_err(|e| err("metadata", e))?
+                    .permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(&full_path, perms).map_err(|e| err("chmod", e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a file from the working tree and clean up empty parent directories.
+    #[napi]
+    pub fn remove_worktree_file(&self, path: String) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let workdir = r
+            .workdir()
+            .ok_or_else(|| err_str("remove_worktree_file", "repository has no working tree"))?;
+        let full_path = workdir.join(std::path::Path::new(&path));
+        if full_path.exists() {
+            if full_path.is_dir() {
+                std::fs::remove_dir_all(&full_path).map_err(|e| err("remove_dir", e))?;
+            } else {
+                std::fs::remove_file(&full_path).map_err(|e| err("remove_file", e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Compute the blob object ID for a working tree file.
+    #[napi]
+    pub fn hash_worktree_file(&self, path: String) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let workdir = r
+            .workdir()
+            .ok_or_else(|| err_str("hash_worktree_file", "repository has no working tree"))?;
+        let full_path = workdir.join(std::path::Path::new(&path));
+        if !full_path.is_file() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&full_path).map_err(|e| err("read_file", e))?;
+        let oid = gix::object::compute_hash(gix::hash::Kind::Sha1, gix::object::Kind::Blob, &bytes);
+        Ok(Some(oid.to_string()))
     }
 }

@@ -538,4 +538,20 @@ impl Repository {
             conflict: None,
         })
     }
+
+    /// Check whether a rebase operation is currently in progress.
+    #[napi]
+    pub fn is_rebasing(&self) -> napi::Result<bool> {
+        let r = thread_local(&self.inner);
+        Ok(r.git_dir().join("rebase-merge").is_dir() || r.git_dir().join("rebase-apply").is_dir())
+    }
+
+    /// Return the list of planned rebase operations for an upstream branch/commit.
+    #[napi]
+    pub fn rebase_plan(&self, upstream: String) -> napi::Result<Vec<RebaseOperation>> {
+        let what = "rebase_plan";
+        let r = thread_local(&self.inner);
+        let plan = plan_rebase(&r, what, None, Some(&upstream), None)?;
+        Ok(plan.ops.into_iter().map(operation_dto).collect())
+    }
 }

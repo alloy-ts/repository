@@ -278,6 +278,69 @@ impl Repository {
         build_object(&self.inner, id.detach())
     }
 
+    /// Expand a short reference name using Git's lookup rules (`main` → `refs/heads/main`),
+    /// returning the full reference name or `null` if no matching reference exists.
+    #[napi]
+    pub fn dwim_ref(&self, name: String) -> napi::Result<Option<String>> {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let r = thread_local(&self.inner);
+        let reference = r.try_find_reference(&name).map_err(|e| err("dwim_ref", e))?;
+        Ok(reference.map(|rf| String::from_utf8_lossy(rf.name().as_bstr()).into_owned()))
+    }
+
+    /// Return the name or OID of what was checked out `n` checkouts ago (`@{-n}`),
+    /// read from HEAD's reflog.
+    #[napi]
+    pub fn previous_checkout(&self, n: u32) -> napi::Result<Option<String>> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let r = thread_local(&self.inner);
+        let head_ref = match r.find_reference("HEAD") {
+            Ok(rf) => rf,
+            Err(_) => return Ok(None),
+        };
+        let mut log = head_ref.log_iter();
+        let mut checkouts = Vec::new();
+        if let Ok(Some(mut stream)) = log.all() {
+            for entry in stream.by_ref() {
+                if let Ok(e) = entry {
+                    let msg = String::from_utf8_lossy(e.message.as_ref());
+                    if let Some(rest) = msg.strip_prefix("checkout: moving from ") {
+                        if let Some((from, _)) = rest.rsplit_once(" to ") {
+                            checkouts.push(from.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        checkouts.reverse();
+        let idx = (n as usize) - 1;
+        Ok(checkouts.get(idx).cloned())
+    }
+
+    /// Peel an object or revision specification to a target object type (`"commit"`, `"tree"`, `"blob"`, `"tag"`).
+    #[napi]
+    pub fn peel_to(&self, spec_or_id: String, target_type: String) -> napi::Result<String> {
+        let r = thread_local(&self.inner);
+        let id: gix::ObjectId = r
+            .rev_parse_single(spec_or_id.as_str())
+            .map_err(|e| err("peel_to", e))?
+            .detach();
+        let target_kind = match target_type.as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            other => return Err(err_str("peel_to", format!("unknown target type: {other}"))),
+        };
+        let obj = r.find_object(id).map_err(|e| err("peel_to", e))?;
+        let peeled = obj.peel_to_kind(target_kind).map_err(|e| err("peel_to", e))?;
+        Ok(peeled.id.to_string())
+    }
+
     /// Compute the best merge-base of two revisions (like `git merge-base <one> <two>`).
     ///
     /// Both arguments accept anything [`rev_parse_single`](Self::rev_parse_single) does —
