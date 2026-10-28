@@ -15,7 +15,6 @@ use crate::process::{ExecutionFailure, ProcessStatusJs};
 /// Exposed to JavaScript as a string-valued enum so callers can branch on the
 /// source of a failure (prerequisites, command, parsing, …) without parsing the
 /// message.
-#[derive(Clone, Copy)]
 #[napi(string_enum)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {

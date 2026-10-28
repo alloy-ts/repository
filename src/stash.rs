@@ -282,6 +282,13 @@ impl Repository {
         Ok(out)
     }
 
+    /// Returns the stash entry at `index` (0 = most recent), or `null` if it does not exist.
+    #[napi]
+    pub fn get_stash(&self, index: u32) -> napi::Result<Option<StashEntry>> {
+        let stashes = self.list_stashes()?;
+        Ok(stashes.into_iter().find(|e| e.index == index))
+    }
+
     /// Remove the stash at `index` (0 = most recent) from the `refs/stash` reflog.
     /// Removing the last remaining stash also deletes the `refs/stash` reference.
     #[napi]

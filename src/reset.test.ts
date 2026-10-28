@@ -126,6 +126,12 @@ describe("Repository.resetTo (src/reset.rs)", () => {
   test("throws on an unresolvable revision", async () => {
     await expect(repo.resetTo("no-such-ref-xyz", ResetMode.Mixed)).rejects.toThrow();
   });
+
+  test("resetHard() performs a hard reset to HEAD", async () => {
+    write("a.txt", "modified in worktree\n");
+    await repo.resetHard();
+    expect(read("a.txt")).toBe("tip\n");
+  });
 });
 
 describe("Repository.resetPaths (src/reset.rs)", () => {

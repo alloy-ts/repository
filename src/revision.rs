@@ -278,6 +278,70 @@ impl Repository {
         build_object(&self.inner, id.detach())
     }
 
+    /// Returns the full name of the reference a short name denotes (DWIM lookup),
+    /// or `null` if no matching reference exists.
+    #[napi]
+    pub fn dwim_ref(&self, name: String) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let ref_name = r
+            .try_find_reference(name.as_str())
+            .map_err(|e| err("dwim_ref", e))?
+            .map(|reference| String::from_utf8_lossy(reference.name().as_bstr()).into_owned());
+        Ok(ref_name)
+    }
+
+    /// Returns the branch name or commit checked out before the n-th last checkout (`@{-<n>}`),
+    /// read from HEAD's reflog, or `null` if fewer checkouts exist.
+    #[napi]
+    pub fn previous_checkout(&self, n: u32) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        let log_path = r.git_dir().join("logs").join("HEAD");
+        if !log_path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&log_path).map_err(|e| err("previous_checkout", e))?;
+        let skip = match (n as usize).checked_sub(1) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let mut count = 0;
+        for line in content.lines().rev() {
+            if let Some(t) = line.find('\t') {
+                let message = &line[t + 1..];
+                if let Some(rest) = message.strip_prefix("checkout: moving from ") {
+                    if let Some((from, _)) = rest.rsplit_once(" to ") {
+                        if count == skip {
+                            return Ok(Some(from.to_string()));
+                        }
+                        count += 1;
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Peels a revision specification (e.g. `v1.0`, `HEAD`) to an object of the specified kind.
+    #[napi]
+    pub fn peel_to(&self, spec: String, kind: String) -> napi::Result<Object> {
+        let r = thread_local(&self.inner);
+        let id = r
+            .rev_parse_single(spec.as_str())
+            .map_err(|e| err("peel_to", e))?;
+        let obj = r.find_object(id).map_err(|e| err("peel_to", e))?;
+        let target_kind = match kind.as_str() {
+            "commit" | "Commit" => gix::object::Kind::Commit,
+            "tree" | "Tree" => gix::object::Kind::Tree,
+            "blob" | "Blob" => gix::object::Kind::Blob,
+            "tag" | "Tag" => gix::object::Kind::Tag,
+            other => return Err(err_str("peel_to", format!("unknown object kind {other:?}"))),
+        };
+        let peeled = obj
+            .peel_to_kind(target_kind)
+            .map_err(|e| err("peel_to", e))?;
+        build_object(&self.inner, peeled.id)
+    }
+
     /// Compute the best merge-base of two revisions (like `git merge-base <one> <two>`).
     ///
     /// Both arguments accept anything [`rev_parse_single`](Self::rev_parse_single) does —

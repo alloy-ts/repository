@@ -220,6 +220,30 @@ pub enum FileStatus {
     Conflicted,
 }
 
+/// Returns true if the file status indicates staged changes.
+#[napi]
+pub fn file_status_is_staged(status: FileStatus) -> bool {
+    matches!(
+        status,
+        FileStatus::Added | FileStatus::StagedModified | FileStatus::StagedDeleted
+    )
+}
+
+/// Returns true if the file status indicates unstaged changes or untracked state.
+#[napi]
+pub fn file_status_is_unstaged(status: FileStatus) -> bool {
+    matches!(
+        status,
+        FileStatus::Modified | FileStatus::Deleted | FileStatus::Untracked
+    )
+}
+
+/// Returns the two-letter porcelain code for a conflict kind (e.g. `"UU"`, `"DD"`).
+#[napi]
+pub fn conflict_kind_code(kind: ConflictKind) -> String {
+    kind.code().to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Internal configuration
 // ---------------------------------------------------------------------------

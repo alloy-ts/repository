@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 
-import { Repository } from "./main.ts";
+import {
+  ConflictKind,
+  FileStatus,
+  Repository,
+  conflictKindCode,
+  fileStatusIsStaged,
+  fileStatusIsUnstaged,
+} from "./main.ts";
 
 // Mirrors `StatusEntry` from status.rs. Declared locally so this file does not
 // depend on a freshly rebuilt dist/index.d.ts.
@@ -463,5 +470,24 @@ describe("Repository.status — option validation", () => {
     // Bump the mtime of an unchanged file so its index stat data is stale.
     utimesSync(join(fixture, "b.txt"), new Date(), new Date(Date.now() + 5_000));
     await expect(repo.status({ updateIndex: true, untracked: "none" })).resolves.toEqual([]);
+  });
+
+  test("fileStatusIsStaged and fileStatusIsUnstaged helper functions", () => {
+    expect(fileStatusIsStaged(FileStatus.Added)).toBe(true);
+    expect(fileStatusIsStaged(FileStatus.StagedModified)).toBe(true);
+    expect(fileStatusIsStaged(FileStatus.StagedDeleted)).toBe(true);
+    expect(fileStatusIsStaged(FileStatus.Modified)).toBe(false);
+    expect(fileStatusIsStaged(FileStatus.Untracked)).toBe(false);
+
+    expect(fileStatusIsUnstaged(FileStatus.Modified)).toBe(true);
+    expect(fileStatusIsUnstaged(FileStatus.Deleted)).toBe(true);
+    expect(fileStatusIsUnstaged(FileStatus.Untracked)).toBe(true);
+    expect(fileStatusIsUnstaged(FileStatus.Added)).toBe(false);
+  });
+
+  test("conflictKindCode helper function", () => {
+    expect(conflictKindCode(ConflictKind.BothModified)).toBe("UU");
+    expect(conflictKindCode(ConflictKind.BothAdded)).toBe("AA");
+    expect(conflictKindCode(ConflictKind.BothDeleted)).toBe("DD");
   });
 });

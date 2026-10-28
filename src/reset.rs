@@ -145,6 +145,13 @@ impl Repository {
         self.reset_to(target, ResetMode::Mixed)?;
         Ok(())
     }
+
+    /// Perform a hard reset to `HEAD` (`git reset --hard HEAD`). Resets HEAD,
+    /// index, and working tree for tracked files while preserving untracked files.
+    #[napi]
+    pub fn reset_hard(&self) -> napi::Result<String> {
+        self.reset_to("HEAD".to_string(), ResetMode::Hard)
+    }
 }
 
 /// Resolve `spec` to a commit, returning `(commit id, tree id)`. The spec is

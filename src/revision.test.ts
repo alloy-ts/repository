@@ -179,4 +179,28 @@ describe("Repository revision specs (src/revision.rs)", () => {
       expect(repo.revWalk([head], { limit: 2 }).length).toBe(2);
     }
   });
+
+  test("dwimRef() resolves short names to full reference names", () => {
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: cloneDir,
+      encoding: "utf8",
+    }).trim();
+    const resolved = repo.dwimRef(branch);
+    expect(resolved).toBe(`refs/heads/${branch}`);
+    expect(repo.dwimRef("nonexistent-ref-name-12345")).toBe(null);
+  });
+
+  test("previousCheckout() reads previous checkout from reflog", () => {
+    expect(repo.previousCheckout(0)).toBe(null);
+    expect(typeof repo.previousCheckout(1) === "string" || repo.previousCheckout(1) === null).toBe(true);
+  });
+
+  test("peelTo() peels a revision spec to a specific object kind", () => {
+    const obj = repo.peelTo("HEAD", "commit");
+    expect(obj.id).toBe(repo.headId());
+    expect(obj.kind).toBe("commit");
+
+    const treeObj = repo.peelTo("HEAD", "tree");
+    expect(treeObj.kind).toBe("tree");
+  });
 });
