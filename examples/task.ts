@@ -1,7 +1,7 @@
-import { Task } from "../src/main.ts";
+import { Task, Worker } from "../src/main.ts";
 
 // Demonstrates the Threaded Tasks API bindings in src/task.rs:
-//   - Task(script, options?)           (constructs a threaded task running in worker_threads)
+//   - Task(script, options?) / Worker   (constructs a threaded task running in worker_threads; Worker is an alias for Task)
 //   - Task.postMessage(message, transfer?)  (sends structured-clone data to worker thread)
 //   - Task.onmessage / Task.onerror    (handles events received from the worker)
 //   - Task.addEventListener / remove   (registers event listeners)

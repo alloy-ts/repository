@@ -2,7 +2,7 @@
 
 The **Threaded Task API** makes it possible to run script operations in background worker threads separate from the main execution thread of a Node.js application. Laborious processing can be performed in a separate thread without blocking or slowing down the main thread.
 
-A task is an object constructed using `new Task(script, options?)` that runs a named JavaScript/TypeScript file in a separate thread backed by Node.js worker threads (`node:worker_threads`).
+A task is an object constructed using `new Task(script, options?)` (also exported as `Worker`) that runs a named JavaScript/TypeScript file in a separate thread backed by Node.js worker threads (`node:worker_threads`).
 
 ## `TaskOptions`
 
@@ -18,9 +18,9 @@ interface TaskOptions {
 }
 ```
 
-## `Task` Class
+## `Task` Class (`Worker` Alias)
 
-Represents a threaded background task instance.
+Represents a threaded background task instance. `Worker` is exported as a synonym for `Task` for users familiar with the Web Worker API.
 
 ### Constructor
 

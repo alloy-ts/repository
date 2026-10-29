@@ -1,8 +1,9 @@
-use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 
-use napi::bindgen_prelude::{Buffer, FromNapiValue, Function, ToNapiValue};
+use napi::bindgen_prelude::{
+    Buffer, FromNapiValue, Function, JsObjectValue, Object, ToNapiValue,
+};
 use napi::{Env, Unknown};
 use napi_derive::napi;
 
@@ -17,6 +18,15 @@ pub struct TaskOptions {
     /// Optional name for the worker thread (forwarded to `Worker`'s `name`
     /// option). Useful for debugging / profiling under `node --trace-warnings`.
     pub name: Option<String>,
+}
+
+/// Alias exporting `Worker` as a synonym for `Task` on module exports.
+#[napi(module_exports)]
+pub fn register_worker_alias(mut exports: Object) -> napi::Result<()> {
+    if let Ok(task_class) = exports.get_named_property::<Unknown>("Task") {
+        exports.set_named_property("Worker", task_class)?;
+    }
+    Ok(())
 }
 
 /// A threaded task: a wrapper around a Node.js worker thread
@@ -43,7 +53,7 @@ pub struct Task {
     /// The `Worker.threadId` assigned by Node when the worker starts.
     thread_id: u32,
     /// Whether [`Task::terminate`] has been called.
-    terminated: Cell<bool>,
+    terminated: AtomicBool,
 }
 
 /// Monotonic, process-unique id for each [`Task`] instance.
@@ -120,7 +130,7 @@ const TASK_BOOTSTRAP: &str = r#"
 "#;
 
 fn task_ensure_bootstrap(env: &Env) -> napi::Result<()> {
-    let _: Unknown = env.run_script(TASK_BOOTSTRAP)?;
+    let _: Unknown = env.run_script::<&str, Unknown>(TASK_BOOTSTRAP)?;
     Ok(())
 }
 
@@ -128,11 +138,11 @@ fn task_global_fn<'a, Args: ToNapiValue, Return: FromNapiValue>(
     env: &'a Env,
     name: &str,
 ) -> napi::Result<Function<'a, Args, Return>> {
-    env.run_script::<_, Function<'a, Args, Return>>(format!("globalThis.{name}"))
+    env.run_script::<String, Function<'a, Args, Return>>(format!("globalThis.{name}"))
 }
 
 fn task_undefined(env: &Env) -> napi::Result<Unknown<'_>> {
-    env.run_script::<_, Unknown>("undefined")
+    env.run_script::<&str, Unknown>("undefined")
 }
 
 #[napi]
@@ -153,13 +163,13 @@ impl Task {
         };
 
         let code = format!("globalThis.__taskInit({id}, {script_json}, {name_json})");
-        let thread_id_num: f64 = env.run_script(&code)?;
+        let thread_id_num: f64 = env.run_script::<&str, f64>(&code)?;
 
         Ok(Task {
             id,
             script,
             thread_id: thread_id_num as u32,
-            terminated: Cell::new(false),
+            terminated: AtomicBool::new(false),
         })
     }
 
@@ -178,7 +188,7 @@ impl Task {
     /// Whether [`Task::terminate`] has been called on this instance.
     #[napi(getter)]
     pub fn terminated(&self) -> bool {
-        self.terminated.get()
+        self.terminated.load(AtomicOrdering::Relaxed)
     }
 
     /// Post a message to the task thread via structured clone.
@@ -200,7 +210,7 @@ impl Task {
     /// that resolves with the exit code when the thread has stopped.
     #[napi]
     pub fn terminate(&self, env: Env) -> napi::Result<Unknown<'_>> {
-        self.terminated.set(true);
+        self.terminated.store(true, AtomicOrdering::Relaxed);
         let term_fn = task_global_fn::<u32, Unknown>(&env, "__taskTerminate")?;
         term_fn.call(self.id)
     }
@@ -299,63 +309,6 @@ impl Task {
         dispatch_fn.call((self.id, event))?;
         Ok(true)
     }
-}
-
-/// Returns `true` for TypeScript-style script extensions.
-#[allow(dead_code)]
-fn is_typescript(script: &str) -> bool {
-    let lower = script.to_ascii_lowercase();
-    lower.ends_with(".ts")
-        || lower.ends_with(".mts")
-        || lower.ends_with(".cts")
-        || lower.ends_with(".tsx")
-}
-
-/// Run a script file to completion, waiting for it to exit.
-#[allow(dead_code)]
-fn run_script_blocking(script: &str) -> napi::Result<()> {
-    let runners: &[&[&str]] = if is_typescript(script) {
-        &[&["tsx"], &["npx", "tsx"]]
-    } else {
-        &[&["node"]]
-    };
-
-    for runner in runners {
-        let (program, rest) = runner.split_first().unwrap();
-        let mut cmd = std::process::Command::new(program);
-        cmd.args(rest).arg(script);
-        match cmd.status() {
-            Ok(status) => {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(napi::Error::new(
-                        napi::Status::GenericFailure,
-                        format!("script `{script}` exited with status {status}"),
-                    ))
-                };
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                return Err(napi::Error::new(
-                    napi::Status::GenericFailure,
-                    format!("failed to run `{} {script}`: {e}", runner.join(" ")),
-                ));
-            }
-        }
-    }
-
-    Err(napi::Error::new(
-        napi::Status::GenericFailure,
-        format!(
-            "could not find a runner for `{script}` (tried: {})",
-            runners
-                .iter()
-                .map(|r| r.join(" "))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    ))
 }
 
 /// Worktree materialisation task running on the libuv thread pool.
