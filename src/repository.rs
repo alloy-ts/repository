@@ -125,7 +125,7 @@ pub struct AheadBehind {
 
 /// The primary handle to a git repository, exposed to TypeScript as a class.
 ///
-/// Internally wraps `Arc<gix::ThreadSafeRepository>` so it can be shared and offloaded to worker
+/// Internally wraps `Arc<gix::ThreadSafeRepository>` so it can be shared and offloaded to task
 /// threads for async network operations, while sync methods obtain a cheap thread-local view.
 ///
 /// This is a *handle-based* API (open a `Repository` once, then call methods on it) rather than
