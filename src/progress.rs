@@ -57,7 +57,7 @@ fn unit_label(unit: &Unit) -> String {
 
 /// Bridges a JS progress callback into the `gix` [`Progress`](gix::progress::Progress) trait.
 ///
-/// `ThreadsafeFunction` lets the worker thread invoke the JS callback safely. Children created via
+/// `ThreadsafeFunction` lets the task thread invoke the JS callback safely. Children created via
 /// `add_child` share the same callback.
 #[derive(Clone)]
 pub(crate) struct ProgressCallback {

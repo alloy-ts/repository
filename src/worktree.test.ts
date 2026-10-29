@@ -105,4 +105,27 @@ describe("Worktree (src/worktree.rs)", () => {
     expect(wtRepo).toBeInstanceOf(Repository);
     await added.remove();
   });
+
+  test("addWorktree indexes the checkout as a prolly tree", async () => {
+    const path = join(base, "wt-prolly");
+    const added = await repo.addWorktree(path, "detached", head.id, false);
+    // Every added worktree carries a prolly snapshot (root node id, never null).
+    expect(added.prollyRoot).not.toBeNull();
+    // O(log n) path lookup over the index — no tree objects read.
+    const entry = added.prollyEntry("src/worktree.rs");
+    expect(entry).not.toBeNull();
+    expect(entry!.path).toBe("src/worktree.rs");
+    expect(entry!.mode).toBe("100644");
+    expect(added.prollyEntry("does/not/exist")).toBeNull();
+    // Full listing is byte-ascending by path and mirrors the checkout.
+    const entries = added.prollyEntries();
+    expect(entries.length).toBeGreaterThan(0);
+    const paths = entries.map((e) => e.path);
+    expect(paths).toEqual([...paths].sort());
+    expect(paths).toContain("src/worktree.rs");
+    // Removing the worktree GCs its prolly snapshot too.
+    await added.remove();
+    expect(added.prollyRoot).toBeNull();
+    expect(added.prollyEntries()).toEqual([]);
+  });
 });

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import {
+  LooseObjectStore,
+  ObjectDatabase,
   ObjectType,
   Oid,
   oidFormat,
@@ -312,5 +314,109 @@ describe("Object ergonomics (src/object.rs)", () => {
     // Equivalent to a follow-up findObject on the peeled id.
     expect(repo.findObject(peeled.id).id).toBe(peeled.id);
     expect(() => repo.peelToObject(tagId, "Any")).toThrow(/Any.*not supported/);
+  });
+});
+
+describe("SHA-256 canonical repository object format", () => {
+  let dir: string;
+  let sha256Repo: Repository;
+
+  beforeAll(() => {
+    dir = join(base, "sha256-repo");
+    rmSync(dir, { recursive: true, force: true });
+    sha256Repo = Repository.initOpts(dir, {
+      objectFormat: "sha256",
+      initialHead: "main",
+    });
+  });
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the repository reports a SHA-256 canonical format", () => {
+    expect(sha256Repo.objectFormat()).toBe("sha256");
+    // objectHash() keeps gix's Debug casing ("Sha256"), objectFormat() is lower-cased.
+    expect(sha256Repo.objectHash()).toBe("Sha256");
+    // A fresh SHA-256 repo has no compatibility hash.
+    expect(sha256Repo.compatObjectFormat()).toBe(null);
+    // The format is persisted exactly like git does.
+    expect(sha256Repo.configString("core.repositoryformatversion")).toBe("1");
+    expect(sha256Repo.configString("extensions.objectFormat")).toBe("sha256");
+  });
+
+  test("objects are written and read back as 64-hex SHA-256 ids", () => {
+    const data = Buffer.from("sha256 blob\n");
+    const id = sha256Repo.writeObject("Blob", data);
+    expect(id).toMatch(/^[0-9a-f]{64}$/);
+    expect(sha256Repo.objectExists(id)).toBe(true);
+
+    const obj = sha256Repo.findObject(id);
+    expect(obj.kind).toBe("blob");
+    expect(Buffer.from(obj.data()).equals(data)).toBe(true);
+    expect(sha256Repo.computeHash("Blob", data)).toBe(id);
+
+    const header = sha256Repo.findHeader(id);
+    expect(header.kind).toBe("blob");
+    expect(header.size).toBe(data.length);
+
+    // The id classifies as SHA-256 at both the instance and free-function level.
+    expect(Oid.fromHex(id).format()).toBe("sha256");
+    expect(oidFormat(id)).toBe("sha256");
+  });
+
+  test("empty-blob / empty-tree ids match the SHA-256 canonical hash", () => {
+    // The hash of an empty blob equals the SHA-256 empty-blob id.
+    const emptyBlobId = sha256Repo.writeObject("Blob", Buffer.alloc(0));
+    expect(emptyBlobId).toMatch(/^[0-9a-f]{64}$/);
+    expect(emptyBlobId).toBe(Oid.emptyBlob("sha256").hex);
+
+    expect(Oid.emptyTree("sha256").hex).toMatch(/^[0-9a-f]{64}$/);
+    expect(Oid.emptyBlob("sha256").hex).not.toBe(Oid.emptyTree("sha256").hex);
+  });
+
+  test("SHA-256 zero id and byte round-trip", () => {
+    const zero = Oid.zero("sha256");
+    expect(zero.hex).toBe("0".repeat(64));
+    expect(zero.isZero()).toBe(true);
+    expect(Oid.fromHex("0".repeat(64), "sha256").equals(zero)).toBe(true);
+    expect(Oid.fromHex("0".repeat(64)).format()).toBe("sha256");
+
+    const bytes = zero.toBytes();
+    expect(bytes.length).toBe(32);
+    expect(Oid.fromBytes(bytes).equals(zero)).toBe(true);
+    expect(oidToBytes(zero.hex).length).toBe(32);
+    expect(oidFromBytes(bytes)).toBe(zero.hex);
+  });
+
+  test("a SHA-256 repo can record a SHA-1 compatibility format", () => {
+    const compatDir = join(base, "sha256-compat-repo");
+    rmSync(compatDir, { recursive: true, force: true });
+    const compatRepo = Repository.initOpts(compatDir, {
+      objectFormat: "sha256",
+      compatObjectFormat: "sha1",
+    });
+    expect(compatRepo.objectFormat()).toBe("sha256");
+    expect(compatRepo.compatObjectFormat()).toBe("sha1");
+    expect(compatRepo.configString("extensions.compatObjectFormat")).toBe("sha1");
+    rmSync(compatDir, { recursive: true, force: true });
+  });
+
+  test("ObjectDatabase / ObjectStore open the SHA-256 object store and report the format", () => {
+    const db = new ObjectDatabase(join(dir, ".git", "objects"), {
+      objectHash: "sha256",
+    });
+    expect(db.objectFormat).toBe("sha256");
+    // `objectHash` uses Display ("sha256"); the Debug-style "Sha256" is on Repository only.
+    expect(db.objectHash).toBe("sha256");
+    expect(db.compatObjectFormat).toBe(null);
+    const ids = db.entries();
+    expect(ids.length).toBeGreaterThan(0);
+    // Every stored object id is a 64-hex SHA-256 digest.
+    expect(ids.every((id) => /^[0-9a-f]{64}$/.test(id))).toBe(true);
+
+    const store = new LooseObjectStore(join(dir, ".git", "objects"), "sha256");
+    expect(store.objectFormat).toBe("sha256");
+    expect(store.objectHash).toBe("sha256");
   });
 });

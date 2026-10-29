@@ -138,14 +138,16 @@ commit.coAuthors(); // [{ token: "Co-authored-by", value: "A U Thor <a@example.c
 
 ## Creating commits (`Repository`)
 
-| Method        | Signature                                                                                | Notes                                                                                  |
-| ------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `findCommit`  | `(id: string) => Commit`                                                                 | Throws when the object is missing or is not a commit.                                  |
-| `writeCommit` | `(input: CommitInput) => string`                                                         | Writes a loose commit object without touching any reference. Returns the id.           |
-| `newCommit`   | `(message: string, tree: string, parents: string[]) => string`                           | Like `writeCommit`, using the configured author/committer identities. No ref is moved. |
-| `newCommitAs` | `(committer: Signature, author: Signature, message, tree, parents) => string`            | Like `newCommit` with explicit identities, which also fixes both timestamps.           |
-| `commit`      | `(reference: string, message: string, tree: string, parents: string[]) => string`        | Creates a commit **and** moves `reference` to it.                                      |
-| `commitAs`    | `(committer: Signature, author: Signature, reference, message, tree, parents) => string` | Like `commit` with explicit identities.                                                |
+| Method         | Signature                                                                                | Notes                                                                                                            |
+| -------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `findCommit`   | `(id: string) => Commit`                                                                 | Throws when the object is missing or is not a commit.                                                            |
+| `headCommit`   | `() => Commit`                                                                           | The commit `HEAD` currently points to — an alias of `headCommit()`. Read `commit.id` for the sha.                |
+| `headCommitId` | `() => string \| null`                                                                   | Hex sha of the commit `HEAD` points to, or `null` when `HEAD` is unborn. Convenience for build banners/versions. |
+| `writeCommit`  | `(input: CommitInput) => string`                                                         | Writes a loose commit object without touching any reference. Returns the id.                                     |
+| `newCommit`    | `(message: string, tree: string, parents: string[]) => string`                           | Like `writeCommit`, using the configured author/committer identities. No ref is moved.                           |
+| `newCommitAs`  | `(committer: Signature, author: Signature, message, tree, parents) => string`            | Like `newCommit` with explicit identities, which also fixes both timestamps.                                     |
+| `commit`       | `(reference: string, message: string, tree: string, parents: string[]) => string`        | Creates a commit **and** moves `reference` to it.                                                                |
+| `commitAs`     | `(committer: Signature, author: Signature, reference, message, tree, parents) => string` | Like `commit` with explicit identities.                                                                          |
 
 `CommitInput` is `{ tree, parents, message, author?, committer? }` — the
 identities default to the repository configuration and throw when none is

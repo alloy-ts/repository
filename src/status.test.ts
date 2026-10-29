@@ -4,18 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 
-import { Repository } from "./main.ts";
-
-// Mirrors `StatusEntry` from status.rs. Declared locally so this file does not
-// depend on a freshly rebuilt dist/index.d.ts.
-interface StatusEntry {
-  path: string;
-  oldPath: string | null;
-  index: string | null;
-  worktree: string | null;
-  porcelain: string;
-  directory: boolean;
-}
+import { Repository, type Status, type StatusEntry } from "./main.ts";
 
 let fixture: string;
 let repo: Repository;
@@ -47,11 +36,14 @@ function resetHard() {
   git("clean -qfdx");
 }
 
-function find(list: StatusEntry[], path: string): StatusEntry {
-  const e = list.find((x) => x.path === path);
+// `repo.status()` (and friends) return a `Status` object whose per-path changes
+// live in `entries: StatusEntry[]`; `index`/`worktree`/`oldPath` are `null` at
+// runtime for absent sides (typed as optional `string | undefined`).
+function find(status: Status, path: string): StatusEntry {
+  const e = status.entries.find((x) => x.path === path);
   expect(
     e,
-    `expected a status entry for ${path}, got ${JSON.stringify(list.map((x) => x.path))}`,
+    `expected a status entry for ${path}, got ${JSON.stringify(status.entries.map((x) => x.path))}`,
   ).toBeDefined();
   return e!;
 }
@@ -97,19 +89,21 @@ afterAll(() => {
 describe("Repository.status — clean tree, untracked and ignored", () => {
   // Must run before any test mutates the fixture.
   test("a clean repository reports no entries and is not dirty", async () => {
-    await expect(repo.status()).resolves.toEqual([]);
+    const s = await repo.status();
+    expect(s.entries).toEqual([]);
+    expect(s.isClean).toBe(true);
     await expect(repo.isDirty()).resolves.toBe(false);
   });
 
   test("untracked files are reported as '??' entries", async () => {
     write("u1.txt", "u1\n");
-    const entries = await repo.status();
-    const e = find(entries, "u1.txt");
-    expect(e.index).toBe(null);
+    const s = await repo.status();
+    const e = find(s, "u1.txt");
+    expect(e.index).toBeNull();
     expect(e.worktree).toBe("untracked");
     expect(e.porcelain).toBe("??");
     expect(e.directory).toBe(false);
-    expect(e.oldPath).toBe(null);
+    expect(e.oldPath).toBeNull();
     remove("u1.txt");
   });
 
@@ -122,12 +116,12 @@ describe("Repository.status — clean tree, untracked and ignored", () => {
     const dir = find(collapsed, "newdir");
     expect(dir.directory).toBe(true);
     expect(dir.porcelain).toBe("??");
-    expect(collapsed.filter((e) => e.path.startsWith("newdir")).length).toBe(1);
+    expect(collapsed.entries.filter((e) => e.path.startsWith("newdir")).length).toBe(1);
 
     const expanded = await repo.status({ untracked: "files" });
-    const paths = expanded.map((e) => e.path).filter((p) => p.startsWith("newdir"));
+    const paths = expanded.entries.map((e) => e.path).filter((p) => p.startsWith("newdir"));
     expect(paths.sort()).toEqual(["newdir/x.txt", "newdir/y.txt"]);
-    for (const e of expanded.filter((x) => x.path.startsWith("newdir"))) {
+    for (const e of expanded.entries.filter((x) => x.path.startsWith("newdir"))) {
       expect(e.directory).toBe(false);
     }
     remove("newdir");
@@ -136,12 +130,12 @@ describe("Repository.status — clean tree, untracked and ignored", () => {
   test("ignored files are hidden by default and shown as '!!' with ignored: 'matching'", async () => {
     write("noise.log", "noise\n");
     const quiet = await repo.status({ untracked: "files" });
-    expect(quiet.find((e) => e.path === "noise.log")).toBeUndefined();
+    expect(quiet.entries.find((e) => e.path === "noise.log")).toBeUndefined();
 
     const loud = await repo.status({ untracked: "files", ignored: "matching" });
     const e = find(loud, "noise.log");
     expect(e.worktree).toBe("ignored");
-    expect(e.index).toBe(null);
+    expect(e.index).toBeNull();
     expect(e.porcelain).toBe("!!");
     remove("noise.log");
   });
@@ -149,7 +143,7 @@ describe("Repository.status — clean tree, untracked and ignored", () => {
   test("entries are sorted by path", async () => {
     write("zz.txt", "zz\n");
     write("aa.txt", "aa\n");
-    const paths = (await repo.status({ untracked: "files" }))
+    const paths = (await repo.status({ untracked: "files" })).entries
       .map((e) => e.path)
       .filter((p) => p === "aa.txt" || p === "zz.txt");
     expect(paths).toEqual(["aa.txt", "zz.txt"]);
@@ -172,7 +166,7 @@ describe("Repository.status — staged and unstaged changes", () => {
   test("unstaged modification: ' M' with a worktree side only", async () => {
     write("b.txt", "changed\n");
     const e = find(await repo.status(), "b.txt");
-    expect(e.index).toBe(null);
+    expect(e.index).toBeNull();
     expect(e.worktree).toBe("modified");
     expect(e.porcelain).toBe(" M");
     expect(e.directory).toBe(false);
@@ -185,7 +179,7 @@ describe("Repository.status — staged and unstaged changes", () => {
     git("add b.txt");
     const e = find(await repo.status(), "b.txt");
     expect(e.index).toBe("modified");
-    expect(e.worktree).toBe(null);
+    expect(e.worktree).toBeNull();
     expect(e.porcelain).toBe("M ");
     resetHard();
   });
@@ -205,7 +199,7 @@ describe("Repository.status — staged and unstaged changes", () => {
     remove("b.txt");
     const e = find(await repo.status(), "b.txt");
     expect(e.worktree).toBe("deleted");
-    expect(e.index).toBe(null);
+    expect(e.index).toBeNull();
     expect(e.porcelain).toBe(" D");
     resetHard();
   });
@@ -214,7 +208,7 @@ describe("Repository.status — staged and unstaged changes", () => {
     git("rm -q b.txt");
     const e = find(await repo.status(), "b.txt");
     expect(e.index).toBe("deleted");
-    expect(e.worktree).toBe(null);
+    expect(e.worktree).toBeNull();
     expect(e.porcelain).toBe("D ");
     resetHard();
   });
@@ -224,7 +218,7 @@ describe("Repository.status — staged and unstaged changes", () => {
     git("add added.txt");
     const e = find(await repo.status(), "added.txt");
     expect(e.index).toBe("added");
-    expect(e.worktree).toBe(null);
+    expect(e.worktree).toBeNull();
     expect(e.porcelain).toBe("A ");
     resetHard();
   });
@@ -242,7 +236,7 @@ describe("Repository.status — staged and unstaged changes", () => {
     write("i2a.txt", "initial\n");
     git("add -N i2a.txt");
     let e = find(await repo.status(), "i2a.txt");
-    expect(e.index).toBe(null);
+    expect(e.index).toBeNull();
     expect(e.worktree).toBe("intent-to-add");
     expect(e.porcelain).toBe(" A");
 
@@ -261,13 +255,13 @@ describe("Repository.status — staged and unstaged changes", () => {
       show: "index",
       untracked: "none",
     });
-    expect(unstagedOnly.find((e) => e.path === "b.txt")).toBeUndefined();
+    expect(unstagedOnly.entries.find((e) => e.path === "b.txt")).toBeUndefined();
 
     git("add b.txt");
     const staged = await repo.status({ show: "index", untracked: "none" });
     const e = find(staged, "b.txt");
     expect(e.index).toBe("modified");
-    expect(e.worktree).toBe(null);
+    expect(e.worktree).toBeNull();
     resetHard();
   });
 });
@@ -279,16 +273,16 @@ describe("Repository.status — staged and unstaged changes", () => {
 describe("Repository.status — renames and copies", () => {
   test("staged rename is detected with explicit rewrites: 'R ' + oldPath", async () => {
     git("mv rename-source.txt renamed-dest.txt");
-    const entries = await repo.status({
+    const s = await repo.status({
       untracked: "none",
       headToIndexRenames: { percentage: 50 },
     });
-    expect(entries.length).toBe(1);
-    const e = entries[0];
+    expect(s.entries.length).toBe(1);
+    const e = s.entries[0]!;
     expect(e.path).toBe("renamed-dest.txt");
     expect(e.oldPath).toBe("rename-source.txt");
     expect(e.index).toBe("renamed");
-    expect(e.worktree).toBe(null);
+    expect(e.worktree).toBeNull();
     expect(e.porcelain).toBe("R ");
 
     // Rename detection disabled: the same state is an add + a delete.
@@ -304,11 +298,11 @@ describe("Repository.status — renames and copies", () => {
   test("staged duplicate content is reported as a copy with copies enabled", async () => {
     write("copy-dest.txt", COPIED_CONTENT);
     git("add copy-dest.txt");
-    const entries = await repo.status({
+    const s = await repo.status({
       untracked: "none",
       headToIndexRenames: { percentage: 50, copies: true },
     });
-    const e = find(entries, "copy-dest.txt");
+    const e = find(s, "copy-dest.txt");
     expect(e.index).toBe("copied");
     expect(e.oldPath).toBe("copy-source.txt");
     expect(e.porcelain).toBe("C ");
@@ -329,7 +323,8 @@ describe("Repository.status — head and pathspec options", () => {
     write("b.txt", "b\n");
     git("add b.txt");
 
-    await expect(repo.status({ head: "HEAD~1", untracked: "none" })).resolves.toEqual([]);
+    const head = await repo.status({ head: "HEAD~1", untracked: "none" });
+    expect(head.entries).toEqual([]);
     const e = find(await repo.status({ untracked: "none" }), "b.txt");
     expect(e.porcelain).toBe("M ");
     resetHard();
@@ -338,11 +333,11 @@ describe("Repository.status — head and pathspec options", () => {
   test("pathspec restricts the report to matching paths", async () => {
     write("b.txt", "modified\n");
     write("zz.txt", "untracked\n");
-    const entries = await repo.status({
+    const s = await repo.status({
       pathspec: ["b.txt"],
       untracked: "files",
     });
-    expect(entries.map((e) => e.path)).toEqual(["b.txt"]);
+    expect(s.entries.map((e) => e.path)).toEqual(["b.txt"]);
     remove("zz.txt");
     resetHard();
   });
@@ -356,7 +351,7 @@ describe("Repository.status — head and pathspec options", () => {
       pathspec: ["lit?x.txt"],
       untracked: "files",
     });
-    expect(globbed.map((e) => e.path).sort()).toEqual(["lit?x.txt", "litqx.txt"]);
+    expect(globbed.entries.map((e) => e.path).sort()).toEqual(["lit?x.txt", "litqx.txt"]);
 
     // As a literal path, only the file whose name contains '?' matches.
     const literal = await repo.status({
@@ -364,59 +359,62 @@ describe("Repository.status — head and pathspec options", () => {
       disablePathspecMatch: true,
       untracked: "files",
     });
-    expect(literal.map((e) => e.path)).toEqual(["lit?x.txt"]);
+    expect(literal.entries.map((e) => e.path)).toEqual(["lit?x.txt"]);
     remove("lit?x.txt");
     remove("litqx.txt");
   });
 });
 
 // ---------------------------------------------------------------------------
-// indexWorktree, statusFile, shouldIgnore
+// indexWorktree, statusFile, isPathExcluded
 // ---------------------------------------------------------------------------
 
-describe("Repository.indexWorktree / statusFile / shouldIgnore", () => {
+describe("Repository.indexWorktree / statusFile / isPathExcluded", () => {
   test("indexWorktree ignores staged-only changes", async () => {
     write("b.txt", "staged\n");
     git("add b.txt");
-    await expect(repo.indexWorktree()).resolves.toEqual([]);
+    const iw = await repo.indexWorktree();
+    expect(iw.entries).toEqual([]);
     resetHard();
   });
 
   test("indexWorktree returns worktree halves only, even when show: 'index' is set", async () => {
     write("b.txt", "unstaged\n");
-    const entries = await repo.indexWorktree({ show: "index" });
-    const e = find(entries, "b.txt");
-    expect(e.index).toBe(null);
+    const s = await repo.indexWorktree({ show: "index" });
+    const e = find(s, "b.txt");
+    expect(e.index).toBeNull();
     expect(e.worktree).toBe("modified");
     expect(e.porcelain).toBe(" M");
     resetHard();
   });
 
-  test("statusFile returns null for clean and unknown paths", async () => {
-    await expect(repo.statusFile("dir/nested.txt")).resolves.toBe(null);
-    await expect(repo.statusFile("no-such-path.txt")).resolves.toBe(null);
+  test("statusFile returns an empty entry list for clean and unknown paths", async () => {
+    const clean = await repo.statusFile("dir/nested.txt");
+    expect(clean.entries).toEqual([]);
+    const unknown = await repo.statusFile("no-such-path.txt");
+    expect(unknown.entries).toEqual([]);
   });
 
   test("statusFile reports modified and untracked paths", async () => {
     write("b.txt", "modified\n");
     const modified = await repo.statusFile("b.txt");
-    expect(modified).not.toBe(null);
-    expect(modified!.porcelain).toBe(" M");
+    expect(modified.entries.length).toBe(1);
+    expect(modified.entries[0]!.porcelain).toBe(" M");
 
     write("sf-untracked.txt", "?\n");
     const untracked = await repo.statusFile("sf-untracked.txt");
-    expect(untracked).not.toBe(null);
-    expect(untracked!.porcelain).toBe("??");
-    expect(untracked!.worktree).toBe("untracked");
+    expect(untracked.entries.length).toBe(1);
+    expect(untracked.entries[0]!.porcelain).toBe("??");
+    expect(untracked.entries[0]!.worktree).toBe("untracked");
     remove("sf-untracked.txt");
     resetHard();
   });
 
-  test("shouldIgnore consults .gitignore rules synchronously", () => {
+  test("isPathExcluded consults .gitignore rules", () => {
     mkdirSync(join(fixture, "ignored"), { recursive: true });
-    expect(repo.shouldIgnore("ignored/x")).toBe(true);
-    expect(repo.shouldIgnore("fresh.log")).toBe(true);
-    expect(repo.shouldIgnore("b.txt")).toBe(false);
+    expect(repo.isPathExcluded("ignored/x")).toBe(true);
+    expect(repo.isPathExcluded("fresh.log")).toBe(true);
+    expect(repo.isPathExcluded("b.txt")).toBe(false);
   });
 });
 
@@ -436,8 +434,8 @@ describe("Repository.status — merge conflicts", () => {
 
     const e = find(await repo.status({ untracked: "none" }), "conflict.txt");
     expect(e.porcelain).toBe("UU");
-    expect(e.index).toBe(null);
-    expect(e.worktree).toBe(null);
+    expect(e.index).toBeNull();
+    expect(e.worktree).toBeNull();
 
     git("merge --abort");
     git("branch -D feature");
@@ -462,6 +460,7 @@ describe("Repository.status — option validation", () => {
   test("updateIndex: true refreshes stat info without reporting changes", async () => {
     // Bump the mtime of an unchanged file so its index stat data is stale.
     utimesSync(join(fixture, "b.txt"), new Date(), new Date(Date.now() + 5_000));
-    await expect(repo.status({ updateIndex: true, untracked: "none" })).resolves.toEqual([]);
+    const s = await repo.status({ updateIndex: true, untracked: "none" });
+    expect(s.entries).toEqual([]);
   });
 });

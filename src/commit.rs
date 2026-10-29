@@ -22,7 +22,7 @@ use crate::log::{CommitInfo, log_summary};
 use crate::mailmap::Mailmap;
 use crate::object::{Object, build_object};
 use crate::repository::Repository;
-use crate::tree::{Tree, build_tree};
+use crate::tree::{Tree, TreeStore, build_tree, prolly_mirror_objects};
 
 fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -227,6 +227,20 @@ impl Commit {
     #[napi(getter)]
     pub fn id(&self) -> String {
         self.id.to_string()
+    }
+
+    /// Mirror this commit and its entire reachable object graph (trees, blobs,
+    /// tags, and ancestor commits) into the repository's canonical prolly node
+    /// store.
+    ///
+    /// Returns the [`TreeStore`]: `root` is the content id of the top-level
+    /// prolly tree and is reproducible for identical commit content. Reuses the
+    /// same engine as [`crate::tree::prolly_mirror_objects`], so it is consistent
+    /// with [`crate::export::export_prolly`].
+    #[napi]
+    pub fn prolly_tree(&self) -> napi::Result<TreeStore> {
+        let r = thread_local(&self.repo);
+        crate::tree::prolly_mirror_objects(&r, &[self.id], &[])
     }
 
     /// Full commit message, with leading newlines removed (libgit2's
@@ -1030,6 +1044,27 @@ impl Repository {
             .find_commit(parse_oid(&id)?)
             .map_err(|e| err("find_commit", e))?;
         build_commit(&self.inner, commit)
+    }
+
+    /// The commit `HEAD` points to. Returns a `Commit` handle; read its sha via
+    /// `commit.id`.
+    #[napi]
+    pub fn head_commit(&self) -> napi::Result<Commit> {
+        let r = thread_local(&self.inner);
+        let commit = r.head_commit().map_err(|e| err("head_commit", e))?;
+        build_commit(&self.inner, commit)
+    }
+
+    /// The hex sha of the commit `HEAD` currently points to, as a plain string.
+    /// Returns `null` when `HEAD` is unborn (no commit yet) — handy for build
+    /// banners and version strings without constructing a `Commit`.
+    #[napi(getter)]
+    pub fn head_commit_id(&self) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        match r.head_commit() {
+            Ok(commit) => Ok(Some(commit.id.to_string())),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Write a loose commit object directly to the object database without moving references.

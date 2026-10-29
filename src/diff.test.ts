@@ -30,7 +30,7 @@ describe("imara line diff (Algorithm / diff)", () => {
   test("diff detects a single changed line (default Histogram)", () => {
     const hunks = diff("a\nb\nc\n", "a\nB\nc\n");
     expect(hunks.length).toBe(1);
-    const h = hunks[0];
+    const h = hunks[0]!;
     expect(h.beforeStart).toBe(1);
     expect(h.beforeEnd).toBe(2);
     expect(h.afterStart).toBe(1);
@@ -44,7 +44,7 @@ describe("imara line diff (Algorithm / diff)", () => {
   test("diff reports a line appended at the end", () => {
     const hunks = diff("a\nb\n", "a\nb\nc\n");
     expect(hunks.length).toBe(1);
-    const h = hunks[0];
+    const h = hunks[0]!;
     expect(h.beforeStart).toBe(2);
     expect(h.beforeEnd).toBe(2);
     expect(h.afterStart).toBe(2);
@@ -54,7 +54,7 @@ describe("imara line diff (Algorithm / diff)", () => {
   test("diff reports a removed line", () => {
     const hunks = diff("a\nb\nc\n", "a\nc\n");
     expect(hunks.length).toBe(1);
-    const h = hunks[0];
+    const h = hunks[0]!;
     expect(h.beforeStart).toBe(1);
     expect(h.beforeEnd).toBe(2);
     expect(h.afterStart).toBe(1);
@@ -64,8 +64,8 @@ describe("imara line diff (Algorithm / diff)", () => {
   test("diff reports two disjoint changes as separate hunks", () => {
     const hunks = diff("a\nb\nc\nd\ne\n", "a\nB\nc\nd\nE\n");
     expect(hunks.length).toBe(2);
-    expect(hunks[0].beforeStart).toBe(1);
-    expect(hunks[1].beforeStart).toBe(4);
+    expect(hunks[0]!.beforeStart).toBe(1);
+    expect(hunks[1]!.beforeStart).toBe(4);
   });
 
   test("Myers and Histogram agree for a simple change", () => {
@@ -117,7 +117,7 @@ describe("Repository.diffTreeToTree", () => {
     const t2 = writeTree("hello world\n");
     const changes = repo.diffTreeToTree(t1, t2);
     expect(changes.length).toBe(1);
-    const c = changes[0];
+    const c = changes[0]!;
     expect(c.kind).toBe("Modified");
     expect(typeof c.oldId).toBe("string");
     expect(typeof c.newId).toBe("string");
@@ -145,9 +145,9 @@ describe("Repository.diffTreeToTree", () => {
       renameThreshold: 50,
     });
     expect(renamed.length).toBe(1);
-    expect(renamed[0].kind).toBe("Renamed");
-    expect(renamed[0].sourceLocation).toBe("a.txt");
-    expect(renamed[0].path).toBe("b.txt");
+    expect(renamed[0]!.kind).toBe("Renamed");
+    expect(renamed[0]!.sourceLocation).toBe("a.txt");
+    expect(renamed[0]!.path).toBe("b.txt");
 
     // Disabled rename tracking reports the raw delete+add pair instead.
     const split = repo.diffTreeToTree(t1, t2, { trackRenames: "Disabled" });
@@ -181,10 +181,10 @@ describe("Repository.diffTreeToIndex", () => {
     const tree = writeTree2([{ path: "only.txt", content: "x\n" }]);
     const changes = repo.diffTreeToIndex(tree);
     expect(changes.length).toBe(1);
-    expect(changes[0].kind).toBe("Deleted");
-    expect(changes[0].path).toBe("only.txt");
-    expect(typeof changes[0].oldId).toBe("string");
-    expect(changes[0].newId).toBeUndefined();
+    expect(changes[0]!.kind).toBe("Deleted");
+    expect(changes[0]!.path).toBe("only.txt");
+    expect(typeof changes[0]!.oldId).toBe("string");
+    expect(changes[0]!.newId).toBeUndefined();
   });
 
   test("pathspec limits which entries are compared", () => {
@@ -194,7 +194,7 @@ describe("Repository.diffTreeToIndex", () => {
     ]);
     const changes = repo.diffTreeToIndex(tree, { pathspec: ["keep.txt"] });
     expect(changes.length).toBe(1);
-    expect(changes[0].path).toBe("keep.txt");
+    expect(changes[0]!.path).toBe("keep.txt");
   });
 
   test("sync and async diffTreeToIndex agree", async () => {
@@ -215,8 +215,8 @@ describe("Repository.diffIndexToWorkdir", () => {
     const changes = repo.diffIndexToWorkdir();
     const untracked = changes.filter((c) => c.path === "untracked.txt");
     expect(untracked.length).toBe(1);
-    expect(untracked[0].kind).toBe("Added");
-    expect(untracked[0].entryMode).toBe("100644");
+    expect(untracked[0]!.kind).toBe("Added");
+    expect(untracked[0]!.entryMode).toBe("100644");
   });
 
   test("untracked: 'none' omits untracked files", () => {

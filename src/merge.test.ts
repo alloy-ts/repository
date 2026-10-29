@@ -434,3 +434,64 @@ describe("Repository merge (src/merge.rs)", () => {
     expect(text).toContain("<<<<<<< a.txt");
   });
 });
+
+describe("merge.algorithm = prolly (src/merge.rs)", () => {
+  test("treeMergeOptions() reports the configured engine", () => {
+    git("config merge.algorithm prolly");
+    const r = Repository.open(fixture);
+    try {
+      expect(r.treeMergeOptions().algorithm).toBe("prolly");
+    } finally {
+      git("config merge.algorithm git");
+    }
+  });
+
+  test("mergeTrees() with algorithm=prolly merges cleanly like git", () => {
+    const gitOutcome = repo.mergeTrees(mainTree, featureTree, baseTree);
+    const prollyOutcome = repo.mergeTrees(mainTree, featureTree, baseTree, {
+      algorithm: "prolly",
+    });
+    expect(prollyOutcome.conflicts).toBe(false);
+    expect(prollyOutcome.treeId).toMatch(/^[0-9a-f]{40}$/);
+    // For a clean, non-overlapping merge both engines agree on the tree.
+    expect(prollyOutcome.treeId).toBe(gitOutcome.treeId);
+  });
+
+  test("mergeTrees() with algorithm=prolly reports content conflicts", () => {
+    const outcome = repo.mergeTrees(conflictMainTree, conflictFeatureTree, baseTree, {
+      algorithm: "prolly",
+    });
+    expect(outcome.conflicts).toBe(true);
+    expect(outcome.hasUnresolvedConflicts).toBe(true);
+    expect(outcome.conflictDetails.length).toBe(1);
+    const c = outcome.conflictDetails[0]!;
+    expect(c.resolution).toBe(
+      "failed:oursModifiedTheirsModifiedThenBlobContentMerge",
+    );
+    expect(c.mergedBlobResolution).toBe("conflict");
+    const text = repo.findBlob(c.mergedBlobId!).content().toString();
+    expect(text).toContain("<<<<<<<");
+  });
+
+  test("mergeCommits() with algorithm=prolly merges commits", () => {
+    const outcome = repo.mergeCommits(mainTip, featureTip, {
+      algorithm: "prolly",
+    });
+    expect(outcome.conflicts).toBe(false);
+    const tree = repo.findTree(outcome.treeId);
+    expect(tree.entry("main-only.txt")).not.toBeNull();
+    expect(tree.entry("feature-only.txt")).not.toBeNull();
+  });
+
+  test("merge.algorithm config is honoured without an explicit option", () => {
+    git("config merge.algorithm prolly");
+    const r = Repository.open(fixture);
+    try {
+      const outcome = r.mergeTrees(mainTree, featureTree, baseTree);
+      expect(outcome.conflicts).toBe(false);
+      expect(outcome.treeId).toMatch(/^[0-9a-f]{40}$/);
+    } finally {
+      git("config merge.algorithm git");
+    }
+  });
+});

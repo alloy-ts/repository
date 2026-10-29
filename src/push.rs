@@ -426,7 +426,7 @@ fn native_local_push(
 /// temporary fallback until the receive-pack wire protocol is implemented over
 /// `gix-transport`.
 ///
-/// Async: the (blocking) object transfer / `git push` runs on a libuv worker
+/// Async: the (blocking) object transfer / `git push` runs on a libuv task
 /// thread and resolves a `Promise<PushOutcome>`, so it does not block the JS
 /// event loop.
 #[napi]

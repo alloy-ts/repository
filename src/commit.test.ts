@@ -94,6 +94,17 @@ describe("Commit handle getters", () => {
     expect(() => root.nthAncestor(1)).toThrow();
   });
 
+  test("headCommit returns the HEAD commit with a readable id", () => {
+    const current = repo.headCommit();
+    expect(current.id).toMatch(/^[0-9a-f]{40}$/);
+    expect(current.id).toBe(repo.headCommit().id);
+  });
+
+  test("headCommitId returns the HEAD sha (or null when unborn)", () => {
+    expect(repo.headCommitId).toMatch(/^[0-9a-f]{40}$/);
+    expect(repo.headCommitId).toBe(repo.headCommit().id);
+  });
+
   test("info() mirrors the CommitInfo shape from log()", () => {
     const entries = repo.log();
     const commit: Commit = repo.findCommit(entries[0].sha);

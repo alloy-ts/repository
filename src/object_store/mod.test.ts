@@ -1,23 +1,19 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { ObjectDatabase, ObjectHandle, ObjectStore } from "./main.ts";
+import { ObjectDatabase, ObjectHandle } from "../main.ts";
 
 const realRoot = process.cwd();
 const MISSING_ID = "0000000000000000000000000000000000000000";
 
 let base: string;
-let objectStore: ObjectStore;
 let objectsDir: string;
 let headId: string;
 
 beforeAll(() => {
   base = mkdtempSync(join(tmpdir(), "repo-store-"));
-  const looseObjectsDir = join(base, "loose-objects");
-  mkdirSync(looseObjectsDir, { recursive: true });
-  objectStore = new ObjectStore(looseObjectsDir);
 
   objectsDir = join(
     realRoot,
@@ -39,109 +35,7 @@ afterAll(() => {
   });
 });
 
-describe("ObjectStore (src/store.rs)", () => {
-  const data = Buffer.from("store-test-blob\n");
-
-  test("writeObject() round-trips a loose object", () => {
-    const id = objectStore.writeObject("blob", data);
-    expect(id).toMatch(/^[0-9a-f]{40}$/);
-
-    expect(objectStore.contains(id)).toBe(true);
-    expect(objectStore.contains(MISSING_ID)).toBe(false);
-
-    const found = objectStore.tryFind(id);
-    expect(found).not.toBeNull();
-    expect(found!.kind).toBe("blob");
-    expect(Buffer.from(found!.data).equals(data)).toBe(true);
-
-    const header = objectStore.tryHeader(id);
-    expect(header).not.toBeNull();
-    expect(header!.kind).toBe("blob");
-    expect(header!.size).toBe(data.length);
-
-    // A missing (but well-formed) id yields null, not an error.
-    expect(objectStore.tryFind(MISSING_ID)).toBeNull();
-    expect(objectStore.tryHeader(MISSING_ID)).toBeNull();
-  });
-
-  test("objectPath() points at the sharded loose file", () => {
-    const id = objectStore.writeObject("blob", data);
-    const path = objectStore.objectPath(id);
-    // Loose objects are stored sharded as <2-hex>/<38-hex>, so the contiguous id string does not
-    // appear; assert the sharded form instead.
-    expect(path).toContain(join(id.slice(0, 2), id.slice(2)));
-    expect(path).toContain(join(base, "loose-objects"));
-  });
-
-  test("lookupPrefix() resolves a unique prefix", () => {
-    const id = objectStore.writeObject("blob", data);
-    const lookup = objectStore.lookupPrefix(id.slice(0, 12));
-    expect(lookup.found).toBe(true);
-    expect(lookup.ambiguous).toBe(false);
-    expect(lookup.id).toBe(id);
-
-    const none = objectStore.lookupPrefix("ffffffffffff");
-    expect(none.found).toBe(false);
-  });
-
-  test("getters report the configured state", () => {
-    expect(objectStore.path).toContain("loose-objects");
-    expect(objectStore.objectHash).toBe("sha1");
-  });
-
-  test("sha256 object hash is supported", () => {
-    const dir = join(base, "sha256-loose");
-    mkdirSync(dir, { recursive: true });
-    const store = new ObjectStore(dir, "sha256");
-    expect(store.objectHash).toBe("sha256");
-    const id = store.writeObject("blob", data);
-    expect(id).toMatch(/^[0-9a-f]{64}$/);
-    expect(store.contains(id)).toBe(true);
-    const found = store.tryFind(id);
-    expect(found).not.toBeNull();
-    expect(found!.kind).toBe("blob");
-    expect(Buffer.from(found!.data).equals(data)).toBe(true);
-  });
-
-  test("reader() streams a loose object in chunks", () => {
-    const id = objectStore.writeObject("blob", data);
-    const reader = objectStore.reader(id);
-    expect(reader.kind).toBe("blob");
-    expect(reader.size).toBe(data.length);
-
-    const chunks: Buffer[] = [];
-    let chunk = reader.read(4);
-    while (chunk.length > 0) {
-      chunks.push(Buffer.from(chunk));
-      chunk = reader.read(4);
-    }
-    expect(Buffer.concat(chunks).equals(data)).toBe(true);
-  });
-
-  test("reader() throws for a missing object", () => {
-    expect(() => objectStore.reader(MISSING_ID)).toThrow();
-  });
-
-  test("writer() buffers writes and finalizes to an id", () => {
-    const writer = objectStore.writer("blob", data.length);
-    writer.write(data.subarray(0, 3));
-    writer.write(data.subarray(3));
-    const id = writer.finalize();
-    expect(id).toMatch(/^[0-9a-f]{40}$/);
-    expect(objectStore.contains(id)).toBe(true);
-    const found = objectStore.tryFind(id);
-    expect(found).not.toBeNull();
-    expect(Buffer.from(found!.data).equals(data)).toBe(true);
-  });
-
-  test("writer() enforces the declared size", () => {
-    const writer = objectStore.writer("blob", 999);
-    writer.write(data);
-    expect(() => writer.finalize()).toThrow();
-  });
-});
-
-describe("ObjectDatabase / ObjectHandle (src/store.rs)", () => {
+describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
   let db: ObjectDatabase;
 
   beforeAll(() => {
@@ -307,7 +201,6 @@ describe("ObjectDatabase / ObjectHandle (src/store.rs)", () => {
 
   test("sha256 object hash is accepted", () => {
     const dir = join(base, "sha256-db");
-    mkdirSync(dir, { recursive: true });
     const db256 = new ObjectDatabase(dir, { objectHash: "sha256" });
     expect(db256.objectHash).toBe("sha256");
   });
@@ -328,7 +221,6 @@ describe("ObjectDatabase / ObjectHandle (src/store.rs)", () => {
 
   test("ObjectHandle reader()/writer() round-trip a blob in a temp db", () => {
     const dir = join(base, "handle-rw");
-    mkdirSync(dir, { recursive: true });
     const tmpDb = new ObjectDatabase(dir);
     const handle: ObjectHandle = tmpDb.intoInner();
     const blob = Buffer.from("handle-writer-blob\n");
@@ -354,7 +246,6 @@ describe("ObjectDatabase / ObjectHandle (src/store.rs)", () => {
 
   test("ObjectDatabase reader()/writer() round-trip a blob", () => {
     const dir = join(base, "db-rw");
-    mkdirSync(dir, { recursive: true });
     const tmpDb = new ObjectDatabase(dir);
     const blob = Buffer.from("db-writer-blob\n");
 

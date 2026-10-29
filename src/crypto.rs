@@ -701,7 +701,7 @@ mod legacy_webcrypto {
             Ok(self)
         }
 
-        /// Construct from a BLS12-381 signature (`blsful::Signature`) with an explicit codec —
+        /// Construct from a BLS12-381 signature (`rustls::Signature`) with an explicit codec —
         /// `"bls12_381-g1-msig"` (48-byte sig) or `"bls12_381-g2-msig"` (96-byte sig).
         #[napi(factory)]
         pub fn new_from_bls_signature(
@@ -712,7 +712,7 @@ mod legacy_webcrypto {
             let inner = match c {
                 multi_codec::Codec::Bls12381G1Msig => {
                     let sig =
-                        blsful::Signature::<blsful::Bls12381G1Impl>::try_from(signature.as_ref())
+                        rustls::Signature::<rustls::Bls12381G1Impl>::try_from(signature.as_ref())
                             .map_err(|e| {
                             napi::Error::from_reason(format!("invalid BLS12-381 G1 signature: {e}"))
                         })?;
@@ -721,7 +721,7 @@ mod legacy_webcrypto {
                 }
                 multi_codec::Codec::Bls12381G2Msig => {
                     let sig =
-                        blsful::Signature::<blsful::Bls12381G2Impl>::try_from(signature.as_ref())
+                        rustls::Signature::<rustls::Bls12381G2Impl>::try_from(signature.as_ref())
                             .map_err(|e| {
                             napi::Error::from_reason(format!("invalid BLS12-381 G2 signature: {e}"))
                         })?;
@@ -737,7 +737,7 @@ mod legacy_webcrypto {
             Ok(Self { inner })
         }
 
-        /// Construct from a BLS12-381 signature *share* (`blsful::SignatureShare`) with an explicit
+        /// Construct from a BLS12-381 signature *share* (`rustls::SignatureShare`) with an explicit
         /// share codec — `"bls12_381-g1-share-msig"` or `"bls12_381-g2-share-msig"`.
         #[napi(factory)]
         pub fn new_from_bls_signature_share(
@@ -750,7 +750,7 @@ mod legacy_webcrypto {
             let inner = match c {
                 multi_codec::Codec::Bls12381G1ShareMsig => {
                     let s =
-                        blsful::SignatureShare::<blsful::Bls12381G1Impl>::try_from(share.as_ref())
+                        rustls::SignatureShare::<rustls::Bls12381G1Impl>::try_from(share.as_ref())
                             .map_err(|e| {
                                 napi::Error::from_reason(format!("invalid BLS12-381 G1 share: {e}"))
                             })?;
@@ -764,7 +764,7 @@ mod legacy_webcrypto {
                 }
                 multi_codec::Codec::Bls12381G2ShareMsig => {
                     let s =
-                        blsful::SignatureShare::<blsful::Bls12381G2Impl>::try_from(share.as_ref())
+                        rustls::SignatureShare::<rustls::Bls12381G2Impl>::try_from(share.as_ref())
                             .map_err(|e| {
                                 napi::Error::from_reason(format!("invalid BLS12-381 G2 share: {e}"))
                             })?;
@@ -2682,10 +2682,7 @@ mod legacy_webcrypto_key {
         /// Export a key. `jwk` returns the JWK object; every other format returns a
         /// `Buffer` of DER/raw bytes.
         #[napi]
-        pub fn export_key(
-            _format: String,
-            _key: &CryptoKey,
-        ) -> napi::Result<Buffer> {
+        pub fn export_key(_format: String, _key: &CryptoKey) -> napi::Result<Buffer> {
             Err(not_implemented())
         }
 
@@ -2882,10 +2879,7 @@ mod legacy_webcrypto_key {
         }
 
         #[napi]
-        pub fn export_key_instance(
-            &self,
-            format: String,
-        ) -> napi::Result<Buffer> {
+        pub fn export_key_instance(&self, format: String) -> napi::Result<Buffer> {
             Self::export_key(format, self)
         }
 
@@ -2903,7 +2897,13 @@ mod legacy_webcrypto_key {
             extractable: bool,
             key_usages: Vec<String>,
         ) -> napi::Result<CryptoKey> {
-            Self::derive_key_static(algorithm, base_key, derived_key_type, extractable, key_usages)
+            Self::derive_key_static(
+                algorithm,
+                base_key,
+                derived_key_type,
+                extractable,
+                key_usages,
+            )
         }
 
         #[napi]
@@ -2952,7 +2952,9 @@ mod legacy_webcrypto_key {
             _algorithm: CryptoOpParams,
             _public_key: &CryptoKey,
         ) -> napi::Result<Buffer> {
-            Err(bad("encapsulateBits (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "encapsulateBits (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "decapsulateBits")]
@@ -2961,7 +2963,9 @@ mod legacy_webcrypto_key {
             _private_key: &CryptoKey,
             _ciphertext: Uint8Array,
         ) -> napi::Result<Buffer> {
-            Err(bad("decapsulateBits (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "decapsulateBits (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "encapsulateKey")]
@@ -2972,7 +2976,9 @@ mod legacy_webcrypto_key {
             _extractable: bool,
             _key_usages: Vec<String>,
         ) -> napi::Result<CryptoKey> {
-            Err(bad("encapsulateKey (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "encapsulateKey (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "decapsulateKey")]
@@ -2984,7 +2990,9 @@ mod legacy_webcrypto_key {
             _extractable: bool,
             _key_usages: Vec<String>,
         ) -> napi::Result<CryptoKey> {
-            Err(bad("decapsulateKey (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "decapsulateKey (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "encapsulateBits")]

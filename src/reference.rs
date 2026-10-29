@@ -14,33 +14,6 @@ use crate::repository::Repository;
 use crate::tag::{Tag, build_tag};
 use crate::tree::{Tree, build_tree};
 
-/// The repository HEAD, exposed to TypeScript.
-#[napi(object)]
-pub struct Head {
-    /// The name of the reference `HEAD` points at (`refs/heads/...`), or `null`
-    /// when `HEAD` is detached or unborn.
-    pub referent: Option<String>,
-    /// The kind of `HEAD`: `"symbolic"` (points at a branch), `"detached"`
-    /// (points directly at an object), or `"unborn"` (points at a branch that
-    /// does not exist yet).
-    pub kind: String,
-}
-
-pub fn build_head(_repo: &Arc<gix::ThreadSafeRepository>, head: gix::Head) -> napi::Result<Head> {
-    let referent = head.referent_name().map(|n| n.to_string());
-    let kind = if head.is_detached() {
-        "detached"
-    } else if head.is_unborn() {
-        "unborn"
-    } else {
-        "symbolic"
-    };
-    Ok(Head {
-        referent,
-        kind: kind.to_string(),
-    })
-}
-
 /// A git reference (branch, tag, or HEAD) exposed to TypeScript.
 #[napi]
 pub struct Reference {
@@ -846,77 +819,6 @@ fn build_ref_edit(input: &RefEditInput) -> napi::Result<gix::refs::transaction::
 
 #[napi]
 impl Repository {
-    /// The repository `HEAD`.
-    #[napi]
-    pub fn head(&self) -> napi::Result<Head> {
-        let r = thread_local(&self.inner);
-        build_head(&self.inner, r.head().map_err(|e| err("head", e))?)
-    }
-
-    /// The commit `HEAD` points to.
-    #[napi]
-    pub fn head_commit(&self) -> napi::Result<Commit> {
-        let r = thread_local(&self.inner);
-        build_commit(
-            &self.inner,
-            r.head_commit().map_err(|e| err("head_commit", e))?,
-        )
-    }
-
-    /// The object id `HEAD` points to.
-    #[napi]
-    pub fn head_id(&self) -> napi::Result<String> {
-        let r = thread_local(&self.inner);
-        let id = r.head_id().map_err(|e| err("head_id", e))?;
-        Ok(id.to_string())
-    }
-
-    /// The symbolic referent name of `HEAD`, if it is not detached.
-    #[napi]
-    pub fn head_name(&self) -> napi::Result<Option<String>> {
-        let r = thread_local(&self.inner);
-        Ok(r.head_name()
-            .map_err(|e| err("head_name", e))?
-            .map(|n| n.to_string()))
-    }
-
-    /// The object id of the root tree pointed to by HEAD.
-    #[napi]
-    pub fn head_tree_id(&self) -> napi::Result<String> {
-        let r = thread_local(&self.inner);
-        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
-        Ok(id.to_string())
-    }
-
-    /// The object id of the root tree pointed to by HEAD, falling back to the empty tree
-    /// if HEAD is unborn.
-    #[napi]
-    pub fn head_tree_id_or_empty(&self) -> napi::Result<String> {
-        let r = thread_local(&self.inner);
-        let id = r
-            .head_tree_id_or_empty()
-            .map_err(|e| err("head_tree_id_or_empty", e))?;
-        Ok(id.to_string())
-    }
-
-    /// The reference HEAD points to, or null if HEAD is detached or unborn.
-    #[napi]
-    pub fn head_ref(&self) -> napi::Result<Option<Reference>> {
-        let r = thread_local(&self.inner);
-        match r.head_ref().map_err(|e| err("head_ref", e))? {
-            Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// The root tree object HEAD points to.
-    #[napi]
-    pub fn head_tree(&self) -> napi::Result<Tree> {
-        let r = thread_local(&self.inner);
-        let tree = r.head_tree().map_err(|e| err("head_tree", e))?;
-        build_tree(&self.inner, tree.id)
-    }
-
     /// Point HEAD at a commit id (detached HEAD) or at a branch/ref name (symbolic HEAD).
     ///
     /// `target` is interpreted as a 40-hex object id when it parses as one; otherwise it is
@@ -956,14 +858,6 @@ impl Repository {
         );
         r.edit_reference(edit).map_err(|e| err("set_head", e))?;
         Ok(())
-    }
-
-    /// Whether HEAD is detached (points directly at an object id rather than a branch).
-    /// Mirrors git2's `git_repository_head_detached`.
-    #[napi]
-    pub fn head_detached(&self) -> napi::Result<bool> {
-        let r = thread_local(&self.inner);
-        Ok(r.head().map_err(|e| err("head", e))?.is_detached())
     }
 
     /// Point HEAD directly at a commit object id (detached HEAD). `target` must parse as a

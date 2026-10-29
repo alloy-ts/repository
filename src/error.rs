@@ -571,7 +571,7 @@ pub enum Error {
         /// Configured timeout in seconds.
         timeout_seconds: u64,
     },
-    /// Generic error with a custom message.
+    /// Store error with a custom message.
     Custom {
         /// Custom error message.
         message: String,

@@ -208,7 +208,7 @@ impl Repository {
     ///
     /// When `path` is omitted, the destination defaults to a sanitized repository name
     /// derived from `url` in the current working directory (like `git clone <url>`).
-    /// Async: the (blocking) network transfer runs on a libuv worker thread and resolves a
+    /// Async: the (blocking) network transfer runs on a libuv task thread and resolves a
     /// `Promise<Repository>`.
     ///
     /// Advanced options (bare, depth, filter, progress, auth) are passed via the trailing
@@ -327,7 +327,7 @@ impl Cloner {
     ///
     /// When `path` is omitted, the destination defaults to a sanitized repository name
     /// derived from `url` in the current working directory. Async: the blocking network
-    /// transfer runs on a libuv worker thread and resolves a `Promise<Repository>`.
+    /// transfer runs on a libuv task thread and resolves a `Promise<Repository>`.
     ///
     /// Errors if `path` already exists (mirrors `git clone` and the classic `Cloner`).
     #[napi(ts_return_type = "Promise<Repository>")]
