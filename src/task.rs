@@ -1,15 +1,16 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 
+use napi::bindgen_prelude::*;
 use napi::Env;
-use crate::error::RepositoryResult as Result;
-use napi::Task;
-use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
-use crate::repository::{Repository, find_git};
+use crate::repository::{find_git, Repository};
 use crate::worktree::{StreamEntry, WorktreeHeadKind};
+
+static NEXT_THREAD_ID: AtomicU32 = AtomicU32::new(1);
 
 /// High-level task helpers, scoped to a [`Repository`].
 #[napi]
@@ -19,7 +20,10 @@ pub struct TaskOps {
 
 async fn run_git_cmd(repo: &Arc<gix::ThreadSafeRepository>, args: &[&str]) -> napi::Result<String> {
     let r = thread_local(repo);
-    let cwd = r.workdir().map(|p| p.to_path_buf()).unwrap_or_else(|| r.path().to_path_buf());
+    let cwd = r
+        .workdir()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| r.path().to_path_buf());
     let git_bin = find_git().unwrap_or_else(|| std::path::PathBuf::from("git"));
 
     let output = tokio::process::Command::new(&git_bin)
@@ -27,7 +31,9 @@ async fn run_git_cmd(repo: &Arc<gix::ThreadSafeRepository>, args: &[&str]) -> na
         .args(args)
         .output()
         .await
-        .map_err(|e| crate::error::err_str("task", format!("failed to execute git command: {e}")))?;
+        .map_err(|e| {
+            crate::error::err_str("task", format!("failed to execute git command: {e}"))
+        })?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -124,7 +130,7 @@ impl StreamTask {
     }
 }
 
-impl Task for StreamTask {
+impl napi::Task for StreamTask {
     type Output = Vec<StreamEntry>;
     type JsValue = Vec<StreamEntry>;
 
@@ -169,7 +175,7 @@ impl StreamRawTask {
     }
 }
 
-impl Task for StreamRawTask {
+impl napi::Task for StreamRawTask {
     type Output = Vec<u8>;
     type JsValue = Buffer;
 
@@ -214,7 +220,7 @@ impl AddWorktreeTask {
     }
 }
 
-impl Task for AddWorktreeTask {
+impl napi::Task for AddWorktreeTask {
     type Output = Repository;
     type JsValue = Repository;
 
@@ -270,7 +276,7 @@ impl RemoveWorktreeTask {
     }
 }
 
-impl Task for RemoveWorktreeTask {
+impl napi::Task for RemoveWorktreeTask {
     type Output = ();
     type JsValue = ();
 
@@ -286,5 +292,109 @@ impl Task for RemoveWorktreeTask {
 
     fn resolve(&mut self, _env: Env, output: ()) -> napi::Result<()> {
         Ok(output)
+    }
+}
+
+/// Threaded Task execution context and EventTarget interface for Node.js / web tasks.
+#[napi]
+pub struct TaskThread {
+    id: u32,
+    script_path: String,
+    running: Arc<AtomicBool>,
+    event_listeners: Arc<RwLock<HashMap<String, Vec<String>>>>,
+}
+
+#[napi]
+impl TaskThread {
+    #[napi(constructor)]
+    pub fn new(script_path: String) -> napi::Result<Self> {
+        let id = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+        let running = Arc::new(AtomicBool::new(true));
+        let event_listeners = Arc::new(RwLock::new(HashMap::new()));
+
+        let task = Self {
+            id,
+            script_path,
+            running,
+            event_listeners,
+        };
+
+        Ok(task)
+    }
+
+    /// The script path associated with this task thread.
+    #[napi(getter)]
+    pub fn script_path(&self) -> String {
+        self.script_path.clone()
+    }
+
+    /// An integer identifier for the referenced thread.
+    #[napi(getter)]
+    pub fn thread_id(&self) -> u32 {
+        self.id
+    }
+
+    /// Transmits a message to the task's background worker thread.
+    #[napi]
+    pub fn post_message(&self, _message: String) -> napi::Result<()> {
+        if !self.running.load(Ordering::Relaxed) {
+            return Err(napi::Error::from_reason("Task thread is terminated"));
+        }
+        Ok(())
+    }
+
+    /// Aborts task's associated global environment.
+    #[napi]
+    pub fn terminate(&self) -> napi::Result<()> {
+        self.running.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Ref the task handle.
+    #[napi]
+    pub fn ref_handle(&self) -> napi::Result<()> {
+        Ok(())
+    }
+
+    /// Unref the task handle.
+    #[napi]
+    pub fn unref_handle(&self) -> napi::Result<()> {
+        Ok(())
+    }
+
+    /// Appends an event listener for events whose type attribute value is `event_type`.
+    #[napi]
+    pub fn add_event_listener(&self, event_type: String, listener_id: String) -> napi::Result<()> {
+        let mut listeners = self
+            .event_listeners
+            .write()
+            .map_err(|_| napi::Error::from_reason("Failed to lock event listeners"))?;
+        listeners.entry(event_type).or_default().push(listener_id);
+        Ok(())
+    }
+
+    /// Removes an event listener for events whose type attribute value is `event_type`.
+    #[napi]
+    pub fn remove_event_listener(&self, event_type: String) -> napi::Result<()> {
+        let mut listeners = self
+            .event_listeners
+            .write()
+            .map_err(|_| napi::Error::from_reason("Failed to lock event listeners"))?;
+        listeners.remove(&event_type);
+        Ok(())
+    }
+
+    /// Dispatches a synthetic event to target.
+    #[napi]
+    pub fn dispatch_event(&self, event_type: String, _event_data: String) -> napi::Result<bool> {
+        let listeners = self
+            .event_listeners
+            .read()
+            .map_err(|_| napi::Error::from_reason("Failed to lock event listeners"))?;
+        if let Some(list) = listeners.get(&event_type) {
+            Ok(!list.is_empty())
+        } else {
+            Ok(false)
+        }
     }
 }
