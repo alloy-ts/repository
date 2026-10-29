@@ -2,8 +2,9 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use napi::{Env, FromNapiValue, NapiRaw, Unknown, ValueType};
-use napi::bindgen_prelude::{Buffer, JsFunction, ToNapiValue};
+use napi::bindgen_prelude::{Array, Buffer, FnArgs, FromNapiValue, Function, JsObjectValue, Object};
+use napi::sys;
+use napi::{Env, JsValue, Unknown, ValueType};
 use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
@@ -36,8 +37,6 @@ pub struct TaskOptions {
     #[napi(js_name = "resourceLimits")]
     pub resource_limits: Option<TaskResourceLimits>,
     /// Per-worker `process.env`. Accepts `'inherit'`, `'none'`, or a plain object.
-    /// (Advanced `SHARE_ENV` symbol support may require passing it via
-    /// `worker_data` instead, since it cannot round-trip through JSON.)
     pub env: Option<serde_json::Value>,
     /// Extra CLI args exposed as `process.argv` inside the worker.
     pub argv: Option<Vec<String>>,
@@ -65,14 +64,9 @@ pub struct TaskOptions {
 /// myTask.onmessage = (e) => console.log(e.data);
 /// myTask.postMessage([1, 2, 3]);
 /// ```
-///
-/// The binding does **not** reimplement Node's internal `Task` C++ class; it
-/// delegates to the public `Worker`, which already runs that machinery (a fresh
-/// V8 isolate + libuv loop per worker). The JS-side glue lives in
-/// [`TASK_BOOTSTRAP`] below.
 #[napi]
 pub struct Task {
-    /// Process-unique id used to key the worker and its handlers on the JS side.
+    /// Process-unique id used to key the worker and its handlers.
     id: u32,
     /// The `Worker.threadId` assigned by Node when the worker starts.
     thread_id: u32,
@@ -83,176 +77,222 @@ pub struct Task {
 /// Monotonic, process-unique id for each [`Task`] instance.
 static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Bootstrap JavaScript installed once per process. It defines global helpers
-/// that create/own the `Worker` instances and forward their `message` / `error`
-/// / `messageerror` / `exit` events to per-task handlers. The Rust side only
-/// ever talks to these helpers — arbitrary JS message values never cross the
-/// napi boundary as `Send` data; they stay on the JS side, structured-cloned by
-/// `node:worker_threads` itself.
-///
-/// Relies on `globalThis.__require` (a `require` exposed by the JS host, e.g.
-/// `globalThis.__require = require` in `index.ts`, since `require` is not a
-/// global inside `run_script`).
-const TASK_BOOTSTRAP: &str = r#"
-(function () {
-  if (typeof globalThis.__taskInit === 'function') return;
-  const wt = globalThis.__require('node:worker_threads');
-  const workers = (globalThis.__taskWorkers = {});
-  const handlers = (globalThis.__taskHandlers = {});
-  function fire(id, type, makeEvent) {
-    const h = handlers[id] || {};
-    const evt = makeEvent();
-    if (typeof h[type] === 'function') { try { h[type](evt); } catch (e) {} }
-    const list = (h.listeners && h.listeners[type]) || [];
-    for (const l of list) { try { l(evt); } catch (e) {} }
-  }
-  globalThis.__taskInit = function (id, path, options) {
-    const o = options || {};
-    const w = new wt.Worker(path, {
-      name: o.name ?? undefined,
-      resourceLimits: o.resourceLimits ? {
-        maxYoungGenerationSizeMb: o.resourceLimits.maxYoungGenerationSizeMb ?? undefined,
-        maxOldGenerationSizeMb: o.resourceLimits.maxOldGenerationSizeMb ?? undefined,
-        codeRangeSizeMb: o.resourceLimits.codeRangeSizeMb ?? undefined,
-        stackSizeMb: o.resourceLimits.stackSizeMb ?? undefined,
-      } : undefined,
-      argv: o.argv ?? undefined,
-      execArgv: o.execArgv ?? undefined,
-      workerData: o.workerData ?? undefined,
-      env: o.env ?? undefined,
-      trackUnmanagedFds: o.trackUnmanagedFds ?? undefined,
-    });
-    workers[id] = w;
-    w.on('message', (d) => fire(id, 'message', () => ({ data: d })));
-    w.on('error', (e) => fire(id, 'error', () => ({ error: e, message: e && e.message })));
-    w.on('messageerror', (e) => fire(id, 'messageerror', () => ({ error: e })));
-    w.on('exit', (code, sig) => fire(id, 'exit', () => ({ code, signal: sig })));
-    return w.threadId;
-  };
-  globalThis.__taskPost = function (id, msg, transfer) {
-    const w = workers[id]; if (!w) return;
-    w.postMessage(msg, transfer === undefined ? undefined : (Array.isArray(transfer) ? transfer : [transfer]));
-  };
-  globalThis.__taskTerminate = function (id) {
-    const w = workers[id]; if (!w) return Promise.resolve();
-    return w.terminate();
-  };
-  globalThis.__taskRef = function (id) { const w = workers[id]; if (w && w.ref) w.ref(); };
-  globalThis.__taskUnref = function (id) { const w = workers[id]; if (w && w.unref) w.unref(); };
-  globalThis.__taskSetHandler = function (id, type, fn) {
-    const h = handlers[id] || (handlers[id] = { listeners: {} });
-    h[type] = fn;
-  };
-  globalThis.__taskGetHandler = function (id, type) {
-    const h = handlers[id]; return h ? h[type] : undefined;
-  };
-  globalThis.__taskAddListener = function (id, type, fn) {
-    const h = handlers[id] || (handlers[id] = { listeners: {} });
-    (h.listeners[type] || (h.listeners[type] = [])).push(fn);
-  };
-  globalThis.__taskRemoveListener = function (id, type, fn) {
-    const h = handlers[id]; if (!h || !h.listeners || !h.listeners[type]) return;
-    h.listeners[type] = h.listeners[type].filter((l) => l !== fn);
-  };
-  globalThis.__taskDispatch = function (id, evt) {
-    const h = handlers[id] || {};
-    const t = evt && evt.type; if (!t) return;
-    if (typeof h[t] === 'function') { try { h[t](evt); } catch (e) {} }
-    const list = (h.listeners && h.listeners[t]) || [];
-    for (const l of list) { try { l(evt); } catch (e) {} }
-  };
-  globalThis.__taskGetHeapSnapshot = function (id, opts) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.getHeapSnapshot(opts);
-  };
-  globalThis.__taskGetHeapStatistics = function (id) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.getHeapStatistics();
-  };
-  globalThis.__taskCpuUsage = function (id, prev) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.cpuUsage(prev);
-  };
-  globalThis.__taskEventLoopUtilization = function (id, prev) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.performance.eventLoopUtilization(prev);
-  };
-  globalThis.__taskStartCpuProfile = function (id, opts) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.startCpuProfile(opts);
-  };
-  globalThis.__taskStopCpuProfile = function (id, opts) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.stopCpuProfile(opts);
-  };
-  globalThis.__taskStartHeapProfile = function (id, opts) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.startHeapProfile(opts);
-  };
-  globalThis.__taskStopHeapProfile = function (id, opts) {
-    const w = workers[id]; if (!w) return undefined;
-    return w.stopHeapProfile(opts);
-  };
-})();
-"#;
+fn undefined_unknown(env: &Env) -> Unknown<'static> {
+    let mut raw = std::ptr::null_mut();
+    unsafe {
+        sys::napi_get_undefined(env.raw(), &mut raw);
+        Unknown::from_raw_unchecked(env.raw(), raw)
+    }
+}
 
-fn task_ensure_bootstrap(env: &Env) -> napi::Result<()> {
-    let _: Unknown<'_> = env.run_script(TASK_BOOTSTRAP)?;
+fn get_worker_init_fn<'a>(env: &'a Env) -> napi::Result<Function<'a, FnArgs<(String, Object<'a>, u32)>, Unknown<'a>>> {
+    let mut global = env.get_global()?;
+    if let Ok(u) = global.get_named_property::<Unknown>("__taskInitFn") {
+        if u.get_type()? == ValueType::Function {
+            return unsafe { Function::from_napi_value(env.raw(), u.raw()) };
+        }
+    }
+    let init_fn: Function<FnArgs<(String, Object, u32)>, Unknown> = env.run_script(
+        "((script, opts, id) => {
+            const getWT = () => {
+                if (typeof globalThis.__require === 'function') return globalThis.__require('node:worker_threads');
+                if (typeof process.getBuiltinModule === 'function') return process.getBuiltinModule('node:worker_threads');
+                if (process.mainModule && typeof process.mainModule.require === 'function') return process.mainModule.require('node:worker_threads');
+                try { return require('node:worker_threads'); } catch {}
+                return require('node:module').createRequire(process.cwd() + '/')('node:worker_threads');
+            };
+            const wt = getWT();
+            const w = new wt.Worker(script, opts);
+            const fire = (type, evt) => {
+                const handlers = (globalThis.__taskHandlers || {})[id] || {};
+                if (typeof handlers[type] === 'function') { try { handlers[type](evt); } catch (e) {} }
+                const list = (handlers.listeners && handlers.listeners[type]) || [];
+                for (const l of list) { try { l(evt); } catch (e) {} }
+            };
+            w.on('message', (d) => fire('message', { data: d }));
+            w.on('error', (e) => fire('error', { error: e, message: e && e.message }));
+            w.on('messageerror', (e) => fire('messageerror', { error: e }));
+            w.on('exit', (code, sig) => fire('exit', { code, signal: sig }));
+            return w;
+        })"
+    )?;
+    let fn_unknown = unsafe { Unknown::from_raw_unchecked(env.raw(), init_fn.raw()) };
+    global.set_named_property("__taskInitFn", fn_unknown)?;
+    Ok(init_fn)
+}
+
+fn create_worker_instance<'a>(env: &'a Env, script: String, options: Object<'a>, id: u32) -> napi::Result<Object<'a>> {
+    let init_fn = get_worker_init_fn(env)?;
+    let val = init_fn.call((script, options, id).into())?;
+    unsafe { Object::from_napi_value(env.raw(), val.raw()) }
+}
+
+fn get_task_registries(env: &Env) -> napi::Result<(Object<'_>, Object<'_>)> {
+    let mut global = env.get_global()?;
+    let workers: Object = match global.get_named_property("__taskWorkers") {
+        Ok(obj) => obj,
+        Err(_) => {
+            let obj = Object::new(env)?;
+            global.set_named_property("__taskWorkers", obj.clone())?;
+            obj
+        }
+    };
+    let handlers: Object = match global.get_named_property("__taskHandlers") {
+        Ok(obj) => obj,
+        Err(_) => {
+            let obj = Object::new(env)?;
+            global.set_named_property("__taskHandlers", obj.clone())?;
+            obj
+        }
+    };
+    Ok((workers, handlers))
+}
+
+fn get_task_worker(env: &Env, id: u32) -> napi::Result<Option<Object<'_>>> {
+    let (workers, _) = get_task_registries(env)?;
+    let id_str = id.to_string();
+    match workers.get_named_property::<Unknown>(&id_str) {
+        Ok(u) => match u.get_type()? {
+            ValueType::Object => Ok(Some(unsafe { Object::from_napi_value(env.raw(), u.raw())? })),
+            _ => Ok(None),
+        },
+        Err(_) => Ok(None),
+    }
+}
+
+fn fire_task_event(env: &Env, id: u32, event_type: &str, event_obj: Object) -> napi::Result<()> {
+    let (_, handlers) = get_task_registries(env)?;
+    let id_str = id.to_string();
+    if let Ok(h) = handlers.get_named_property::<Object>(&id_str) {
+        if let Ok(fn_val) = h.get_named_property::<Function<Object, Unknown>>(event_type) {
+            let _ = fn_val.call(event_obj.clone());
+        }
+        if let Ok(listeners) = h.get_named_property::<Object>("listeners") {
+            if let Ok(list) = listeners.get_named_property::<Array>(event_type) {
+                let len = list.len();
+                for i in 0..len {
+                    if let Ok(listener) = list.get_element::<Function<Object, Unknown>>(i) {
+                        let _ = listener.call(event_obj.clone());
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
-/// Convert any `ToNapiValue` (a JS value owned by Rust) into an `Unknown`,
-/// keeping the napi value alive on the JS side. Rebinds the lifetime to
-/// `'static` so the value can be returned from `#[napi]` methods.
-fn to_unknown<T: ToNapiValue>(env: &Env, val: T) -> napi::Result<Unknown<'static>> {
-    let raw = unsafe { ToNapiValue::to_napi_value(env.raw(), val)? };
-    Ok(Unknown::from_raw(env.raw(), raw)?)
+fn task_set_handler(env: &Env, id: u32, type_: &str, handler: Option<Function<'static, (), ()>>) -> napi::Result<()> {
+    let (_, mut handlers) = get_task_registries(env)?;
+    let id_str = id.to_string();
+    let mut h: Object = match handlers.get_named_property::<Unknown>(&id_str) {
+        Ok(u) if u.get_type()? == ValueType::Object => unsafe { Object::from_napi_value(env.raw(), u.raw())? },
+        _ => {
+            let mut obj = Object::new(env)?;
+            let listeners = Object::new(env)?;
+            obj.set("listeners", listeners)?;
+            handlers.set(&id_str, obj.clone())?;
+            obj
+        }
+    };
+    match handler {
+        Some(f) => h.set(type_, f)?,
+        None => {
+            let undefined = undefined_unknown(env);
+            h.set(type_, undefined)?;
+        }
+    }
+    Ok(())
 }
 
-/// Produce the JS `undefined` value as an `Unknown<'static>`.
-fn undefined_value(env: &Env) -> napi::Result<Unknown<'static>> {
-    let u: Unknown<'_> = env.run_script::<_, Unknown<'_>>("undefined")?;
-    let raw = u.raw();
-    Ok(Unknown::from_raw(env.raw(), raw)?)
+fn task_get_handler(env: &Env, id: u32, type_: &str) -> napi::Result<Option<Function<'static, (), ()>>> {
+    let (_, handlers) = get_task_registries(env)?;
+    let id_str = id.to_string();
+    if let Ok(h) = handlers.get_named_property::<Object>(&id_str) {
+        if let Ok(u) = h.get_named_property::<Unknown>(type_) {
+            if u.get_type()? == ValueType::Function {
+                return Ok(Some(unsafe { Function::from_napi_value(env.raw(), u.raw())? }));
+            }
+        }
+    }
+    Ok(None)
 }
 
-#[allow(deprecated)]
-fn task_global_fn(env: &Env, name: &str) -> napi::Result<JsFunction<'static>> {
-    let f: JsFunction<'_> = env.run_script::<_, JsFunction<'_>>(format!("globalThis.{name}"))?;
-    let raw = f.raw();
-    Ok(JsFunction::from_raw(env.raw(), raw)?)
+fn task_call_diag(
+    env: &Env,
+    id: u32,
+    method: &str,
+    arg: Option<Unknown<'static>>,
+) -> napi::Result<Unknown<'static>> {
+    if let Some(worker) = get_task_worker(env, id)? {
+        let res = match arg {
+            Some(a) => {
+                let fn_val: Function<Unknown<'static>, Unknown<'static>> = worker.get_named_property(method)?;
+                fn_val.apply(Some(&worker), a)?
+            }
+            None => {
+                let fn_val: Function<(), Unknown<'static>> = worker.get_named_property(method)?;
+                fn_val.apply(Some(&worker), ())?
+            }
+        };
+        Ok(res)
+    } else {
+        Ok(undefined_unknown(env))
+    }
 }
 
-/// Call a global bootstrap helper, returning its (already-JS) result unchanged.
-#[allow(deprecated)]
-fn task_call(env: &Env, name: &str, args: &[Unknown<'static>]) -> napi::Result<Unknown<'static>> {
-    let func = task_global_fn(env, name)?;
-    let result = func.call(None, args)?;
-    let raw = result.raw();
-    Ok(Unknown::from_raw(env.raw(), raw)?)
-}
-
-#[allow(deprecated)]
 #[napi]
 impl Task {
     /// Create a task that runs `script` (a file path understood by
     /// `node:worker_threads`, e.g. `"build.js"`) on a dedicated worker thread.
     #[napi(constructor)]
     pub fn new(env: Env, script: String, options: Option<TaskOptions>) -> napi::Result<Self> {
-        task_ensure_bootstrap(&env)?;
+        let mut opts_obj = Object::new(&env)?;
+        if let Some(opts) = options {
+            if let Some(name) = opts.name {
+                opts_obj.set("name", name)?;
+            }
+            if let Some(rl) = opts.resource_limits {
+                let mut rl_obj = Object::new(&env)?;
+                if let Some(v) = rl.max_young_generation_size_mb {
+                    rl_obj.set("maxYoungGenerationSizeMb", v)?;
+                }
+                if let Some(v) = rl.max_old_generation_size_mb {
+                    rl_obj.set("maxOldGenerationSizeMb", v)?;
+                }
+                if let Some(v) = rl.code_range_size_mb {
+                    rl_obj.set("codeRangeSizeMb", v)?;
+                }
+                if let Some(v) = rl.stack_size_mb {
+                    rl_obj.set("stackSizeMb", v)?;
+                }
+                opts_obj.set("resourceLimits", rl_obj)?;
+            }
+            if let Some(argv) = opts.argv {
+                opts_obj.set("argv", argv)?;
+            }
+            if let Some(exec_argv) = opts.exec_argv {
+                opts_obj.set("execArgv", exec_argv)?;
+            }
+            if let Some(wd) = opts.worker_data {
+                let val = env.to_js_value(&wd)?;
+                opts_obj.set("workerData", val)?;
+            }
+            if let Some(env_val) = opts.env {
+                let val = env.to_js_value(&env_val)?;
+                opts_obj.set("env", val)?;
+            }
+            if let Some(track) = opts.track_unmanaged_fds {
+                opts_obj.set("trackUnmanagedFds", track)?;
+            }
+        }
+
         let id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+        let worker = create_worker_instance(&env, script, opts_obj, id)?;
+        let thread_id: u32 = worker.get_named_property("threadId")?;
 
-        let opts_unknown = match options {
-            Some(o) => to_unknown(&env, o)?,
-            None => to_unknown(&env, env.create_object()?)?,
-        };
-        let script_unknown = to_unknown(&env, env.create_string(&script)?)?;
-        let id_unknown = to_unknown(&env, env.create_uint32(id)?)?;
-
-        let func = task_global_fn(&env, "__taskInit")?;
-        let args = [id_unknown, script_unknown, opts_unknown];
-        let result = func.call(None, &args)?;
-        let thread_id = u32::from_napi_value(env.raw(), result.raw())?;
+        let (mut workers, _handlers) = get_task_registries(&env)?;
+        let id_str = id.to_string();
+        workers.set(&id_str, worker)?;
 
         Ok(Task {
             id,
@@ -284,19 +324,22 @@ impl Task {
         message: Unknown<'static>,
         transfer: Option<Vec<Unknown<'static>>>,
     ) -> napi::Result<()> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
-        let transfer_unknown = match transfer {
-            Some(t) => {
-                let arr = env.create_array(t.len() as u32)?;
-                for (i, item) in t.into_iter().enumerate() {
-                    arr.set_element(i as u32, item)?;
+        if let Some(worker) = get_task_worker(&env, self.id)? {
+            match transfer {
+                Some(t) => {
+                    let mut arr = env.create_array(t.len() as u32)?;
+                    for (i, item) in t.into_iter().enumerate() {
+                        arr.set_element(i as u32, item)?;
+                    }
+                    let post_msg: Function<FnArgs<(Unknown<'static>, Array)>, Unknown> = worker.get_named_property("postMessage")?;
+                    post_msg.apply(Some(&worker), (message, arr).into())?;
                 }
-                to_unknown(&env, arr)?
+                None => {
+                    let post_msg: Function<Unknown<'static>, Unknown> = worker.get_named_property("postMessage")?;
+                    post_msg.apply(Some(&worker), message)?;
+                }
             }
-            None => undefined_value(&env)?,
-        };
-        let args = [id_unknown, message, transfer_unknown];
-        task_call(&env, "__taskPost", &args)?;
+        }
         Ok(())
     }
 
@@ -304,17 +347,24 @@ impl Task {
     /// has exited — mirrors C++ `Task::StopThread` / `JoinThread`.
     #[napi(ts_return_type = "Promise<number>")]
     pub fn terminate(&self, env: Env) -> napi::Result<Unknown<'static>> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
         self.terminated.set(true);
-        task_call(&env, "__taskTerminate", &[id_unknown])
+        if let Some(worker) = get_task_worker(&env, self.id)? {
+            let term: Function<(), Unknown<'static>> = worker.get_named_property("terminate")?;
+            term.apply(Some(&worker), ())
+        } else {
+            Ok(undefined_unknown(&env))
+        }
     }
 
     /// Increment the worker's reference count so it keeps the process alive
     /// (default). Mirrors C++ `Task::Ref`.
     #[napi]
     pub fn reference(&self, env: Env) -> napi::Result<()> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
-        task_call(&env, "__taskRef", &[id_unknown])?;
+        if let Some(worker) = get_task_worker(&env, self.id)? {
+            if let Ok(ref_fn) = worker.get_named_property::<Function<(), ()>>("ref") {
+                let _ = ref_fn.apply(Some(&worker), ());
+            }
+        }
         Ok(())
     }
 
@@ -322,46 +372,41 @@ impl Task {
     /// the worker is running. Mirrors C++ `Task::Unref`.
     #[napi]
     pub fn unreference(&self, env: Env) -> napi::Result<()> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
-        task_call(&env, "__taskUnref", &[id_unknown])?;
+        if let Some(worker) = get_task_worker(&env, self.id)? {
+            if let Ok(unref_fn) = worker.get_named_property::<Function<(), ()>>("unref") {
+                let _ = unref_fn.apply(Some(&worker), ());
+            }
+        }
         Ok(())
     }
 
     #[napi(getter)]
-    pub fn get_onmessage(&self, env: Env) -> napi::Result<Option<JsFunction<'static>>> {
+    pub fn get_onmessage(&self, env: Env) -> napi::Result<Option<Function<'static, (), ()>>> {
         task_get_handler(&env, self.id, "message")
     }
 
     #[napi(setter)]
-    pub fn set_onmessage(
-        &self,
-        env: Env,
-        handler: Option<JsFunction<'static>>,
-    ) -> napi::Result<()> {
+    pub fn set_onmessage(&self, env: Env, handler: Option<Function<'static, (), ()>>) -> napi::Result<()> {
         task_set_handler(&env, self.id, "message", handler)
     }
 
     #[napi(getter)]
-    pub fn get_onerror(&self, env: Env) -> napi::Result<Option<JsFunction<'static>>> {
+    pub fn get_onerror(&self, env: Env) -> napi::Result<Option<Function<'static, (), ()>>> {
         task_get_handler(&env, self.id, "error")
     }
 
     #[napi(setter)]
-    pub fn set_onerror(&self, env: Env, handler: Option<JsFunction<'static>>) -> napi::Result<()> {
+    pub fn set_onerror(&self, env: Env, handler: Option<Function<'static, (), ()>>) -> napi::Result<()> {
         task_set_handler(&env, self.id, "error", handler)
     }
 
     #[napi(getter)]
-    pub fn get_onmessageerror(&self, env: Env) -> napi::Result<Option<JsFunction<'static>>> {
+    pub fn get_onmessageerror(&self, env: Env) -> napi::Result<Option<Function<'static, (), ()>>> {
         task_get_handler(&env, self.id, "messageerror")
     }
 
     #[napi(setter)]
-    pub fn set_onmessageerror(
-        &self,
-        env: Env,
-        handler: Option<JsFunction<'static>>,
-    ) -> napi::Result<()> {
+    pub fn set_onmessageerror(&self, env: Env, handler: Option<Function<'static, (), ()>>) -> napi::Result<()> {
         task_set_handler(&env, self.id, "messageerror", handler)
     }
 
@@ -371,16 +416,38 @@ impl Task {
         &self,
         env: Env,
         type_: String,
-        listener: JsFunction<'static>,
+        listener: Function<'static, (), ()>,
     ) -> napi::Result<()> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
-        let type_unknown = to_unknown(&env, env.create_string(&type_)?)?;
-        let listener_unknown = to_unknown(&env, listener)?;
-        task_call(
-            &env,
-            "__taskAddListener",
-            &[id_unknown, type_unknown, listener_unknown],
-        )?;
+        let (_, mut handlers) = get_task_registries(&env)?;
+        let id_str = self.id.to_string();
+        let mut h: Object = match handlers.get_named_property::<Unknown>(&id_str) {
+            Ok(u) if u.get_type()? == ValueType::Object => unsafe { Object::from_napi_value(env.raw(), u.raw())? },
+            _ => {
+                let mut obj = Object::new(&env)?;
+                let listeners = Object::new(&env)?;
+                obj.set("listeners", listeners)?;
+                handlers.set(&id_str, obj.clone())?;
+                obj
+            }
+        };
+        let mut listeners: Object = match h.get_named_property::<Unknown>("listeners") {
+            Ok(u) if u.get_type()? == ValueType::Object => unsafe { Object::from_napi_value(env.raw(), u.raw())? },
+            _ => {
+                let obj = Object::new(&env)?;
+                h.set("listeners", obj.clone())?;
+                obj
+            }
+        };
+        let mut list: Array = match listeners.get_named_property::<Unknown>(&type_) {
+            Ok(u) if u.get_type()? == ValueType::Object => unsafe { Array::from_napi_value(env.raw(), u.raw())? },
+            _ => {
+                let arr = env.create_array(0)?;
+                listeners.set(&type_, arr.clone())?;
+                arr
+            }
+        };
+        let len = list.len();
+        list.set_element(len, listener)?;
         Ok(())
     }
 
@@ -390,24 +457,47 @@ impl Task {
         &self,
         env: Env,
         type_: String,
-        listener: JsFunction<'static>,
+        listener: Function<'static, (), ()>,
     ) -> napi::Result<()> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
-        let type_unknown = to_unknown(&env, env.create_string(&type_)?)?;
-        let listener_unknown = to_unknown(&env, listener)?;
-        task_call(
-            &env,
-            "__taskRemoveListener",
-            &[id_unknown, type_unknown, listener_unknown],
-        )?;
+        let (_, handlers) = get_task_registries(&env)?;
+        let id_str = self.id.to_string();
+        if let Ok(h) = handlers.get_named_property::<Object>(&id_str) {
+            if let Ok(mut listeners) = h.get_named_property::<Object>("listeners") {
+                if let Ok(list) = listeners.get_named_property::<Array>(&type_) {
+                    let len = list.len();
+                    let mut new_list = env.create_array(0)?;
+                    let mut new_idx = 0u32;
+                    let target_raw = listener.raw();
+                    for i in 0..len {
+                        if let Ok(item) = list.get_element::<Function<'static, (), ()>>(i) {
+                            let mut is_equal = false;
+                            unsafe {
+                                sys::napi_strict_equals(env.raw(), item.raw(), target_raw, &mut is_equal);
+                            }
+                            if !is_equal {
+                                new_list.set_element(new_idx, item)?;
+                                new_idx += 1;
+                            }
+                        }
+                    }
+                    listeners.set(&type_, new_list)?;
+                }
+            }
+        }
         Ok(())
     }
 
     /// Dispatch an event to this task's listeners (mirrors `EventTarget.dispatchEvent`).
     #[napi]
     pub fn dispatch_event(&self, env: Env, evt: Unknown<'static>) -> napi::Result<()> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
-        task_call(&env, "__taskDispatch", &[id_unknown, evt])?;
+        if let Ok(evt_obj) = unsafe { Object::from_napi_value(env.raw(), evt.raw()) } {
+            if let Ok(type_val) = evt_obj.get_named_property::<Unknown>("type") {
+                if type_val.get_type()? == ValueType::String {
+                    let type_str: String = env.from_js_value(type_val)?;
+                    fire_task_event(&env, self.id, &type_str, evt_obj)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -419,14 +509,13 @@ impl Task {
         env: Env,
         options: Option<Unknown<'static>>,
     ) -> napi::Result<Unknown<'static>> {
-        task_diag(&env, self.id, "__taskGetHeapSnapshot", options)
+        task_call_diag(&env, self.id, "getHeapSnapshot", options)
     }
 
     /// Return the worker's V8 heap statistics. Mirrors C++ `Task::GetHeapStatistics`.
     #[napi(ts_return_type = "Promise<object>")]
     pub fn get_heap_statistics(&self, env: Env) -> napi::Result<Unknown<'static>> {
-        let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
-        task_call(&env, "__taskGetHeapStatistics", &[id_unknown])
+        task_call_diag(&env, self.id, "getHeapStatistics", None)
     }
 
     /// CPU time used by the worker so far (`{ user, system }` in microseconds).
@@ -437,7 +526,7 @@ impl Task {
         env: Env,
         prev: Option<Unknown<'static>>,
     ) -> napi::Result<Unknown<'static>> {
-        task_diag(&env, self.id, "__taskCpuUsage", prev)
+        task_call_diag(&env, self.id, "cpuUsage", prev)
     }
 
     /// Event-loop utilization of the worker. Mirrors C++ `Task::LoopIdleTime`.
@@ -447,7 +536,22 @@ impl Task {
         env: Env,
         prev: Option<Unknown<'static>>,
     ) -> napi::Result<Unknown<'static>> {
-        task_diag(&env, self.id, "__taskEventLoopUtilization", prev)
+        if let Some(worker) = get_task_worker(&env, self.id)? {
+            if let Ok(perf) = worker.get_named_property::<Object>("performance") {
+                let res = match prev {
+                    Some(p) => {
+                        let fn_val: Function<Unknown<'static>, Unknown<'static>> = perf.get_named_property("eventLoopUtilization")?;
+                        fn_val.apply(Some(&perf), p)?
+                    }
+                    None => {
+                        let fn_val: Function<(), Unknown<'static>> = perf.get_named_property("eventLoopUtilization")?;
+                        fn_val.apply(Some(&perf), ())?
+                    }
+                };
+                return Ok(res);
+            }
+        }
+        Ok(undefined_unknown(&env))
     }
 
     /// Start a CPU profile of the worker. Mirrors C++ `Task::StartCpuProfile`.
@@ -457,7 +561,7 @@ impl Task {
         env: Env,
         options: Option<Unknown<'static>>,
     ) -> napi::Result<Unknown<'static>> {
-        task_diag(&env, self.id, "__taskStartCpuProfile", options)
+        task_call_diag(&env, self.id, "startCpuProfile", options)
     }
 
     /// Stop a CPU profile; resolves to the profile as a JSON string.
@@ -467,7 +571,7 @@ impl Task {
         env: Env,
         options: Option<Unknown<'static>>,
     ) -> napi::Result<Unknown<'static>> {
-        task_diag(&env, self.id, "__taskStopCpuProfile", options)
+        task_call_diag(&env, self.id, "stopCpuProfile", options)
     }
 
     /// Start a heap profile of the worker. Mirrors C++ `Task::StartHeapProfile`.
@@ -477,7 +581,7 @@ impl Task {
         env: Env,
         options: Option<Unknown<'static>>,
     ) -> napi::Result<Unknown<'static>> {
-        task_diag(&env, self.id, "__taskStartHeapProfile", options)
+        task_call_diag(&env, self.id, "startHeapProfile", options)
     }
 
     /// Stop a heap profile; resolves to the profile as a JSON string.
@@ -487,61 +591,8 @@ impl Task {
         env: Env,
         options: Option<Unknown<'static>>,
     ) -> napi::Result<Unknown<'static>> {
-        task_diag(&env, self.id, "__taskStopHeapProfile", options)
+        task_call_diag(&env, self.id, "stopHeapProfile", options)
     }
-}
-
-#[allow(deprecated)]
-fn task_set_handler(
-    env: &Env,
-    id: u32,
-    type_: &str,
-    handler: Option<JsFunction<'static>>,
-) -> napi::Result<()> {
-    let id_unknown = to_unknown(&env, env.create_uint32(id)?)?;
-    let type_unknown = to_unknown(&env, env.create_string(type_)?)?;
-    let handler_unknown = match handler {
-        Some(h) => to_unknown(&env, h)?,
-        None => undefined_value(&env)?,
-    };
-    task_call(
-        env,
-        "__taskSetHandler",
-        &[id_unknown, type_unknown, handler_unknown],
-    )?;
-    Ok(())
-}
-
-#[allow(deprecated)]
-fn task_get_handler(
-    env: &Env,
-    id: u32,
-    type_: &str,
-) -> napi::Result<Option<JsFunction<'static>>> {
-    let id_unknown = to_unknown(&env, env.create_uint32(id)?)?;
-    let type_unknown = to_unknown(&env, env.create_string(type_)?)?;
-    let result = task_call(env, "__taskGetHandler", &[id_unknown, type_unknown])?;
-    match result.get_type()? {
-        ValueType::Undefined | ValueType::Null => Ok(None),
-        _ => {
-            let raw = result.raw();
-            Ok(Some(JsFunction::from_raw(env.raw(), raw)?))
-        }
-    }
-}
-
-fn task_diag(
-    env: &Env,
-    id: u32,
-    name: &str,
-    options: Option<Unknown<'static>>,
-) -> napi::Result<Unknown<'static>> {
-    let id_unknown = to_unknown(&env, env.create_uint32(id)?)?;
-    let opts_unknown = match options {
-        Some(o) => o,
-        None => undefined_value(&env)?,
-    };
-    task_call(env, name, &[id_unknown, opts_unknown])
 }
 
 /// Worktree materialisation task running on the libuv thread pool.
