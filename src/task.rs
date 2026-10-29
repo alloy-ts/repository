@@ -1,115 +1,429 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 
-use napi::Env;
-use crate::error::RepositoryResult as Result;
-use napi::Task;
+use napi::{Env, JsFunction, JsValue, Unknown};
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
-use crate::repository::{Repository, find_git};
+use crate::repository::Repository;
 use crate::worktree::{StreamEntry, WorktreeHeadKind};
 
-/// High-level task helpers, scoped to a [`Repository`].
-#[napi]
-pub struct TaskOps {
-    pub(crate) repo: Arc<gix::ThreadSafeRepository>,
+/// Options for constructing a threaded [`Task`].
+#[napi(object)]
+pub struct TaskOptions {
+    /// Optional name for the worker thread (forwarded to `Worker`'s `name`
+    /// option). Useful for debugging / profiling under `node --trace-warnings`.
+    pub name: Option<String>,
 }
 
-async fn run_git_cmd(repo: &Arc<gix::ThreadSafeRepository>, args: &[&str]) -> napi::Result<String> {
-    let r = thread_local(repo);
-    let cwd = r.workdir().map(|p| p.to_path_buf()).unwrap_or_else(|| r.path().to_path_buf());
-    let git_bin = find_git().unwrap_or_else(|| std::path::PathBuf::from("git"));
+/// A threaded task: a wrapper around a Node.js worker thread
+/// (`node:worker_threads`) that runs a named script in the background, separate
+/// from the main (UI) thread.
+///
+/// This mirrors the Web Worker / `Worker` model: construct it with a script
+/// path, send data with [`Task::post_message`], receive results via the
+/// `onmessage` handler, and tear it down with [`Task::terminate`]. Messages are
+/// structured-cloned (copied, not shared) between the main thread and the task
+/// thread — see `postMessage` / `onmessage` below.
+///
+/// ```ts
+/// const myTask = new Task("task.js");
+/// myTask.onmessage = (e) => console.log(e.data);
+/// myTask.postMessage([1, 2, 3]);
+/// ```
+#[napi]
+pub struct Task {
+    /// Process-unique id used to key the worker and its handlers on the JS side.
+    id: u32,
+    /// The script path the worker runs.
+    script: String,
+    /// The `Worker.threadId` assigned by Node when the worker starts.
+    thread_id: u32,
+    /// Whether [`Task::terminate`] has been called.
+    terminated: Cell<bool>,
+}
 
-    let output = tokio::process::Command::new(&git_bin)
-        .current_dir(&cwd)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| crate::error::err_str("task", format!("failed to execute git command: {e}")))?;
+/// Monotonic, process-unique id for each [`Task`] instance.
+static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(1);
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let msg = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("git command {:?} failed with status {}", args, output.status)
+/// Bootstrap JavaScript installed once per process. It defines global helpers
+/// that create/own the `Worker` instances and forward their `message` / `error`
+/// / `messageerror` events to per-task handlers. The Rust side only ever talks
+/// to these helpers (so arbitrary JS message values never have to cross the
+/// napi boundary as `Send` data — they stay on the JS side, structured-cloned
+/// by `node:worker_threads` itself).
+///
+/// It relies on `globalThis.__require` (a `require` made available by the JS
+/// wrapper, e.g. `globalThis.__require = require` in `index.ts`, since `require`
+/// is not a global inside `run_script`).
+const TASK_BOOTSTRAP: &str = r#"
+(function () {
+  if (typeof globalThis.__taskInit === 'function') return;
+  const wt = globalThis.__require('node:worker_threads');
+  const workers = (globalThis.__taskWorkers = {});
+  const handlers = (globalThis.__taskHandlers = {});
+  globalThis.__taskInit = function (id, path, name) {
+    const w = new wt.Worker(path, name ? { name: name } : undefined);
+    workers[id] = w;
+    const fire = (type, makeEvent) => {
+      const h = handlers[id] || {};
+      const evt = makeEvent();
+      if (typeof h[type] === 'function') { try { h[type](evt); } catch (e) {} }
+      const list = (h.listeners && h.listeners[type]) || [];
+      for (const l of list) { try { l(evt); } catch (e) {} }
+    };
+    w.on('message', (d) => fire('message', () => ({ data: d })));
+    w.on('error', (e) => fire('error', () => ({ error: e, message: e && e.message })));
+    w.on('messageerror', (e) => fire('messageerror', () => ({ error: e })));
+    return w.threadId;
+  };
+  globalThis.__taskPost = function (id, msg, transfer) {
+    const w = workers[id]; if (!w) return;
+    w.postMessage(msg, transfer === undefined ? undefined : (Array.isArray(transfer) ? transfer : [transfer]));
+  };
+  globalThis.__taskTerminate = function (id) {
+    const w = workers[id]; if (!w) return Promise.resolve();
+    return w.terminate();
+  };
+  globalThis.__taskRef = function (id) { const w = workers[id]; if (w && w.ref) w.ref(); };
+  globalThis.__taskUnref = function (id) { const w = workers[id]; if (w && w.unref) w.unref(); };
+  globalThis.__taskSetHandler = function (id, type, fn) {
+    const h = handlers[id] || (handlers[id] = { listeners: {} });
+    h[type] = fn;
+  };
+  globalThis.__taskGetHandler = function (id, type) {
+    const h = handlers[id]; return h ? h[type] : undefined;
+  };
+  globalThis.__taskAddListener = function (id, type, fn) {
+    const h = handlers[id] || (handlers[id] = { listeners: {} });
+    (h.listeners[type] || (h.listeners[type] = [])).push(fn);
+  };
+  globalThis.__taskRemoveListener = function (id, type, fn) {
+    const h = handlers[id]; if (!h || !h.listeners || !h.listeners[type]) return;
+    h.listeners[type] = h.listeners[type].filter((l) => l !== fn);
+  };
+  globalThis.__taskDispatch = function (id, evt) {
+    const h = handlers[id] || {};
+    const t = evt && evt.type; if (!t) return;
+    if (typeof h[t] === 'function') { try { h[t](evt); } catch (e) {} }
+    const list = (h.listeners && h.listeners[t]) || [];
+    for (const l of list) { try { l(evt); } catch (e) {} }
+  };
+})();
+"#;
+
+fn task_ensure_bootstrap(env: &Env) -> napi::Result<()> {
+    let _: Unknown = env.run_script(TASK_BOOTSTRAP)?;
+    Ok(())
+}
+
+fn task_global_fn(env: &Env, name: &str) -> napi::Result<JsFunction> {
+    env.run_script::<_, JsFunction>(format!("globalThis.{name}"))
+}
+
+fn task_undefined(env: &Env) -> napi::Result<Unknown> {
+    env.run_script::<_, Unknown>("undefined")
+}
+
+#[napi]
+impl Task {
+    /// Create a task from either:
+    /// - a JavaScript `Promise` (mandatory work), or
+    /// - a script path `string` (e.g. `"build.ts"`) that is executed via the
+    ///   appropriate runtime (`tsx` for TypeScript, `node` for JavaScript)
+    ///   when the task runs.
+    ///
+    /// `options` is optional and currently carries the desired thread count /
+    /// name.
+    #[napi(constructor)]
+    pub fn new(work: Either<String, Promise<()>>, options: Option<TaskOptions>) -> Self {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let (work_promise, script) = match work {
+            Either::A(script) => (None, Some(script)),
+            Either::B(promise) => (Some(promise), None),
         };
-        Err(napi::Error::from_reason(msg))
+        Task {
+            work: work_promise,
+            script,
+            options: options.unwrap_or(TaskOptions {
+                threads: None,
+                name: None,
+            }),
+            on_finally: None,
+            state: TaskState::Pending,
+            cancel_tx: Some(cancel_tx),
+            cancel_rx: Some(cancel_rx),
+            native_work: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Execute the task: drive the wrapped promise to completion and resolve
+    /// once it settles. Returns a `Promise<void>` mirroring the work's outcome
+    /// (rejecting if the underlying promise rejected).
+    ///
+    /// If [`cancel`](Self::cancel) is requested while running, `start` detaches
+    /// from the in-flight work and resolves with the task marked `Cancelled`.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub async fn start(&mut self) -> napi::Result<()> {
+        if self.state == TaskState::Cancelled {
+            return Ok(());
+        }
+        // Materialize the work future: a wrapped JS promise, or a script path to
+        // execute (`node <script>`) on the async runtime's blocking pool.
+        let work: std::pin::Pin<Box<dyn std::future::Future<Output = napi::Result<()>> + Send>> =
+            if let Some(work) = self.work.take() {
+                Box::pin(work)
+            } else if let Some(script) = self.script.take() {
+                Box::pin(async move {
+                    let inner = tokio::task::spawn_blocking(move || run_script_blocking(&script))
+                        .await
+                        .map_err(|e| {
+                            napi::Error::new(
+                                napi::Status::GenericFailure,
+                                format!("script task join error: {e}"),
+                            )
+                        })?;
+                    inner
+                })
+            } else {
+                return Ok(());
+            };
+        self.state = TaskState::Running;
+        let cancel_rx = self.cancel_rx.take();
+        let cancel_fut = async {
+            match cancel_rx {
+                Some(rx) => {
+                    let _ = rx.await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(cancel_fut);
+        tokio::select! {
+            res = work => {
+                self.state = match res {
+                    Ok(()) => TaskState::Resolved,
+                    Err(_) => TaskState::Rejected,
+                };
+            }
+            _ = &mut cancel_fut => {
+                self.state = TaskState::Cancelled;
+            }
+        }
+        if let Some(cb) = &self.on_finally {
+            let _ = cb.call(
+                (),
+                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        }
+        Ok(())
+    }
+
+    /// Request cancellation of a `Pending` or `Running` task.
+    ///
+    /// Returns `true` if the task transitioned to `Cancelled`. Note that an
+    /// arbitrary JavaScript `Promise` (e.g. `cli.build()`) cannot be force-
+    /// aborted from Rust: this detaches `start` from awaiting it and marks the
+    /// task `Cancelled`, but the underlying work (a child process, etc.) may
+    /// keep running until it finishes on its own.
+    #[napi]
+    pub fn cancel(&mut self) -> napi::Result<bool> {
+        if self.state == TaskState::Pending || self.state == TaskState::Running {
+            self.state = TaskState::Cancelled;
+            self.cancel_flag.store(true, Ordering::SeqCst);
+            if let Some(tx) = self.cancel_tx.take() {
+                let _ = tx.send(());
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Current lifecycle [`TaskState`] of the task.
+    #[napi]
+    pub fn status(&self) -> TaskState {
+        self.state
+    }
+
+    /// The blocking/CPU entry point, mirroring `napi::Task::compute`. For a
+    /// promise-based task this simply drives the work to completion; heavy
+    /// synchronous work should instead be offloaded to the libuv thread pool.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub async fn compute(&mut self) -> napi::Result<()> {
+        self.start().await
+    }
+
+    /// Resolve with `value` — the `Promise.resolve` equivalent.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub async fn resolve(_env: Env, value: serde_json::Value) -> napi::Result<serde_json::Value> {
+        Ok(value)
+    }
+
+    /// Reject with `reason` — the `Promise.reject` equivalent.
+    #[napi(ts_return_type = "Promise<unknown>")]
+    pub async fn reject(reason: serde_json::Value) -> napi::Result<serde_json::Value> {
+        Err(napi::Error::new(
+            napi::Status::GenericFailure,
+            serde_json::to_string(&reason).unwrap_or_else(|_| "task rejected".to_string()),
+        ))
+    }
+
+    /// Register `callback` to run once the task settles, like `Promise.finally`.
+    ///
+    /// The callback is invoked through a threadsafe function so it is safe to
+    /// fire from the task's completion context. Returns the task for chaining.
+    pub fn finally(
+        &mut self,
+        env: Env,
+        callback: napi::bindgen_prelude::FunctionRef<(), ()>,
+    ) -> napi::Result<()> {
+        let f = callback.borrow_back(&env)?;
+        let tsfn = f
+            .build_threadsafe_function::<()>()?
+            .build()?;
+        self.on_finally = Some(tsfn);
+        Ok(())
     }
 }
 
-#[napi]
-impl TaskOps {
-    /// Create a new branch `name` starting at `base` and switch to it.
-    ///
-    /// Equivalent to `git checkout -b <name> <base>`. Errors if a branch
-    /// named `name` already exists.
-    #[napi]
-    pub async fn feature_branch(&self, name: String, base: String) -> napi::Result<()> {
-        let r = thread_local(&self.repo);
-        let full_branch_name = format!("refs/heads/{name}");
-        if r.try_find_reference(&full_branch_name)
-            .map_err(|e| err("try_find_reference", e))?
-            .is_some()
-        {
-            return Err(crate::error::err_str(
-                "feature_branch",
-                format!("branch '{name}' already exists"),
-            ));
+impl Task {
+    /// Build a task whose work runs on the libuv thread pool (not the JS event
+    /// loop). `work` is synchronous Rust code executed in `compute()` on a
+    /// worker thread — this is the "threads instead of processes" path. JS
+    /// cannot supply Rust compute, so threaded tasks are constructed in Rust.
+    pub fn with_compute<F>(work: F) -> Self
+    where
+        F: FnOnce() -> napi::Result<()> + Send + 'static,
+    {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        Task {
+            work: None,
+            script: None,
+            options: TaskOptions {
+                threads: None,
+                name: None,
+            },
+            on_finally: None,
+            state: TaskState::Pending,
+            cancel_tx: Some(cancel_tx),
+            cancel_rx: Some(cancel_rx),
+            native_work: Some(Box::new(work)),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
-        run_git_cmd(&self.repo, &["checkout", "-b", &name, &base]).await?;
+    }
+}
+
+impl napi::Task for Task {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> napi::Result<()> {
+        self.state = TaskState::Running;
+        if self.cancel_flag.load(Ordering::SeqCst) {
+            self.state = TaskState::Cancelled;
+            return Ok(());
+        }
+        if let Some(work) = self.native_work.take() {
+            work()?;
+        } else if let Some(script) = self.script.take() {
+            run_script_blocking(&script)?;
+        }
         Ok(())
     }
 
-    /// Stage every change in the working tree and commit them with `message`.
-    ///
-    /// Equivalent to `git add -A` followed by `git commit -m <message>`.
-    /// Errors if there is nothing to commit.
-    #[napi]
-    pub async fn commit_all(&self, message: String) -> napi::Result<()> {
-        run_git_cmd(&self.repo, &["add", "-A"]).await?;
-        run_git_cmd(&self.repo, &["commit", "-m", &message]).await?;
+    fn resolve(&mut self, _env: Env, _output: ()) -> napi::Result<()> {
+        self.state = TaskState::Resolved;
         Ok(())
     }
 
-    /// Bring the current branch up to date with its upstream via rebase.
-    ///
-    /// Equivalent to `git pull --rebase`. Errors if no upstream is configured
-    /// or the rebase has conflicts.
-    #[napi]
-    pub async fn sync(&self) -> napi::Result<()> {
-        run_git_cmd(&self.repo, &["pull", "--rebase"]).await?;
-        Ok(())
+    fn reject(&mut self, _env: Env, err: napi::Error) -> napi::Result<()> {
+        self.state = TaskState::Rejected;
+        Err(err)
     }
 
-    /// Squash-merge `branch` into the current branch.
-    ///
-    /// Equivalent to `git merge --squash <branch>`. The changes are staged
-    /// but **not** committed — callers should follow up with
-    /// [`commit_all`](Self::commit_all) or a raw commit to record them.
-    #[napi]
-    pub async fn squash_merge(&self, branch: String) -> napi::Result<()> {
-        run_git_cmd(&self.repo, &["merge", "--squash", &branch]).await?;
+    fn finally(&mut self, _env: Env) -> napi::Result<()> {
+        if let Some(cb) = &self.on_finally {
+            let _ = cb.call(
+                (),
+                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        }
         Ok(())
     }
 }
 
+/// Dispatch a [`Task`] (built with native compute via [`Task::with_compute`]) to
+/// the libuv thread pool. Returns a promise that resolves once `compute()`
+/// finishes on a worker thread. Use this instead of [`Task::start`] when the
+/// work is Rust-native and should run on threads rather than as a subprocess.
 #[napi]
-impl Repository {
-    /// High-level task compositions.
-    #[napi]
-    pub fn task(&self) -> TaskOps {
-        TaskOps {
-            repo: Arc::clone(&self.inner),
+pub fn run_task_on_pool(task: Task) -> napi::Result<AsyncTask<Task>> {
+    Ok(AsyncTask::new(task))
+}
+
+/// Returns `true` for TypeScript-style script extensions.
+fn is_typescript(script: &str) -> bool {
+    let lower = script.to_ascii_lowercase();
+    lower.ends_with(".ts")
+        || lower.ends_with(".mts")
+        || lower.ends_with(".cts")
+        || lower.ends_with(".tsx")
+}
+
+/// Run a script file to completion, waiting for it to exit. This blocks the
+/// calling thread, so it is safe to call from a libuv worker thread (`compute`)
+/// or wrapped in `tokio::task::spawn_blocking`.
+///
+/// The runtime is chosen by extension: `.js`/`.mjs`/`.cjs` run via `node`;
+/// `.ts`/`.mts`/`.cts`/`.tsx` run via `tsx`, with a fallback to `npx tsx` if
+/// `tsx` is not on `PATH`.
+fn run_script_blocking(script: &str) -> napi::Result<()> {
+    let runners: &[&[&str]] = if is_typescript(script) {
+        &[&["tsx"], &["npx", "tsx"]]
+    } else {
+        &[&["node"]]
+    };
+
+    for runner in runners {
+        let (program, rest) = runner.split_first().unwrap();
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(rest).arg(script);
+        match cmd.status() {
+            Ok(status) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(napi::Error::new(
+                        napi::Status::GenericFailure,
+                        format!("script `{script}` exited with status {status}"),
+                    ))
+                };
+            }
+            // `tsx` not on PATH → try the next candidate (`npx tsx`).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(napi::Error::new(
+                    napi::Status::GenericFailure,
+                    format!("failed to run `{} {script}`: {e}", runner.join(" ")),
+                ));
+            }
         }
     }
+
+    Err(napi::Error::new(
+        napi::Status::GenericFailure,
+        format!(
+            "could not find a runner for `{script}` (tried: {})",
+            runners
+                .iter()
+                .map(|r| r.join(" "))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ))
 }
 
 /// Worktree materialisation task running on the libuv thread pool.
@@ -124,7 +438,7 @@ impl StreamTask {
     }
 }
 
-impl Task for StreamTask {
+impl napi::Task for StreamTask {
     type Output = Vec<StreamEntry>;
     type JsValue = Vec<StreamEntry>;
 
@@ -169,7 +483,7 @@ impl StreamRawTask {
     }
 }
 
-impl Task for StreamRawTask {
+impl napi::Task for StreamRawTask {
     type Output = Vec<u8>;
     type JsValue = Buffer;
 
@@ -214,7 +528,7 @@ impl AddWorktreeTask {
     }
 }
 
-impl Task for AddWorktreeTask {
+impl napi::Task for AddWorktreeTask {
     type Output = Repository;
     type JsValue = Repository;
 
@@ -270,7 +584,7 @@ impl RemoveWorktreeTask {
     }
 }
 
-impl Task for RemoveWorktreeTask {
+impl napi::Task for RemoveWorktreeTask {
     type Output = ();
     type JsValue = ();
 
