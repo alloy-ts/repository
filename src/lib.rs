@@ -60,6 +60,7 @@ mod stash;
 mod status;
 mod submodule;
 mod tag;
+mod task;
 mod tree;
 mod vault;
 mod worktree;
