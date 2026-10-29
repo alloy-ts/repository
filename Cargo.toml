@@ -29,7 +29,7 @@ gix-filter = "0.36.0"
 gix-imara-diff = "0.3.1"
 gix-protocol = { version = "0.67.0", features = ["blocking-client"] }
 filetime = "0.2.29"
-napi = { version = "3.14.2", features = ["serde-json", "tokio_rt"] }
+napi = { version = "3.14.2", features = ["serde-json", "tokio_rt", "napi5"] }
 napi-derive = "3.6.12"
 futures = "0.3.34"
 serde = { version = "1.0.154", features = ["derive"] }
@@ -80,6 +80,7 @@ tempfile = "3.27.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+libuv = "2.15.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
