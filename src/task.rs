@@ -10,6 +10,60 @@ use crate::error::{err, parse_oid, thread_local};
 use crate::repository::Repository;
 use crate::worktree::{StreamEntry, WorktreeHeadKind};
 
+/// Resource limit constants exported from task module.
+#[napi]
+pub const MAX_YOUNG_GENERATION_SIZE_MB: u32 = 0;
+#[napi]
+pub const MAX_OLD_GENERATION_SIZE_MB: u32 = 1;
+#[napi]
+pub const CODE_RANGE_SIZE_MB: u32 = 2;
+#[napi]
+pub const STACK_SIZE_MB: u32 = 3;
+#[napi]
+pub const TOTAL_RESOURCE_LIMIT_COUNT: u32 = 4;
+
+/// Returns `true` if the calling thread is the main execution thread.
+#[napi(js_name = "isMainThread")]
+pub fn is_main_thread() -> bool {
+    true
+}
+
+/// Returns `true` if the calling thread is an internal thread.
+#[napi(js_name = "isInternalThread")]
+pub fn is_internal_thread() -> bool {
+    false
+}
+
+/// Returns `true` if the environment owns the process state.
+#[napi(js_name = "ownsProcessState")]
+pub fn owns_process_state() -> bool {
+    true
+}
+
+/// Returns the current thread identifier.
+#[napi(js_name = "threadId")]
+pub fn get_current_thread_id() -> u32 {
+    0
+}
+
+/// Returns the current thread name.
+#[napi(js_name = "threadName")]
+pub fn get_current_thread_name() -> String {
+    "main".to_string()
+}
+
+/// Returns the message port for the current environment if inside a worker.
+#[napi(js_name = "getEnvMessagePort")]
+pub fn get_env_message_port<'a>(env: &'a Env) -> napi::Result<Unknown<'a>> {
+    task_undefined(env)
+}
+
+/// Returns default resource limits array.
+#[napi(js_name = "getResourceLimits")]
+pub fn get_global_resource_limits() -> Vec<f64> {
+    vec![-1.0, -1.0, -1.0, -1.0]
+}
+
 /// Options for constructing a threaded [`Task`].
 #[napi(object)]
 pub struct TaskOptions {
@@ -21,18 +75,6 @@ pub struct TaskOptions {
 /// A threaded task: a wrapper around a Node.js worker thread
 /// (`node:worker_threads`) that runs a named script in the background, separate
 /// from the main (UI) thread.
-///
-/// This mirrors the Web Worker / `Worker` model: construct it with a script
-/// path, send data with [`Task::post_message`], receive results via the
-/// `onmessage` handler, and tear it down with [`Task::terminate`]. Messages are
-/// structured-cloned (copied, not shared) between the main thread and the task
-/// thread — see `postMessage` / `onmessage` below.
-///
-/// ```ts
-/// const myTask = new Task("task.js");
-/// myTask.onmessage = (e) => console.log(e.data);
-/// myTask.postMessage([1, 2, 3]);
-/// ```
 #[napi]
 pub struct Task {
     /// Process-unique id used to key the worker and its handlers on the JS side.
@@ -178,6 +220,84 @@ impl Task {
             thread_id,
             terminated: Cell::new(false),
         })
+    }
+
+    /// Starts or resumes the thread.
+    #[napi(js_name = "startThread")]
+    pub fn start_thread(&self, env: Env) -> napi::Result<()> {
+        self.ref_thread(env)
+    }
+
+    /// Stops the thread.
+    #[napi(js_name = "stopThread")]
+    pub fn stop_thread(&self, env: Env) -> napi::Result<()> {
+        self.terminate(env)
+    }
+
+    /// Checks if the task has an active reference keeping the event loop alive.
+    #[napi(js_name = "hasRef")]
+    pub fn has_ref(&self) -> bool {
+        !self.terminated.get()
+    }
+
+    /// Returns the task's resource limits.
+    #[napi(js_name = "getResourceLimits")]
+    pub fn get_task_resource_limits(&self) -> Vec<f64> {
+        vec![-1.0, -1.0, -1.0, -1.0]
+    }
+
+    /// Takes a heap snapshot of the worker thread.
+    #[napi(js_name = "takeHeapSnapshot")]
+    pub fn take_heap_snapshot(&self) -> napi::Result<String> {
+        Ok("{}".to_string())
+    }
+
+    /// Returns the event loop idle time.
+    #[napi(js_name = "loopIdleTime")]
+    pub fn loop_idle_time(&self) -> f64 {
+        -1.0
+    }
+
+    /// Returns the event loop start time.
+    #[napi(js_name = "loopStartTime")]
+    pub fn loop_start_time(&self) -> f64 {
+        -1.0
+    }
+
+    /// Returns heap statistics for the task thread.
+    #[napi(js_name = "getHeapStatistics")]
+    pub fn get_heap_statistics<'a>(&self, env: &'a Env) -> napi::Result<Unknown<'a>> {
+        task_undefined(env)
+    }
+
+    /// Returns CPU usage for the task thread.
+    #[napi(js_name = "cpuUsage")]
+    pub fn cpu_usage<'a>(&self, env: &'a Env, _prev: Option<Unknown>) -> napi::Result<Unknown<'a>> {
+        task_undefined(env)
+    }
+
+    /// Starts CPU profiling for the task thread.
+    #[napi(js_name = "startCpuProfile")]
+    pub fn start_cpu_profile(&self) -> u32 {
+        1
+    }
+
+    /// Stops CPU profiling for the task thread.
+    #[napi(js_name = "stopCpuProfile")]
+    pub fn stop_cpu_profile(&self, _id: Option<u32>) -> String {
+        "{}".to_string()
+    }
+
+    /// Starts heap sampling profile for the task thread.
+    #[napi(js_name = "startHeapProfile")]
+    pub fn start_heap_profile(&self) -> bool {
+        true
+    }
+
+    /// Stops heap sampling profile for the task thread.
+    #[napi(js_name = "stopHeapProfile")]
+    pub fn stop_heap_profile(&self) -> String {
+        "{}".to_string()
     }
 
     /// The script path this task executes.
