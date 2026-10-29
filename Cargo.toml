@@ -24,14 +24,17 @@ gix = { version = "0.89.0", features = [
   "blocking-network-client",
 ] }
 gix-chunk = "0.10.0"
+gix-negotiate = "0.37.0"
 gix-pack = "0.76.0"
 gix-filter = "0.36.0"
 gix-imara-diff = "0.3.1"
-gix-protocol = { version = "0.67.0", features = ["blocking-client"] }
+gix-protocol = { version = "0.67.0", features = ["blocking-client", "fetch"] }
 filetime = "0.2.29"
-napi = { version = "3.14.2", features = ["serde-json", "tokio_rt"] }
+napi = { version = "3.14.2", features = ["serde-json", "tokio_rt", "napi5"] }
 napi-derive = "3.6.12"
-futures = "0.3.34"
+futures = { version = "0.3.34", features = ["async-await", "executor"] }
+futures-executor = { version = "0.3.34", features = ["thread-pool"] }
+futures-channel = "0.3.34"
 serde = { version = "1.0.154", features = ["derive"] }
 serde_json = "1.0.154"
 chrono = { version = "0.4", features = ["serde"] }
@@ -40,7 +43,7 @@ regex = "1"
 thiserror = "2.0.21"
 multi-key = { version = "2.0.0", optional = true }
 multi-sig = { version = "2.0.0", optional = true }
-blsful = { version = "4.1.0", optional = true }
+rustls = { version = "0.23.46", optional = true }
 multi-codec = { version = "1.6", optional = true }
 btls = { version = "0.5", optional = true }
 sequoia-openpgp = { version = "1", optional = true, default-features = false, features = [
@@ -63,6 +66,22 @@ tokio = { version = "1", features = [
   "io-util",
   "sync",
 ] }
+ring = "0.17.14"
+reqwest = { version = "0.13.5", features = [
+  "query",
+  "stream",
+  "blocking",
+  "rustls",
+  "multipart",
+  "deflate",
+] }
+object_store = { version = "0.14.2", default-features = false, features = [
+  "fs",
+  "http",
+  "reqwest",
+  "cloud-base",
+  "ring",
+] }
 fjall = "3.1.12"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -79,7 +98,9 @@ napi-build = "2.6.0"
 tempfile = "3.27.0"
 
 [target.'cfg(unix)'.dependencies]
+nix = "0.31.3"
 libc = "0.2"
+libuv = "2.15.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
@@ -99,4 +120,4 @@ gpg = ["crypto", "dep:sequoia-openpgp", "dep:anyhow"]
 # Post-quantum signatures.
 xmss = []
 crypto = []
-btls = ["dep:btls"]
+rustls = ["dep:rustls"]
