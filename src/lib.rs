@@ -18,10 +18,13 @@ mod diff;
 mod dirwalk;
 mod entry;
 mod error;
+mod fast_export;
+mod fast_import;
 mod fetch;
 mod filter;
 mod format;
 pub mod gpg;
+mod head;
 mod identity;
 mod index;
 mod init;
@@ -30,6 +33,7 @@ mod mailmap;
 mod merge;
 mod metrics;
 mod namespace;
+mod negotiate;
 mod note;
 mod object;
 mod object_store;
@@ -42,6 +46,7 @@ mod pathspec;
 mod pgp;
 mod process;
 mod progress;
+mod promise;
 pub(crate) mod protocol;
 mod pull;
 mod push;
@@ -53,13 +58,36 @@ mod refspec;
 pub(crate) mod remote;
 mod replace;
 mod repository;
+mod req;
 mod reset;
 mod revert;
 mod revision;
+mod scheduler;
 mod stash;
 mod status;
 mod submodule;
 mod tag;
+mod task;
+mod thread;
 mod tree;
 mod vault;
 mod worktree;
+
+// WAL napi-binding scaffold. Gated until the surrounding core dependencies
+// (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.
+#[cfg(feature = "wal")]
+pub(crate) mod wal;
+
+// Content store napi-binding scaffold (read + refold + debris + WAL mode). Composes the cores
+// that live in the core crate elsewhere; gated until they exist. Enables `wal` so the WAL-backed
+// write path can reach `crate::wal::Wal`.
+#[cfg(feature = "store")]
+pub(crate) mod content_store;
+
+// `Record` napi class (the domain record, content program, attributes) and its JS<->core bridges.
+#[cfg(feature = "record")]
+pub(crate) mod record;
+
+// Filesystem-seam napi bindings, wrapping `crate::vfs` without modifying it.
+#[cfg(feature = "fs")]
+pub(crate) mod fs;
