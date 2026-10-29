@@ -1,3 +1,9 @@
+//! Object stores: a pack-aware [`ObjectDatabase`], the bare [`ObjectHandle`], and two variants of a
+//! lower-level store — [`LooseObjectStore`] (one file per object on disk) and [`MemoryObjectStore`]
+//! (a `Mutex`-guarded map, mirroring libgit2's `git_mempack`). Both store variants implement the
+//! shared [`ObjectStore`](crate::object_store::base::ObjectStore) base trait (in `base.rs`), which
+//! factors out their common napi surface.
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -11,13 +17,125 @@ use gix::zlib::Compression;
 use crate::error::{err, err_str, parse_oid};
 use crate::object::{kind_to_string, string_to_kind};
 
-/// The pack-aware, repository-independent object database handle:
-/// `gix::odb::store::Handle<Arc<gix::odb::Store>>`.
-type HandleStore = gix::odb::store::Handle<Arc<gix::odb::Store>>;
-/// The cached object database: `gix::odb::Cache<Handle<Arc<Store>>>`.
-type CachedStore = gix::odb::Cache<HandleStore>;
+pub mod base;
+pub mod buffered;
+pub mod client;
+pub mod loose;
+pub mod memory;
 
-/// Options for constructing a [`ObjectStore`].
+/// Lower-cased string form of a hash kind (`"sha1"` / `"sha256"`). `gix::hash::Kind` is
+/// `#[non_exhaustive]`, so any future kind is reported as `sha256`.
+fn hash_kind_format(kind: gix::hash::Kind) -> &'static str {
+    match kind {
+        gix::hash::Kind::Sha1 => "sha1",
+        _ => "sha256",
+    }
+}
+
+/// Resolve an optional object-hash string to a [`gix::hash::Kind`], defaulting to SHA-1.
+fn object_kind_from_option(hash: Option<&str>) -> napi::Result<gix::hash::Kind> {
+    match hash {
+        None | Some("sha1") => Ok(gix::hash::Kind::Sha1),
+        Some(other) => crate::object::parse_hash_kind_ci(other).ok_or_else(|| {
+            err_str(
+                "object_hash",
+                format!("unsupported object hash {other} (expected sha1 or sha256)"),
+            )
+        }),
+    }
+}
+
+/// Git's loose-object-map (`LMAP`) format ids for SHA-1 and SHA-256.
+const LMAP_SHA1_FORMAT_ID: u32 = 0x7368_6131;
+const LMAP_SHA256_FORMAT_ID: u32 = 0x7332_3536;
+
+/// Read a git loose-object-map file (`<objects>/loose-object-map`) and return the
+/// `(compat_oid, storage_oid)` pairs that let a SHA-256 store also resolve SHA-1 ids
+/// (git's `extensions.compatObjectFormat = sha1`). Returns an empty map when the file is
+/// absent or malformed — a SHA-256 *canonical* repo has no compatibility ids to map, so the
+/// empty map is correct there.
+fn read_loose_object_map(
+    objects_directory: &str,
+) -> Vec<(gix::hash::ObjectId, gix::hash::ObjectId)> {
+    let path = std::path::Path::new(objects_directory).join("loose-object-map");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    parse_lmap(&bytes).unwrap_or_default()
+}
+
+/// Parse git's `LMAP` file format (see git's `loose-object-map.c`). The header is `"LMAP"`, a
+/// version, sizes, then one `object_format_header` per hash algorithm; per algorithm it stores a
+/// shortened-id table, a full-id table, and (for the storage algorithm) a 4-byte metadata table.
+/// We only need the two full-id tables to build `(compat_oid, storage_oid)` pairs.
+fn parse_lmap(bytes: &[u8]) -> Option<Vec<(gix::hash::ObjectId, gix::hash::ObjectId)>> {
+    if bytes.get(0..4)? != b"LMAP" {
+        return None;
+    }
+    if u32_at(bytes, 4)? != 1 {
+        return None;
+    }
+    let nitems = usize::try_from(u32_at(bytes, 12)?).ok()?;
+    let nobj_formats = usize::try_from(u32_at(bytes, 16)?).ok()?;
+    if nobj_formats < 2 {
+        return None;
+    }
+    let mut offset = 20usize;
+    let mut headers: Vec<(u32, usize, usize)> = Vec::with_capacity(nobj_formats);
+    for _ in 0..nobj_formats {
+        if offset + 16 > bytes.len() {
+            return None;
+        }
+        let format_id = u32_at(bytes, offset)?;
+        let shortened_len = usize::try_from(u32_at(bytes, offset + 4)?).ok()?;
+        let data_off = usize::try_from(u64_at(bytes, offset + 8)?).ok()?;
+        headers.push((format_id, shortened_len, data_off));
+        offset += 16;
+    }
+    // Trailing offset (validated loosely).
+    let _ = u64_at(bytes, offset)?;
+
+    // The storage (canonical) hash is SHA-256 and the compatibility hash is SHA-1.
+    let storage_hdr = headers
+        .iter()
+        .find(|(id, _, _)| *id == LMAP_SHA256_FORMAT_ID)?;
+    let compat_hdr = headers
+        .iter()
+        .find(|(id, _, _)| *id == LMAP_SHA1_FORMAT_ID)?;
+    let (_, storage_short, storage_data) = *storage_hdr;
+    let (_, compat_short, compat_data) = *compat_hdr;
+
+    let storage_full = storage_data.checked_add(storage_short.checked_mul(nitems)?)?;
+    let compat_full = compat_data.checked_add(compat_short.checked_mul(nitems)?)?;
+    let storage_len = 32usize;
+    let compat_len = 20usize;
+
+    let mut out = Vec::with_capacity(nitems);
+    for i in 0..nitems {
+        let s = bytes.get(storage_full + i * storage_len..storage_full + (i + 1) * storage_len)?;
+        let c = bytes.get(compat_full + i * compat_len..compat_full + (i + 1) * compat_len)?;
+        let storage_oid = gix::hash::ObjectId::try_from(s).ok()?;
+        let compat_oid = gix::hash::ObjectId::try_from(c).ok()?;
+        out.push((compat_oid, storage_oid));
+    }
+    Some(out)
+}
+
+#[inline]
+fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    let s = bytes.get(offset..offset + 4)?;
+    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+#[inline]
+fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
+    let s = bytes.get(offset..offset + 8)?;
+    Some(u64::from_be_bytes([
+        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+    ]))
+}
+
+/// Options for constructing a loose or memory [`ObjectStore`](crate::object_store::base::ObjectStore) variant.
 #[napi(object)]
 pub struct ObjectStoreOptions {
     /// Maximum size (in bytes) of a single allocation caused by a loose object read/write.
@@ -38,534 +156,19 @@ pub struct PrefixLookup {
     pub id: Option<String>,
 }
 
-/// A database for reading and writing loose git objects on disk, one file per object.
-///
-/// Wraps `gix::odb::loose::Store`. This is the low-level, repository-independent object
-/// database: it operates directly on an `objects/` directory and does not consult packs,
-/// alternates, or the rest of a repository. For the pack-aware store, see `gix::odb::Store`.
-#[napi]
-pub struct ObjectStore {
-    inner: Backend,
-}
-
-/// Backend backing an [`ObjectStore`]. The loose backend writes objects to disk (one file per
-/// object); the memory backend keeps them in a `Mutex`-guarded map, acting like git's mempack:
-/// write transient objects, then `dump()` them as a pack or drop the whole store to discard.
-enum Backend {
-    Loose(gix::odb::loose::Store),
-    Memory(Arc<InMemoryStore>),
-}
-
-/// An in-memory object store, mirroring libgit2's `git_mempack`.
-///
-/// Objects live in a single `Mutex`-guarded map keyed by their id. This backs
-/// `new ObjectStore("memory")`.
-struct InMemoryStore {
-    objects: Mutex<HashMap<gix::ObjectId, (gix::object::Kind, Vec<u8>)>>,
-    kind: gix::hash::Kind,
-}
-
-impl InMemoryStore {
-    fn new(kind: gix::hash::Kind) -> Self {
-        Self {
-            objects: Mutex::new(HashMap::new()),
-            kind,
-        }
-    }
-    fn contains(&self, id: &str) -> bool {
-        gix::ObjectId::from_hex(id.as_bytes())
-            .map(|oid| self.objects.lock().unwrap().contains_key(&oid))
-            .unwrap_or(false)
-    }
-    fn try_find(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>> {
-        let oid = gix::ObjectId::from_hex(id.as_bytes()).map_err(|e| err("parse_oid", e))?;
-        let map = self.objects.lock().unwrap();
-        Ok(map.get(&oid).map(|(kind, data)| crate::object::ObjectData {
-            kind: kind_to_string(*kind),
-            data: Buffer::from(data.clone()),
-        }))
-    }
-    fn try_header(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>> {
-        let oid = gix::ObjectId::from_hex(id.as_bytes()).map_err(|e| err("parse_oid", e))?;
-        let map = self.objects.lock().unwrap();
-        Ok(map
-            .get(&oid)
-            .map(|(kind, data)| crate::object::ObjectHeader {
-                kind: kind_to_string(*kind),
-                size: data.len() as f64,
-                is_packed: false,
-                num_deltas: None,
-            }))
-    }
-    fn lookup_prefix(&self, prefix: &str) -> napi::Result<PrefixLookup> {
-        let p = prefix.to_ascii_lowercase();
-        let mut found: Option<gix::ObjectId> = None;
-        let mut count = 0usize;
-        for oid in self.objects.lock().unwrap().keys() {
-            if oid.to_string().starts_with(&p) {
-                count += 1;
-                found = Some(*oid);
-            }
-        }
-        Ok(match found {
-            Some(oid) if count == 1 => PrefixLookup {
-                found: true,
-                ambiguous: false,
-                id: Some(oid.to_string()),
-            },
-            Some(_) => PrefixLookup {
-                found: false,
-                ambiguous: true,
-                id: None,
-            },
-            None => PrefixLookup {
-                found: false,
-                ambiguous: false,
-                id: None,
-            },
-        })
-    }
-    fn reader(&self, id: &str) -> napi::Result<ObjectStoreReader> {
-        let oid = gix::ObjectId::from_hex(id.as_bytes()).map_err(|e| err("parse_oid", e))?;
-        let map = self.objects.lock().unwrap();
-        match map.get(&oid) {
-            Some((kind, data)) => Ok(ObjectStoreReader {
-                data: data.clone(),
-                kind: kind_to_string(*kind),
-                pos: 0,
-            }),
-            None => Err(err_str("reader", format!("object {id} not found"))),
-        }
-    }
-    fn write_object(&self, kind: gix::object::Kind, data: &[u8]) -> napi::Result<gix::ObjectId> {
-        let mut hasher = gix::hash::hasher(self.kind);
-        let header = format!("{} {}\0", kind_to_string(kind), data.len());
-        hasher.update(header.as_bytes());
-        hasher.update(data);
-        let id = hasher.try_finalize().map_err(|e| err("hash", e))?;
-        self.objects
-            .lock()
-            .unwrap()
-            .insert(id, (kind, data.to_vec()));
-        Ok(id)
-    }
-    #[allow(dead_code)]
-    fn write_object_with_id(
-        &self,
-        id: gix::ObjectId,
-        kind: gix::object::Kind,
-        data: &[u8],
-    ) -> napi::Result<()> {
-        self.objects
-            .lock()
-            .unwrap()
-            .insert(id, (kind, data.to_vec()));
-        Ok(())
-    }
-}
-
-#[napi]
-impl ObjectStore {
-    /// Open the loose object database rooted at `objects_directory` (typically `<repo>/.git/objects`).
-    ///
-    /// `object_hash` is `"sha1"` (default) or `"sha256"`. `options` configures the allocation
-    /// limit and compression level used when reading/writing loose objects.
-    #[napi(constructor)]
-    pub fn new(
-        target: String,
-        object_hash: Option<String>,
-        options: Option<ObjectStoreOptions>,
-    ) -> napi::Result<Self> {
-        let kind = match object_hash.as_deref() {
-            None | Some("sha1") => gix::hash::Kind::Sha1,
-            Some(other) => match crate::object::parse_hash_kind_ci(other) {
-                Some(kind) => kind,
-                None => {
-                    return Err(err_str(
-                        "ObjectStore::new",
-                        format!("unsupported object hash {other} (expected sha1 or sha256)"),
-                    ));
-                }
-            },
-        };
-        let inner = if target == "memory" {
-            Backend::Memory(Arc::new(InMemoryStore::new(kind)))
-        } else {
-            let options = options.unwrap_or(ObjectStoreOptions {
-                alloc_limit_bytes: None,
-                compression_level: None,
-            });
-            let compression = match options.compression_level {
-                Some(level) => Compression::new(level as i32).unwrap_or(Compression::BEST_SPEED),
-                None => Compression::BEST_SPEED,
-            };
-            let store = gix::odb::loose::Store::at_opts(
-                target,
-                kind,
-                gix::odb::loose::Options {
-                    alloc_limit_bytes: options.alloc_limit_bytes.map(|b| b as usize),
-                    compression,
-                },
-            );
-            Backend::Loose(store)
-        };
-        Ok(ObjectStore { inner })
-    }
-
-    /// Whether an object with the given id exists as a loose object.
-    #[napi]
-    pub fn contains(&self, id: String) -> bool {
-        match &self.inner {
-            Backend::Loose(inner) => match parse_oid(&id) {
-                Ok(oid) => inner.contains(&oid),
-                Err(_) => false,
-            },
-            Backend::Memory(m) => m.contains(&id),
-        }
-    }
-
-    /// Resolve a short object id `prefix` (hex) to a unique object.
-    ///
-    /// Returns `found: false` if no object matches, `ambiguous: true` if more than one matches,
-    /// and `id` set when exactly one matches.
-    #[napi]
-    pub fn lookup_prefix(&self, prefix: String) -> napi::Result<PrefixLookup> {
-        match &self.inner {
-            Backend::Loose(inner) => {
-                let prefix =
-                    gix::hash::Prefix::from_hex(&prefix).map_err(|e| err("lookup_prefix", e))?;
-                match inner.lookup_prefix(prefix, None) {
-                    Ok(Some(Ok(oid))) => Ok(PrefixLookup {
-                        found: true,
-                        ambiguous: false,
-                        id: Some(oid.to_string()),
-                    }),
-                    Ok(Some(Err(()))) => Ok(PrefixLookup {
-                        found: false,
-                        ambiguous: true,
-                        id: None,
-                    }),
-                    Ok(None) => Ok(PrefixLookup {
-                        found: false,
-                        ambiguous: false,
-                        id: None,
-                    }),
-                    Err(e) => Err(err("lookup_prefix", e)),
-                }
-            }
-            Backend::Memory(m) => m.lookup_prefix(&prefix),
-        }
-    }
-
-    /// Read an object's raw, decompressed body (without the loose-object header) and kind.
-    /// Returns `null` if the object is missing.
-    #[napi]
-    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::object::ObjectData>> {
-        match &self.inner {
-            Backend::Loose(inner) => {
-                let oid = parse_oid(&id)?;
-                let mut buf = Vec::new();
-                let data = inner
-                    .try_find(&oid, &mut buf)
-                    .map_err(|e| err("try_find", e))?;
-                Ok(data.map(|d| crate::object::ObjectData {
-                    kind: kind_to_string(d.kind),
-                    data: Buffer::from(d.data.to_vec()),
-                }))
-            }
-            Backend::Memory(m) => m.try_find(&id),
-        }
-    }
-
-    /// Read an object's header (kind + size) without decoding its full content.
-    /// Returns `null` if the object is missing.
-    #[napi]
-    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::object::ObjectHeader>> {
-        match &self.inner {
-            Backend::Loose(inner) => {
-                let oid = parse_oid(&id)?;
-                let header = inner.try_header(&oid).map_err(|e| err("try_header", e))?;
-                Ok(header.map(|(size, kind)| crate::object::ObjectHeader {
-                    kind: kind_to_string(kind),
-                    size: size as f64,
-                    is_packed: false,
-                    num_deltas: None,
-                }))
-            }
-            Backend::Memory(m) => m.try_header(&id),
-        }
-    }
-
-    /// Write a raw object of the given `kind` (`commit`, `tree`, `blob`, `tag`) and return its id.
-    #[napi]
-    pub fn write_object(&self, kind: String, data: Buffer) -> napi::Result<String> {
-        let kind = string_to_kind(&kind)?;
-        let id = match &self.inner {
-            Backend::Loose(inner) => inner
-                .write_buf(kind, &data)
-                .map_err(|e| err("write_object", e))?,
-            Backend::Memory(m) => m.write_object(kind, &data)?,
-        };
-        Ok(id.to_string())
-    }
-
-    /// Return the absolute path of the loose object file for `id` (may not exist yet).
-    #[napi]
-    pub fn object_path(&self, id: String) -> napi::Result<String> {
-        match &self.inner {
-            Backend::Loose(inner) => {
-                let oid = parse_oid(&id)?;
-                Ok(inner.object_path(&oid).to_string_lossy().into_owned())
-            }
-            Backend::Memory(_) => Err(err_str(
-                "object_path",
-                "in-memory object stores have no on-disk path",
-            )),
-        }
-    }
-
-    /// Return the `objects` directory path.
-    #[napi(getter)]
-    pub fn path(&self) -> String {
-        match &self.inner {
-            Backend::Loose(inner) => inner.path().to_string_lossy().into_owned(),
-            Backend::Memory(_) => "memory".to_string(),
-        }
-    }
-
-    /// Return the hash kind this store uses (`"sha1"` or `"sha256"`).
-    #[napi(getter)]
-    pub fn object_hash(&self) -> String {
-        match &self.inner {
-            Backend::Loose(inner) => inner.object_hash().to_string(),
-            Backend::Memory(m) => m.kind.to_string(),
-        }
-    }
-
-    /// Open a streaming reader for the object identified by `id`.
-    ///
-    /// The returned [`ObjectStoreReader`] exposes the object's `kind` and `size` and yields the
-    /// raw, decompressed content in chunks via `read`. The loose object is read in full up front
-    /// (gix does not offer incremental on-disk streaming for loose objects), but the bytes are
-    /// delivered to the caller incrementally.
-    #[napi]
-    pub fn reader(&self, id: String) -> napi::Result<ObjectStoreReader> {
-        match &self.inner {
-            Backend::Loose(inner) => {
-                let oid = parse_oid(&id)?;
-                let mut buf = Vec::new();
-                let data = inner
-                    .try_find(&oid, &mut buf)
-                    .map_err(|e| err("reader", e))?;
-                match data {
-                    Some(d) => Ok(ObjectStoreReader {
-                        data: d.data.to_vec(),
-                        kind: kind_to_string(d.kind),
-                        pos: 0,
-                    }),
-                    None => Err(err_str("reader", format!("object {id} not found"))),
-                }
-            }
-            Backend::Memory(m) => m.reader(&id),
-        }
-    }
-
-    /// Open a streaming writer for a new object of the given `kind` (`commit`, `tree`, `blob`, `tag`)
-    /// and total `size` in bytes.
-    ///
-    /// Push content with `write` and call `finalize` to store the object and obtain its id. Content
-    /// is buffered and the object is written on `finalize`; the total written must equal the declared
-    /// `size` (pass `0`/`null` to skip the size check).
-    #[napi]
-    pub fn writer(&self, kind: String, size: f64) -> napi::Result<ObjectStoreWriter> {
-        let kind = string_to_kind(&kind)?;
-        let target = match &self.inner {
-            Backend::Loose(inner) => WriterTarget::Loose(Mutex::new(inner.clone())),
-            Backend::Memory(m) => WriterTarget::Memory(m.clone()),
-        };
-        Ok(ObjectStoreWriter {
-            target,
-            kind,
-            buf: Vec::with_capacity(size as usize),
-            expected_size: if size <= 0.0 {
-                None
-            } else {
-                Some(size as usize)
-            },
-        })
-    }
-
-    fn memory_arc(&self) -> napi::Result<Arc<InMemoryStore>> {
-        match &self.inner {
-            Backend::Memory(m) => Ok(m.clone()),
-            _ => Err(err_str(
-                "ObjectStore",
-                "this operation requires an in-memory object store (new ObjectStore(\"memory\"))",
-            )),
-        }
-    }
-
-    /// Serialize every object currently held in memory into a git packfile `Buffer`.
-    ///
-    /// Only valid for in-memory stores (`new ObjectStore("memory")`). The produced pack can be
-    /// restored via [`load`](Self::load) or fed to `git unpack-objects`.
-    #[napi]
-    pub fn dump(&self) -> napi::Result<Buffer> {
-        let arc = self.memory_arc()?;
-        let kind = arc.kind;
-        let mut entries = Vec::new();
-        {
-            let map = arc.objects.lock().unwrap();
-            for (id, (k, data)) in map.iter() {
-                let count = gix_pack::data::output::Count {
-                    id: *id,
-                    entry_pack_location: gix_pack::data::output::count::PackLocation::NotLookedUp,
-                };
-                let obj = gix::objs::Data {
-                    kind: *k,
-                    object_hash: kind,
-                    data: data.as_slice(),
-                };
-                let entry =
-                    gix_pack::data::output::Entry::from_data(&count, &obj, Compression::DEFAULT)
-                        .map_err(|e| err("dump", e))?;
-                entries.push(entry);
-            }
-        }
-        let num = entries.len() as u32;
-        let mut out = Vec::new();
-        let iter = std::iter::once(Ok(entries));
-        let mut writer = gix_pack::data::output::bytes::FromEntriesIter::new(
-            iter,
-            &mut out,
-            num,
-            gix_pack::data::Version::V2,
-            kind,
-        );
-        while let Some(res) = writer.next() {
-            res.map_err(|e| err("dump", e))?;
-        }
-        Ok(Buffer::from(out))
-    }
-
-    /// Load a packfile `Buffer` (e.g. one produced by [`dump`](Self::dump)) into the in-memory
-    /// store, adding all of its objects. Objects whose id already exists are overwritten.
-    ///
-    /// Only valid for in-memory stores.
-    #[napi]
-    pub fn load(&self, pack: Buffer) -> napi::Result<()> {
-        let arc = self.memory_arc()?;
-        let kind = arc.kind;
-        let dir = std::env::temp_dir().join(format!("repo-mem-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).map_err(|e| err("load", e))?;
-        let pack_path = dir.join("tmp.pack");
-        std::fs::write(&pack_path, &pack).map_err(|e| err("load", e))?;
-        let file = gix_pack::data::File::at(&pack_path, kind).map_err(|e| err("load", e))?;
-        let mut inflate = gix::zlib::Inflate {
-            state: gix::zlib::Decompress::new(),
-        };
-        let mut cache = gix_pack::cache::Never;
-        let mut offset = gix_pack::data::header::SIZE as u64;
-        while offset < file.pack_end() as u64 {
-            let entry = file.entry(offset).map_err(|e| err("load", e))?;
-            let header_size = entry.header_size();
-            let mut out = Vec::new();
-            let outcome = file
-                .decode_entry(
-                    entry,
-                    &mut out,
-                    &mut inflate,
-                    &resolve_pack_base,
-                    &mut cache,
-                )
-                .map_err(|e| err("load", e))?;
-            let mut h = gix::hash::hasher(kind);
-            let header = format!("{} {}\0", kind_to_string(outcome.kind), out.len());
-            h.update(header.as_bytes());
-            h.update(&out);
-            let id = h.try_finalize().map_err(|e| err("load", e))?;
-            arc.objects.lock().unwrap().insert(id, (outcome.kind, out));
-            offset += header_size as u64 + outcome.compressed_size as u64;
-        }
-        Ok(())
-    }
-
-    /// Remove every object currently held in memory, leaving the store empty.
-    ///
-    /// Only valid for in-memory stores (`new ObjectStore("memory")`). Mirrors libgit2's
-    /// `git_mempack_reset`.
-    #[napi]
-    pub fn reset(&self) -> napi::Result<()> {
-        let arc = self.memory_arc()?;
-        arc.objects.lock().unwrap().clear();
-        Ok(())
-    }
-
-    /// Return the hex ids of every object currently held in memory, in insertion order.
-    ///
-    /// Only valid for in-memory stores.
-    #[napi]
-    pub fn entries(&self) -> napi::Result<Vec<String>> {
-        let arc = self.memory_arc()?;
-        let map = arc.objects.lock().unwrap();
-        Ok(map.keys().map(|id| id.to_string()).collect())
-    }
-
-    /// Return the number of objects currently held in memory.
-    ///
-    /// Only valid for in-memory stores.
-    #[napi]
-    pub fn size(&self) -> napi::Result<f64> {
-        let arc = self.memory_arc()?;
-        Ok(arc.objects.lock().unwrap().len() as f64)
-    }
-
-    /// Write a raw object of the given `kind` under the exact `id`, without recomputing its hash.
-    /// Use only when `id` is the correct hash of `data`; a mismatch is not validated here.
-    #[napi]
-    pub fn write_object_with_id(
-        &self,
-        kind: String,
-        data: Buffer,
-        id: String,
-    ) -> napi::Result<String> {
-        let kind = string_to_kind(&kind)?;
-        let oid = parse_oid(&id)?;
-        match &self.inner {
-            Backend::Loose(inner) => {
-                let written = gix::objs::Write::write_buf_with_known_id(&*inner, kind, &data, oid)
-                    .map_err(|e| err("write_object_with_id", e))?;
-                Ok(written.to_string())
-            }
-            Backend::Memory(m) => {
-                m.write_object_with_id(oid, kind, &data)?;
-                Ok(id)
-            }
-        }
-    }
-}
-
-/// Resolver used when decoding a packfile without any base objects available
-/// (the in-memory store only ever holds fully-resolved objects, so deltas
-/// against external bases are not supported here).
-fn resolve_pack_base(
-    _oid: &gix::hash::oid,
-    _out: &mut Vec<u8>,
-) -> std::result::Result<Option<gix_pack::data::decode::entry::ResolvedBase>, gix::Error> {
-    Ok(None)
-}
-
 /// The target a [`ObjectStoreWriter`] flushes its buffered object into.
-enum WriterTarget {
+pub(crate) enum WriterTarget {
     Loose(Mutex<gix::odb::loose::Store>),
     Handle(Mutex<HandleStore>),
-    Memory(Arc<InMemoryStore>),
+    Memory(Arc<crate::object_store::memory::InMemoryStore>),
+    Generic(Arc<crate::object_store::base::GenericStore>),
 }
 
 /// A streaming reader over an object's raw, decompressed content.
 ///
-/// Returned by [`ObjectStore::reader`], [`ObjectHandle::reader`] and [`ObjectDatabase::reader`].
-/// The object is loaded in full on creation; [`read`](Self::read) hands it back in chunks.
+/// Returned by [`LooseObjectStore::reader`], [`MemoryObjectStore::reader`], [`ObjectHandle::reader`]
+/// and [`ObjectDatabase::reader`]. The object is loaded in full on creation; [`read`](Self::read)
+/// hands it back in chunks.
 #[napi]
 pub struct ObjectStoreReader {
     data: Vec<u8>,
@@ -602,7 +205,8 @@ impl ObjectStoreReader {
 
 /// A streaming writer that buffers object content and flushes it on `finalize`.
 ///
-/// Returned by [`ObjectStore::writer`], [`ObjectHandle::writer`] and [`ObjectDatabase::writer`].
+/// Returned by [`LooseObjectStore::writer`], [`MemoryObjectStore::writer`], [`ObjectHandle::writer`]
+/// and [`ObjectDatabase::writer`].
 #[napi]
 pub struct ObjectStoreWriter {
     target: WriterTarget,
@@ -661,6 +265,7 @@ impl ObjectStoreWriter {
                     .map_err(|e| err("finalize", e))?
             }
             WriterTarget::Memory(store) => store.write_object(self.kind, &self.buf)?,
+            WriterTarget::Generic(store) => store.write_object(self.kind, &self.buf)?,
         };
         Ok(id.to_string())
     }
@@ -671,6 +276,10 @@ impl ObjectStoreWriter {
 pub struct ObjectDatabaseOptions {
     /// Object hash kind: `"sha1"` (default). SHA-256 requires the gix `sha256` feature.
     pub object_hash: Option<String>,
+    /// Compatibility object format for a SHA-256 store that also accepts SHA-1 ids
+    /// (`extensions.compatObjectFormat`). Only `"sha1"` is valid; when set, the store can
+    /// resolve the historical SHA-1 ids of its objects (git's SHA-256 + SHA-1 compat mode).
+    pub compat_object_format: Option<String>,
     /// Fixed number of index/pack slots (`Slots::Given`). When `null` and neither
     /// `slots_multiplier` nor `slots_minimum` is set, a sensible default is computed from disk state.
     pub slots: Option<u32>,
@@ -695,12 +304,12 @@ pub struct ObjectDatabaseOptions {
     pub current_dir: Option<String>,
 }
 
-/// A pack-aware, repository-independent object database wrapped in gix's caching layer.
+/// The pack-aware, repository-independent object database wrapped in gix's caching layer.
 ///
-/// Wraps `gix::odb::Cache<Handle<Arc<gix::odb::Store>>>`. Unlike [`ObjectStore`], this consults
-/// packs and alternates in addition to loose objects, and supports pack/object caches to speed up
-/// repeated or delta-chain decodes. Use [`ObjectDatabase::into_inner`] to drop the cache and obtain
-/// the bare [`ObjectHandle`].
+/// Wraps `gix::odb::Cache<Handle<Arc<gix::odb::Store>>>`. Unlike the loose/memory
+/// [`ObjectStore`](crate::object_store::base::ObjectStore) variants, this consults packs and alternates in addition to loose objects, and
+/// supports pack/object caches to speed up repeated or delta-chain decodes. Use
+/// [`ObjectDatabase::into_inner`] to drop the cache and obtain the bare [`ObjectHandle`].
 ///
 /// The wrapped `Cache` is not `Sync` (it holds `RefCell`s), so it is kept behind a `Mutex` here.
 #[napi]
@@ -708,6 +317,7 @@ pub struct ObjectDatabase {
     inner: Mutex<CachedStore>,
     path: String,
     object_hash: gix::hash::Kind,
+    compat_object_format: Option<gix::hash::Kind>,
 }
 
 #[napi]
@@ -721,6 +331,7 @@ impl ObjectDatabase {
     ) -> napi::Result<Self> {
         let options = options.unwrap_or(ObjectDatabaseOptions {
             object_hash: None,
+            compat_object_format: None,
             slots: None,
             slots_multiplier: None,
             slots_minimum: None,
@@ -742,6 +353,33 @@ impl ObjectDatabase {
                     ));
                 }
             },
+        };
+        let compat_object_format = match options.compat_object_format.as_deref() {
+            None => None,
+            Some("sha1") => Some(gix::hash::Kind::Sha1),
+            Some(other) => {
+                return Err(err_str(
+                    "ObjectDatabase::new",
+                    format!("unsupported compatObjectFormat '{other}' (only 'sha1' is supported)"),
+                ));
+            }
+        };
+        // gix's `Store::at_opts` accepts a `(compat_oid, storage_oid)` map so a SHA-256 store can
+        // resolve SHA-1 ids. It is only meaningful when storage is SHA-256 and compat is SHA-1;
+        // otherwise there is nothing to map. The map is populated best-effort from the repo's
+        // `loose-object-map` file (absent for SHA-256 canonical repos, which is correct).
+        let compat_map: Vec<(gix::hash::ObjectId, gix::hash::ObjectId)> = match compat_object_format
+        {
+            Some(gix::hash::Kind::Sha1) if object_hash == gix::hash::Kind::Sha256 => {
+                read_loose_object_map(&objects_directory)
+            }
+            Some(_) => {
+                return Err(err_str(
+                    "ObjectDatabase::new",
+                    "compatObjectFormat is only valid for a SHA-256 store with SHA-1 compatibility",
+                ));
+            }
+            None => Vec::new(),
         };
         let init_options = gix::odb::store::init::Options {
             slots: match (
@@ -766,7 +404,7 @@ impl ObjectDatabase {
         let store = gix::odb::Store::at_opts(
             objects_directory.clone().into(),
             object_hash,
-            &mut std::iter::empty::<(gix::hash::ObjectId, gix::hash::ObjectId)>(),
+            &mut compat_map.into_iter(),
             init_options,
         )
         .map_err(|e| err("ObjectDatabase::new", e))?;
@@ -782,6 +420,7 @@ impl ObjectDatabase {
             inner: Mutex::new(cache),
             path: objects_directory,
             object_hash,
+            compat_object_format,
         })
     }
 
@@ -932,6 +571,7 @@ impl ObjectDatabase {
             inner: Mutex::new(cache),
             path: self.path.clone(),
             object_hash: self.object_hash,
+            compat_object_format: self.compat_object_format,
         })
     }
 
@@ -941,10 +581,27 @@ impl ObjectDatabase {
         self.path.clone()
     }
 
-    /// Return the hash kind this database uses (`"sha1"`).
+    /// Return the hash kind this database uses (`"sha1"` or `"sha256"`).
     #[napi(getter)]
     pub fn object_hash(&self) -> String {
         self.object_hash.to_string()
+    }
+
+    /// The object format this database uses, lower-cased (`"sha1"` or `"sha256"`), for parity
+    /// with [`crate::repository::Repository::objectFormat`].
+    #[napi(getter)]
+    pub fn object_format(&self) -> String {
+        hash_kind_format(self.object_hash).to_string()
+    }
+
+    /// The compatibility object format for a SHA-256 store that also accepts SHA-1 ids
+    /// (`extensions.compatObjectFormat`), or `null` when the store only understands its
+    /// canonical hash.
+    #[napi(getter)]
+    pub fn compat_object_format(&self) -> Option<String> {
+        self.compat_object_format
+            .map(hash_kind_format)
+            .map(str::to_string)
     }
 }
 
@@ -1087,6 +744,17 @@ fn index_state_to_string(state: gix::odb::store::structure::IndexState) -> Strin
     .to_string()
 }
 
+/// The pack-aware, repository-independent object database handle:
+/// `gix::odb::store::Handle<Arc<gix::odb::Store>>`.
+type HandleStore = gix::odb::store::Handle<Arc<gix::odb::Store>>;
+/// The cached object database: `gix::odb::Cache<Handle<Arc<Store>>>`.
+type CachedStore = gix::odb::Cache<HandleStore>;
+
+/// A database for reading and writing objects, consulting loose objects, packs, and alternates.
+///
+/// Wraps `gix::odb::store::Handle<Arc<gix::odb::Store>>`. Unlike the loose/memory
+/// [`ObjectStore`](crate::object_store::base::ObjectStore) variants, this views the full repository object database (loose + packs +
+/// alternates) without the caching layer of [`ObjectDatabase`].
 #[napi]
 pub struct ObjectHandle {
     inner: Mutex<HandleStore>,
