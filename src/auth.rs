@@ -274,14 +274,8 @@ impl Auth {
         self.git_env().into_iter().collect()
     }
 
-    /// Inspect the `git -c` config overrides this authenticator would apply.
-    #[napi(js_name = "gitConfig")]
-    pub fn git_config_list(&self) -> Vec<String> {
-        self.git_config()
-    }
-
     /// Add plaintext `username`/`password` for `domain` (`"*"` = fallback).
-    #[napi(js_name = "addPlaintextCredentials")]
+    #[napi]
     pub fn add_plaintext_credentials(
         &mut self,
         domain: String,
@@ -296,32 +290,32 @@ impl Auth {
     }
 
     /// Enable/disable the git credential helper.
-    #[napi(js_name = "tryCredentialHelper")]
+    #[napi]
     pub fn try_credential_helper(&mut self, enable: bool) {
         self.credential_helper = enable;
     }
 
     /// Set the maximum number of interactive password prompts (`0` disables).
-    #[napi(js_name = "tryPasswordPrompt")]
+    #[napi]
     pub fn try_password_prompt(&mut self, max_count: u32) {
         self.password_prompts = max_count;
     }
 
     /// Add a per-domain `username` to try (`"*"` = fallback).
-    #[napi(js_name = "addUsername")]
+    #[napi]
     pub fn add_username(&mut self, domain: String, username: String) {
         self.usernames.push(UsernameEntry { domain, username });
     }
 
     /// Enable/disable the SSH agent.
-    #[napi(js_name = "trySshAgent")]
+    #[napi]
     pub fn try_ssh_agent(&mut self, enable: bool) {
         self.ssh_agent = enable;
     }
 
     /// Add an SSH private key file path (passphrase is stored but only used if a live prompt is
     /// enabled; otherwise an unencrypted key or agent is required).
-    #[napi(js_name = "addSshKeyFromFile")]
+    #[napi]
     pub fn add_ssh_key_from_file(&mut self, private_key: String, passphrase: Option<String>) {
         // Store the path; the passphrase is attached for completeness but not yet applied to the
         // ssh command (gix/git ssh backends read it interactively or via an agent).
@@ -330,13 +324,13 @@ impl Auth {
     }
 
     /// Add the default SSH keys (`~/.ssh/id_*`) if they exist.
-    #[napi(js_name = "addDefaultSshKeys")]
+    #[napi]
     pub fn add_default_ssh_keys(&mut self) {
         self.default_ssh_keys = true;
     }
 
     /// Enable/disable prompting for passphrases on encrypted SSH keys.
-    #[napi(js_name = "promptSshKeyPassphrase")]
+    #[napi]
     pub fn prompt_ssh_key_passphrase(&mut self, enable: bool) {
         self.prompt_ssh_key_passphrase = enable;
     }
