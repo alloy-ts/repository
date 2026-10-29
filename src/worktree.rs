@@ -9,6 +9,7 @@ use napi_derive::napi;
 use crate::commit::Commit;
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::Repository;
+use crate::status::FileMode;
 
 /// A secondary worktree descriptor.
 #[derive(Clone)]
@@ -806,6 +807,106 @@ impl Worktree {
             Arc::clone(&self.repo),
             tree_id,
         )))
+    }
+
+    /// Reads a file from the working tree root as a `Buffer`, or returns `null` if missing or a directory.
+    #[napi]
+    pub fn read_file(&self, path: String) -> napi::Result<Option<Buffer>> {
+        let full = std::path::Path::new(&self.path).join(path);
+        if !full.is_file() {
+            return Ok(None);
+        }
+        match std::fs::read(&full) {
+            Ok(bytes) => Ok(Some(Buffer::from(bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(err("worktree.read_file", e)),
+        }
+    }
+
+    /// Writes `content` to `path` relative to the working tree root.
+    /// Creates parent directories if needed, and sets executable permission if `mode` is `FileMode::Executable`.
+    #[napi]
+    pub fn write_file(&self, path: String, content: Buffer, mode: Option<FileMode>) -> napi::Result<()> {
+        let full = std::path::Path::new(&self.path).join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err("worktree.write_file", e))?;
+        }
+        std::fs::write(&full, content.as_ref()).map_err(|e| err("worktree.write_file", e))?;
+        if matches!(mode, Some(FileMode::Executable)) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&full) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(perms.mode() | 0o111);
+                    let _ = std::fs::set_permissions(&full, perms);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a file relative to the working tree root.
+    #[napi]
+    pub fn remove_file(&self, path: String) -> napi::Result<()> {
+        let full = std::path::Path::new(&self.path).join(path);
+        match std::fs::remove_file(&full) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(err("worktree.remove_file", e)),
+        }
+    }
+
+    /// Returns the [`FileMode`] (`Regular`, `Executable`, `Symlink`, etc.) of a path in the working tree, or `null` if missing.
+    #[napi]
+    pub fn file_mode(&self, path: String) -> napi::Result<Option<FileMode>> {
+        let full = std::path::Path::new(&self.path).join(path);
+        let meta = match std::fs::symlink_metadata(&full) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(err("worktree.file_mode", e)),
+        };
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            Ok(Some(FileMode::Symlink))
+        } else if ft.is_dir() {
+            Ok(Some(FileMode::Directory))
+        } else if ft.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.permissions().mode() & 0o111 != 0 {
+                    return Ok(Some(FileMode::Executable));
+                }
+            }
+            Ok(Some(FileMode::Regular))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Returns `true` if `path` exists and its on-disk stat data still matches its index entry.
+    #[napi]
+    pub fn is_stat_clean(&self, path: String) -> napi::Result<bool> {
+        let r = thread_local(&self.repo);
+        let full = std::path::Path::new(&self.path).join(&path);
+        let meta = match std::fs::metadata(&full) {
+            Ok(m) => m,
+            Err(_) => return Ok(false),
+        };
+        let index = match r.index_or_empty() {
+            Ok(i) => i,
+            Err(_) => return Ok(false),
+        };
+        let target = path.as_bytes();
+        let entry = match index.entries().iter().find(|e| &**e.path(&index) == target) {
+            Some(e) => e,
+            None => return Ok(false),
+        };
+        let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        let stat_matches = entry.stat.size == meta.len() as u32
+            && mtime.map_or(false, |t| entry.stat.mtime.secs == t.as_secs() as u32);
+        Ok(stat_matches)
     }
 
     fn locked_path(&self) -> std::path::PathBuf {

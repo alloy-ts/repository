@@ -64,8 +64,12 @@ pub enum LogOrder {
 pub struct LogOptions {
     /// Start of the walk (branch, tag, `HEAD`, `<oid>`, `~`/`^` expressions). Defaults to `HEAD`.
     pub rev: Option<String>,
+    /// Alias for `rev` (starting commit/revision).
+    pub from: Option<String>,
     /// Maximum number of *matching* commits to return (counted after filters apply).
     pub limit: Option<f64>,
+    /// Alias for `limit`.
+    pub max_count: Option<f64>,
     /// Follow only the first parent of each merge commit.
     pub first_parent: Option<bool>,
     /// Include only commits whose committer date is at or after this time. Accepts a Unix
@@ -205,12 +209,14 @@ fn path_matches(loc: &[u8], paths: &[String]) -> bool {
 /// One walked commit: its decoded summary, its parent object ids, and its own object id.
 type GraphItem = (CommitInfo, Vec<gix::ObjectId>, gix::ObjectId);
 
-/// Resolve the walk's start commit from `rev` (defaults to `HEAD`).
+/// Resolve the walk's start commit from `rev` or `from` (defaults to `HEAD`).
 fn resolve_tip(
     r: &gix::Repository,
     rev: &Option<String>,
+    from: &Option<String>,
 ) -> Result<gix::ObjectId, RepositoryError> {
-    match rev {
+    let spec = rev.as_ref().or(from.as_ref());
+    match spec {
         Some(s) => r
             .rev_parse_single(s.as_str())
             .map_err(|e| err_repo("rev_parse_single", e))
@@ -397,8 +403,8 @@ impl Repository {
         r: &gix::Repository,
         opts: &LogOptions,
     ) -> Result<Vec<CommitInfo>, RepositoryError> {
-        let tip = resolve_tip(r, &opts.rev)?;
-        let limit = opts.limit.map(|l| l as usize);
+        let tip = resolve_tip(r, &opts.rev, &opts.from)?;
+        let limit = opts.limit.or(opts.max_count).map(|l| l as usize);
         let first_parent = opts.first_parent.unwrap_or(false);
         let reverse = opts.reverse.unwrap_or(false);
         let since = opts.since.as_deref().and_then(parse_date);
@@ -514,8 +520,8 @@ impl Repository {
         r: &gix::Repository,
         opts: &LogOptions,
     ) -> Result<Vec<GraphRow>, RepositoryError> {
-        let tip = resolve_tip(r, &opts.rev)?;
-        let limit = opts.limit.map(|l| l as usize);
+        let tip = resolve_tip(r, &opts.rev, &opts.from)?;
+        let limit = opts.limit.or(opts.max_count).map(|l| l as usize);
         let first_parent = opts.first_parent.unwrap_or(false);
         let reverse = opts.reverse.unwrap_or(false);
         let since = opts.since.as_deref().and_then(parse_date);

@@ -17,6 +17,7 @@ use crate::repository::{IndexEntryInput, Repository};
 /// codes), we read it straight from the index: a stage-1 entry means the path
 /// existed in the common ancestor, while the presence of stages 2/3 reflects
 /// which side touched it.
+#[derive(Clone, Copy)]
 #[napi(string_enum)]
 pub enum ConflictKind {
     /// Both sides modified the path (stages 1+2+3 present).
@@ -33,6 +34,21 @@ pub enum ConflictKind {
     DeletedByUs,
     /// They deleted the path; we modified it (stages 1+2).
     DeletedByThem,
+}
+
+impl ConflictKind {
+    /// The two-letter porcelain code for this conflict.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ConflictKind::BothDeleted => "DD",
+            ConflictKind::AddedByUs => "AU",
+            ConflictKind::DeletedByThem => "UD",
+            ConflictKind::AddedByThem => "UA",
+            ConflictKind::DeletedByUs => "DU",
+            ConflictKind::BothAdded => "AA",
+            ConflictKind::BothModified => "UU",
+        }
+    }
 }
 
 /// A single conflicted path in an in-progress merge, rebase, or cherry-pick

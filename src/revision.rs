@@ -278,6 +278,102 @@ impl Repository {
         build_object(&self.inner, id.detach())
     }
 
+    /// Returns the full name of the reference that a short name denotes,
+    /// using Git's DWIM lookup order (`refs/{}`, `refs/tags/{}`, `refs/heads/{}`, `refs/remotes/{}`, `refs/remotes/{}/HEAD`),
+    /// or `null` if no such reference exists.
+    #[napi]
+    pub fn dwim_ref(&self, name: String) -> napi::Result<Option<String>> {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let r = thread_local(&self.inner);
+        let root_syntax = name.bytes().all(|b| b.is_ascii_uppercase() || b == b'_');
+        let mut candidates = Vec::new();
+        if root_syntax || name.starts_with("refs/") {
+            candidates.push(name.clone());
+        }
+        for pattern in [
+            "refs/{}",
+            "refs/tags/{}",
+            "refs/heads/{}",
+            "refs/remotes/{}",
+            "refs/remotes/{}/HEAD",
+        ] {
+            candidates.push(pattern.replace("{}", &name));
+        }
+        for candidate in candidates {
+            if let Ok(Some(rf)) = r.try_find_reference(&candidate) {
+                return Ok(Some(rf.name().as_bstr().to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// What was checked out before the n-th last checkout (`@{-n}`): a branch name or commit id
+    /// from HEAD's reflog (`checkout: moving from <a> to <b>`), or `null` if there were fewer checkouts.
+    #[napi]
+    pub fn previous_checkout(&self, n: u32) -> napi::Result<Option<String>> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let skip = (n - 1) as usize;
+        let r = thread_local(&self.inner);
+        let head_ref = match r.find_reference("HEAD") {
+            Ok(rf) => rf,
+            Err(_) => return Ok(None),
+        };
+        let mut platform = head_ref.log_iter();
+        let mut checkouts = Vec::new();
+        if let Ok(Some(lines)) = platform.all() {
+            for line in lines.filter_map(|l| l.ok()).collect::<Vec<_>>().into_iter().rev() {
+                let msg = line.message.to_string();
+                if let Some(rest) = msg.strip_prefix("checkout: moving from ") {
+                    if let Some((from, _)) = rest.rsplit_once(" to ") {
+                        checkouts.push(from.to_string());
+                    }
+                }
+            }
+        }
+        Ok(checkouts.get(skip).cloned())
+    }
+
+    /// Follows annotated tags (and a commit to its tree) until an object of type `target_type`
+    /// (`"commit"`, `"tree"`, `"blob"`, `"tag"`) is reached.
+    #[napi]
+    pub fn peel_to(&self, spec: String, target_type: String) -> napi::Result<String> {
+        let r = thread_local(&self.inner);
+        let mut oid = r.rev_parse_single(spec.as_str()).map_err(|e| err("peel_to", e))?.detach();
+        let want_kind = match target_type.to_lowercase().as_str() {
+            "commit" => gix::object::Kind::Commit,
+            "tree" => gix::object::Kind::Tree,
+            "blob" => gix::object::Kind::Blob,
+            "tag" => gix::object::Kind::Tag,
+            other => return Err(err_str("peel_to", format!("invalid target type '{other}'"))),
+        };
+        loop {
+            let obj = r.find_object(oid).map_err(|e| err("peel_to", e))?;
+            if obj.kind == want_kind {
+                return Ok(oid.to_string());
+            }
+            match obj.kind {
+                gix::object::Kind::Tag => {
+                    let tag = obj.try_into_tag().map_err(|_| err_str("peel_to", "expected tag object"))?;
+                    oid = tag.target_id().map_err(|e| err("peel_to", e))?.detach();
+                }
+                gix::object::Kind::Commit if want_kind == gix::object::Kind::Tree => {
+                    let commit = obj.try_into_commit().map_err(|_| err_str("peel_to", "expected commit object"))?;
+                    oid = commit.tree_id().map_err(|e| err("peel_to", e))?.detach();
+                }
+                other => {
+                    return Err(err_str(
+                        "peel_to",
+                        format!("cannot peel {} to {}", other, target_type),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Compute the best merge-base of two revisions (like `git merge-base <one> <two>`).
     ///
     /// Both arguments accept anything [`rev_parse_single`](Self::rev_parse_single) does —

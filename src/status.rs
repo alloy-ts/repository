@@ -18,7 +18,8 @@ use gix::status::plumbing::index_as_worktree::{
 use gix::status::tree_index::TrackRenames;
 use gix::status::{Item as StatusItem, UntrackedFiles};
 
-use crate::error::{err, err_str, thread_local};
+use crate::conflict::ConflictKind;
+use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::{Repository, lossy};
 
 // ---------------------------------------------------------------------------
@@ -129,43 +130,6 @@ pub struct Status {
     pub entries: Vec<StatusEntry>,
 }
 
-/// The kind of an unresolved merge conflict, derived from the index stages
-/// present. Mirrors git's `DD`/`AU`/`UD`/`UA`/`DU`/`AA`/`UU` codes and
-/// `zerogit`'s `ConflictKind`. The two-letter code is also available on
-/// [`StatusEntry::porcelain`].
-#[derive(Clone)]
-#[napi(string_enum)]
-pub enum ConflictKind {
-    /// Both sides deleted the file (`DD`: stage 1 only).
-    BothDeleted,
-    /// Added on our side, modified on theirs (`AU`: stage 2 only).
-    AddedByUs,
-    /// Deleted by them, we modified (`UD`: stages 1 and 2).
-    DeletedByThem,
-    /// Added by them, we modified (`UA`: stage 3 only).
-    AddedByThem,
-    /// Deleted by us, they modified (`DU`: stages 1 and 3).
-    DeletedByUs,
-    /// Added on both sides in different states (`AA`: stages 2 and 3).
-    BothAdded,
-    /// Modified on both sides (`UU`: stages 1, 2 and 3).
-    BothModified,
-}
-
-impl ConflictKind {
-    /// The two-letter porcelain code for this conflict.
-    fn code(&self) -> &'static str {
-        match self {
-            ConflictKind::BothDeleted => "DD",
-            ConflictKind::AddedByUs => "AU",
-            ConflictKind::DeletedByThem => "UD",
-            ConflictKind::AddedByThem => "UA",
-            ConflictKind::DeletedByUs => "DU",
-            ConflictKind::BothAdded => "AA",
-            ConflictKind::BothModified => "UU",
-        }
-    }
-}
 
 /// The kind of a filesystem object as stored in a tree or the index.
 /// Exposed on [`StatusEntry`]'s `headMode`/`indexMode`/`worktreeMode`.
@@ -1110,6 +1074,28 @@ impl Repository {
             .at_path(Path::new(path.as_str()), None)
             .map_err(|e| err("at_path", e))?;
         Ok(platform.is_excluded())
+    }
+
+    /// Checks if a file in the working tree has been modified compared to an expected blob OID.
+    /// Returns `true` if the file does not exist or its content hash differs from `expected_oid`.
+    #[napi]
+    pub fn file_modified(&self, path: String, expected_oid: String) -> napi::Result<bool> {
+        let r = thread_local(&self.inner);
+        let workdir = match r.workdir() {
+            Some(w) => w,
+            None => return Ok(true),
+        };
+        let full_path = workdir.join(&path);
+        if !full_path.exists() {
+            return Ok(true);
+        }
+        let expected = parse_oid(&expected_oid)?;
+        let data = match std::fs::read(&full_path) {
+            Ok(d) => d,
+            Err(_) => return Ok(true),
+        };
+        let actual = r.write_blob(&data).map_err(|e| err("file_modified", e))?;
+        Ok(actual.detach() != expected)
     }
 }
 

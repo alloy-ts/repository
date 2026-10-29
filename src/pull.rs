@@ -284,6 +284,7 @@ impl Task for PullTask {
                     flags: None,
                     pathspecs: None,
                     author: None,
+                    include_untracked: None,
                 })?
             } else {
                 None

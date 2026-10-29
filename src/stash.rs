@@ -51,6 +51,8 @@ pub struct StashSaveOptions {
     /// Override the author and committer of the stash commits. When omitted,
     /// git's configured identity is used (as `saveStash` did before).
     pub author: Option<Signature>,
+    /// Also stash untracked files (equivalent to `StashFlags::IncludeUntracked`).
+    pub include_untracked: Option<bool>,
 }
 
 /// A single stash, as returned by [`Repository::listStashes`].
@@ -138,7 +140,7 @@ impl Repository {
 
         let bits = opts.flags.map(flag_bits).unwrap_or(0);
         let keep_index = bits & 1 != 0;
-        let include_untracked = bits & 2 != 0;
+        let include_untracked = (bits & 2 != 0) || opts.include_untracked.unwrap_or(false);
 
         let index = repo.index().map_err(|e| err("index", e))?;
         let index_items = index_items(&index)?;
@@ -363,9 +365,9 @@ impl Repository {
         let parents: Vec<gix::ObjectId> = commit.parent_ids().map(|p| p.detach()).collect();
 
         // stash^1 = base (HEAD at stash time); stash^2 = index tree; stash^3 = untracked tree.
-        let base_tree_id = parents.first().copied();
-        let index_tree_id = parents.get(1).copied();
-        let untracked_tree_id = parents.get(2).copied();
+        let base_tree_id = parents.first().and_then(|cid| repo.find_commit(*cid).ok()?.tree_id().ok().map(|t| t.detach()));
+        let index_tree_id = parents.get(1).and_then(|cid| repo.find_commit(*cid).ok()?.tree_id().ok().map(|t| t.detach()));
+        let untracked_tree_id = parents.get(2).and_then(|cid| repo.find_commit(*cid).ok()?.tree_id().ok().map(|t| t.detach()));
 
         // Conflict-protective guard: collect every path that would be clobbered rather
         // than throwing on the first one. Nothing is restored when conflicts exist.
@@ -446,6 +448,42 @@ impl Repository {
         let _ = std::fs::remove_file(Path::new(&git_dir).join("refs").join("stash"));
         Ok(())
     }
+
+    /// Alias for [`save_stash`](Self::save_stash) matching git CLI syntax.
+    #[napi]
+    pub fn stash_save(&self, opts: Option<StashSaveOptions>) -> napi::Result<Option<String>> {
+        self.save_stash(opts.unwrap_or(StashSaveOptions {
+            message: None,
+            flags: None,
+            pathspecs: None,
+            author: None,
+            include_untracked: None,
+        }))
+    }
+
+    /// Alias for [`list_stashes`](Self::list_stashes) matching git CLI syntax.
+    #[napi]
+    pub fn stash_list(&self) -> napi::Result<Vec<StashEntry>> {
+        self.list_stashes()
+    }
+
+    /// Alias for [`apply_stash`](Self::apply_stash) matching git CLI syntax.
+    #[napi]
+    pub fn stash_apply(&self, index: Option<u32>, restore_index: Option<bool>) -> napi::Result<StashApplyOutcome> {
+        self.apply_stash(index.unwrap_or(0), restore_index)
+    }
+
+    /// Alias for [`pop_stash`](Self::pop_stash) matching git CLI syntax.
+    #[napi]
+    pub fn stash_pop(&self, index: Option<u32>, restore_index: Option<bool>) -> napi::Result<StashApplyOutcome> {
+        self.pop_stash(index.unwrap_or(0), restore_index)
+    }
+
+    /// Alias for [`drop_stash`](Self::drop_stash) matching git CLI syntax.
+    #[napi]
+    pub fn stash_drop(&self, index: u32) -> napi::Result<()> {
+        self.drop_stash(index)
+    }
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -465,23 +503,41 @@ fn update_stash_ref(
     stash_id: gix::ObjectId,
     label: &str,
 ) -> napi::Result<()> {
-    let name: FullName = "refs/stash".try_into().map_err(|e| err("ref_name", e))?;
-    let edit = match repo.find_reference(&name) {
-        Ok(_) => RefEdit::update(
-            name,
-            Target::Object(stash_id),
-            PreviousValue::MustExist,
-            label,
-        ),
-        Err(_) => RefEdit::update(
-            name,
-            Target::Object(stash_id),
-            PreviousValue::MustNotExist,
-            label,
-        ),
+    use std::io::Write;
+    let log_path = repo.git_dir().join("logs").join("refs").join("stash");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let old_oid = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c
+            .lines()
+            .filter(|l| !l.is_empty())
+            .last()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("0000000000000000000000000000000000000000")
+            .to_string(),
+        Err(_) => "0000000000000000000000000000000000000000".to_string(),
     };
-    repo.edit_reference(edit)
-        .map_err(|e| err("edit_reference", e))?;
+    let committer = repo
+        .committer()
+        .and_then(|c| c.ok())
+        .map(|c| format!("{} <{}>", c.name, c.email))
+        .unwrap_or_else(|| "Test <test@example.com>".to_string());
+    let log_line = format!("{} {} {}\t{}\n", old_oid, stash_id.to_string(), committer, label);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| err("write_stash_reflog", e))?;
+    file.write_all(log_line.as_bytes())
+        .map_err(|e| err("write_stash_reflog", e))?;
+
+    let ref_path = repo.git_dir().join("refs").join("stash");
+    if let Some(parent) = ref_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&ref_path, format!("{}\n", stash_id.to_string()))
+        .map_err(|e| err("write_stash_ref", e))?;
     Ok(())
 }
 
@@ -576,7 +632,9 @@ fn working_items(
 fn untracked_items(repo: &gix::Repository, workdir: &Path) -> napi::Result<Vec<TreeItem>> {
     let platform = repo
         .status::<gix::progress::Discard>(gix::progress::Discard)
-        .map_err(|e| err("status", e))?;
+        .map_err(|e| err("status", e))?
+        .untracked_files(gix::status::UntrackedFiles::Files)
+        .dirwalk_options(|o| o.emit_untracked(gix::dir::walk::EmissionMode::Matching));
     let mut iter = platform
         .into_index_worktree_iter(std::iter::empty::<gix::bstr::BString>())
         .map_err(|e| err("status_iter", e))?;

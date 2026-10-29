@@ -12,6 +12,13 @@ async support and full type definitions.
 
 - **Git Operations**: Repositories, commits, trees, blobs, diffs, blame, status,
   worktrees, branches, tags, and remotes.
+  - **Status**: Working tree status, single path checks (`fileModified`), dirty probing.
+  - **Worktree**: Linked worktree management, file read/write/remove operations (`readFile`, `writeFile`, `removeFile`, `fileMode`, `isStatClean`).
+  - **Revisions**: `revParse`, `dwimRef`, `previousCheckout` (`@{-n}`), and `peelTo`.
+  - **Stash**: Full stash management (`stashSave`, `stashList`, `stashApply`, `stashPop`, `stashDrop`) with `includeUntracked` support.
+  - **Reset**: Safe reset (`resetTo`, `resetPaths`, `resetHard`).
+  - **Rebase**: Step-driven and CLI-driven rebase operations (`rebasePlan`, `isRebasing`, `rebaseContinue`, `rebaseSkip`, `rebaseAbort`).
+  - **Log**: Flexible history walking and graph rendering (`from`, `maxCount` options).
 - **Cryptography & Vault**: Symmetric ChaCha20-Poly1305 / AES encryption,
   ref-backed key vaults, git-crypt worktree filter drivers, and
   git-remote-gcrypt entire repository mode (packfile & manifest encryption).

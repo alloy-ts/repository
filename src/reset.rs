@@ -145,6 +145,13 @@ impl Repository {
         self.reset_to(target, ResetMode::Mixed)?;
         Ok(())
     }
+
+    /// Perform a hard reset to HEAD or `revision` if provided. Equivalent to `git reset --hard`.
+    #[napi]
+    pub fn reset_hard(&self, revision: Option<String>) -> napi::Result<String> {
+        let rev = revision.unwrap_or_else(|| "HEAD".to_string());
+        self.reset_to(rev, ResetMode::Hard)
+    }
 }
 
 /// Resolve `spec` to a commit, returning `(commit id, tree id)`. The spec is

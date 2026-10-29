@@ -12,7 +12,7 @@ use crate::identity::Signature;
 use crate::merge::{
     MergeOptions, MergeOutcome, build_tree_options, merge_outcome_to_dto, owned_labels,
 };
-use crate::repository::{Repository, lossy};
+use crate::repository::{Repository, find_git, lossy};
 
 /// Options controlling an in-memory rebase.
 #[napi(object)]
@@ -537,5 +537,122 @@ impl Repository {
             total,
             conflict: None,
         })
+    }
+
+    /// Returns `true` if a rebase is currently in progress.
+    #[napi]
+    pub fn is_rebasing(&self) -> bool {
+        let r = thread_local(&self.inner);
+        let git_dir = r.git_dir();
+        git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir()
+    }
+
+    /// Returns the plan of rebase operations from `upstream` to `HEAD`.
+    #[napi]
+    pub fn rebase_plan(&self, upstream: String) -> napi::Result<Vec<RebaseOperation>> {
+        let what = "rebase_plan";
+        let r = thread_local(&self.inner);
+        let plan = plan_rebase(&r, what, None, Some(&upstream), None)?;
+        Ok(plan.ops.into_iter().map(operation_dto).collect())
+    }
+
+    /// Continues an in-progress rebase after resolving conflicts or editing.
+    #[napi]
+    pub fn rebase_continue(
+        &self,
+        committer_name: Option<String>,
+        committer_email: Option<String>,
+    ) -> napi::Result<RebaseOutcome> {
+        let r = thread_local(&self.inner);
+        let git = find_git().ok_or_else(|| err_str("rebase_continue", "no system git binary found"))?;
+        let mut cmd = std::process::Command::new(&git);
+        cmd.arg("rebase").arg("--continue");
+        if let Some(wd) = r.workdir() {
+            cmd.current_dir(wd);
+        }
+        if let Some(name) = committer_name {
+            cmd.env("GIT_COMMITTER_NAME", name);
+        }
+        if let Some(email) = committer_email {
+            cmd.env("GIT_COMMITTER_EMAIL", email);
+        }
+        cmd.env("GIT_EDITOR", "true");
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let head_id = r.head_id().map(|h| h.to_string()).unwrap_or_default();
+                Ok(RebaseOutcome {
+                    completed: !self.is_rebasing(),
+                    head_id,
+                    applied: 1,
+                    total: 1,
+                    conflict: None,
+                })
+            }
+            Ok(out) => Err(err_str(
+                "rebase_continue",
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )),
+            Err(e) => Err(err("rebase_continue", e)),
+        }
+    }
+
+    /// Skips the current conflicting commit in an in-progress rebase.
+    #[napi]
+    pub fn rebase_skip(
+        &self,
+        committer_name: Option<String>,
+        committer_email: Option<String>,
+    ) -> napi::Result<RebaseOutcome> {
+        let r = thread_local(&self.inner);
+        let git = find_git().ok_or_else(|| err_str("rebase_skip", "no system git binary found"))?;
+        let mut cmd = std::process::Command::new(&git);
+        cmd.arg("rebase").arg("--skip");
+        if let Some(wd) = r.workdir() {
+            cmd.current_dir(wd);
+        }
+        if let Some(name) = committer_name {
+            cmd.env("GIT_COMMITTER_NAME", name);
+        }
+        if let Some(email) = committer_email {
+            cmd.env("GIT_COMMITTER_EMAIL", email);
+        }
+        cmd.env("GIT_EDITOR", "true");
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let head_id = r.head_id().map(|h| h.to_string()).unwrap_or_default();
+                Ok(RebaseOutcome {
+                    completed: !self.is_rebasing(),
+                    head_id,
+                    applied: 1,
+                    total: 1,
+                    conflict: None,
+                })
+            }
+            Ok(out) => Err(err_str(
+                "rebase_skip",
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )),
+            Err(e) => Err(err("rebase_skip", e)),
+        }
+    }
+
+    /// Aborts an in-progress rebase and resets the branch to its state before rebase started.
+    #[napi]
+    pub fn rebase_abort(&self) -> napi::Result<()> {
+        let r = thread_local(&self.inner);
+        let git = find_git().ok_or_else(|| err_str("rebase_abort", "no system git binary found"))?;
+        let mut cmd = std::process::Command::new(&git);
+        cmd.arg("rebase").arg("--abort");
+        if let Some(wd) = r.workdir() {
+            cmd.current_dir(wd);
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(err_str(
+                "rebase_abort",
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )),
+            Err(e) => Err(err("rebase_abort", e)),
+        }
     }
 }
