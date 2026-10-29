@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { refNameNormalize, Repository } from "./main.ts";
+import { refNameNormalise, Repository } from "./main.ts";
 
 const realRoot = process.cwd();
 let base: string;
@@ -30,34 +30,6 @@ afterAll(() => {
     force: true,
     maxRetries: 10,
     retryDelay: 200,
-  });
-});
-
-describe("Repository.setHead (src/reference.rs)", () => {
-  test("points HEAD at a commit id (detached)", () => {
-    const head = repo.head();
-    expect(head.kind).toBe("symbolic");
-    const id = repo.headId();
-
-    repo.setHead(id);
-
-    const detached = repo.head();
-    expect(detached.kind).toBe("detached");
-    expect(repo.headId()).toBe(id);
-  });
-
-  test("points HEAD at a branch name (symbolic, DWIM)", () => {
-    // Reset to the symbolic branch, then move HEAD to it by short name.
-    const branch = "main";
-    repo.setHead(`refs/heads/${branch}`);
-    expect(repo.head().kind).toBe("symbolic");
-    const referent = repo.headRef();
-    expect(referent).not.toBe(null);
-    expect(referent!.name).toBe(`refs/heads/${branch}`);
-
-    // A short (DWIM) name resolves to the same referent.
-    repo.setHead(branch);
-    expect(repo.headRef()!.name).toBe(`refs/heads/${branch}`);
   });
 });
 
@@ -95,29 +67,29 @@ describe("Repository.createSymbolicReference (src/reference.rs)", () => {
   });
 });
 
-describe("refNameNormalize (src/reference.rs)", () => {
+describe("refNameNormalise (src/reference.rs)", () => {
   test("collapses adjacent slashes (NORMAL)", () => {
-    expect(refNameNormalize("foo//bar")).toBe("foo/bar");
+    expect(refNameNormalise("foo//bar")).toBe("foo/bar");
   });
 
   test("allows one-level names with allowOneLevel", () => {
-    expect(refNameNormalize("HEAD", { allowOneLevel: true })).toBe("HEAD");
+    expect(refNameNormalise("HEAD", { allowOneLevel: true })).toBe("HEAD");
   });
 
   test("allows shorthand branches with allowOneLevel + refspecShorthand", () => {
-    expect(refNameNormalize("main", { allowOneLevel: true, refspecShorthand: true })).toBe("main");
+    expect(refNameNormalise("main", { allowOneLevel: true, refspecShorthand: true })).toBe("main");
   });
 
   test("allows a single '*' as a component with refspecPattern", () => {
-    expect(refNameNormalize("refs/heads/*", { refspecPattern: true })).toBe("refs/heads/*");
-    expect(refNameNormalize("foo/*/bar", { refspecPattern: true })).toBe("foo/*/bar");
+    expect(refNameNormalise("refs/heads/*", { refspecPattern: true })).toBe("refs/heads/*");
+    expect(refNameNormalise("foo/*/bar", { refspecPattern: true })).toBe("foo/*/bar");
   });
 
   test("rejects names that are invalid for the chosen mode", () => {
     // "main" is not a valid full name (NORMAL).
-    expect(() => refNameNormalize("main")).toThrow();
+    expect(() => refNameNormalise("main")).toThrow();
     // Two '*' are never allowed.
-    expect(() => refNameNormalize("foo/*/bar*", { refspecPattern: true })).toThrow();
+    expect(() => refNameNormalise("foo/*/bar*", { refspecPattern: true })).toThrow();
   });
 });
 

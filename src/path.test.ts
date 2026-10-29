@@ -5,9 +5,9 @@ import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 
 import {
   pathIsAbsolute,
-  pathNormalize,
-  pathNormalizeAndClean,
-  pathNormalizeSaturating,
+  pathNormalise,
+  pathNormaliseAndClean,
+  pathNormaliseSaturating,
   pathRealpath,
   pathRealpathWithCwd,
   pathRelativizeWithPrefix,
@@ -64,46 +64,46 @@ describe("pathRealpath", () => {
   });
 });
 
-describe("pathNormalize", () => {
+describe("pathNormalise", () => {
   // Cases from the upstream doctest.
   test("eliminates intermediate .. virtually", () => {
-    expect(pathNormalize("a/./b/c/.././..", CWD)).toBe("a");
-    expect(pathNormalize("/a/../b/..", CWD)).toBe("/");
-    expect(pathNormalize("/base/a/..", CWD)).toBe("/base");
-    expect(pathNormalize("./a/..", CWD)).toBe(".");
-    expect(pathNormalize("/base/../base", CWD)).toBe("/base");
+    expect(pathNormalise("a/./b/c/.././..", CWD)).toBe("a");
+    expect(pathNormalise("/a/../b/..", CWD)).toBe("/");
+    expect(pathNormalise("/base/a/..", CWD)).toBe("/base");
+    expect(pathNormalise("./a/..", CWD)).toBe(".");
+    expect(pathNormalise("/base/../base", CWD)).toBe("/base");
   });
 
   test("preserves leading dots and duplicate separators", () => {
-    expect(pathNormalize(".///", CWD)).toBe(".///");
-    expect(pathNormalize("a//b", CWD)).toBe("a//b");
+    expect(pathNormalise(".///", CWD)).toBe(".///");
+    expect(pathNormalise("a//b", CWD)).toBe("a//b");
   });
 
   test("returns null when .. exhausts currentDir", () => {
-    expect(pathNormalize("../../r", "/c")).toBeNull();
-    expect(pathNormalize("./a/../..", CWD)).toBe("/");
+    expect(pathNormalise("../../r", "/c")).toBeNull();
+    expect(pathNormalise("./a/../..", CWD)).toBe("/");
   });
 });
 
-describe("pathNormalizeSaturating", () => {
+describe("pathNormaliseSaturating", () => {
   test("clamps .. at the filesystem root instead of returning null", () => {
-    expect(pathNormalizeSaturating("../../r", "/c")).toBe("/r");
-    expect(pathNormalizeSaturating("/base/a/..", CWD)).toBe("/base");
+    expect(pathNormaliseSaturating("../../r", "/c")).toBe("/r");
+    expect(pathNormaliseSaturating("/base/a/..", CWD)).toBe("/base");
   });
 });
 
-describe("pathNormalizeAndClean", () => {
+describe("pathNormaliseAndClean", () => {
   test("additionally removes dot components and duplicate separators", () => {
-    expect(pathNormalizeAndClean("a//b/.", CWD)).toBe("a/b");
-    expect(pathNormalizeAndClean("./a/../..", CWD)).toBe("/");
-    expect(pathNormalizeAndClean("/base/../base", CWD)).toBe("/base");
+    expect(pathNormaliseAndClean("a//b/.", CWD)).toBe("a/b");
+    expect(pathNormaliseAndClean("./a/../..", CWD)).toBe("/");
+    expect(pathNormaliseAndClean("/base/../base", CWD)).toBe("/base");
   });
 
   test("returns currentDir when cleaning leaves no components", () => {
-    // No `..` to normalize, but cleaning strips the dot components entirely.
-    expect(pathNormalizeAndClean(".///", "/base")).toBe("/base");
-    // `a/../..` normalizes to "/" (the popped current dir), not to currentDir.
-    expect(pathNormalizeAndClean("a/../..", "/base")).toBe("/");
+    // No `..` to normalise, but cleaning strips the dot components entirely.
+    expect(pathNormaliseAndClean(".///", "/base")).toBe("/base");
+    // `a/../..` normalises to "/" (the popped current dir), not to currentDir.
+    expect(pathNormaliseAndClean("a/../..", "/base")).toBe("/");
   });
 });
 

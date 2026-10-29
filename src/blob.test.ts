@@ -120,7 +120,7 @@ describe("Repository blobs", () => {
   });
 
   test("getBlobAtRoot resolves a file at the root commit", () => {
-    const blob = repo.getBlobAtRoot("HEAD", "Cargo.toml");
+    const blob = repo.getBlobAtRoot("HEAD", "repository.manifest.yml");
     expect(Buffer.isBuffer(blob.content())).toBe(true);
   });
 
@@ -135,7 +135,7 @@ describe("Repository blobs", () => {
 
   test("Entry.toBlob() returns the same object", () => {
     const tree = repo.findTree(repo.headCommit().treeId);
-    const entry = tree.intoEntries().find((e) => !e.is_tree());
+    const entry = tree.intoEntries().find((e) => !e.isTree());
     if (entry) {
       const blob = entry.toBlob();
       expect(blob?.id).toBe(entry.id);

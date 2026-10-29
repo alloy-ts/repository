@@ -64,7 +64,7 @@ pub type RepositoryResult<T> = napi::Result<T>;
 ///
 /// Secret-bearing data (`command` line, captured `stdout`/`stderr`, and the gix
 /// error tree) is kept on this struct **only for internal/test use** and is
-/// deliberately never serialized to JS.
+/// deliberately never serialised to JS.
 pub struct RepositoryError {
     /// napi status used for the underlying JS `Error`.
     pub status: Status,
@@ -76,9 +76,9 @@ pub struct RepositoryError {
     pub kind: String,
     /// git subsystem classification from gix, if applicable (internal only).
     pub class: Option<String>,
-    /// Captured details for command failures (internal only; never serialized).
+    /// Captured details for command failures (internal only; never serialised).
     pub command: Option<CommandFailure>,
-    /// The gix error tree (internal only; never serialized to avoid leaking
+    /// The gix error tree (internal only; never serialised to avoid leaking
     /// repository paths, remote URLs, or verbose diagnostics).
     pub cause: Option<Box<NapiError>>,
     /// Safe, human-readable recovery hint. Never contains paths, URLs, or
@@ -231,7 +231,7 @@ impl ToNapiValue for RepositoryError {
         }
         // Only non-secret structured fields are attached; `command`
         // (with its stdout/stderr), `class`, and `cause` are intentionally
-        // never serialized to JS.
+        // never serialised to JS.
         unsafe {
             set_err_prop(env, value, "category", val.category)?;
             set_err_prop(env, value, "kind", val.kind)?;
@@ -571,7 +571,7 @@ pub enum Error {
         /// Configured timeout in seconds.
         timeout_seconds: u64,
     },
-    /// Generic error with a custom message.
+    /// Store error with a custom message.
     Custom {
         /// Custom error message.
         message: String,

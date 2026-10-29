@@ -36,7 +36,7 @@ use crate::process::cancellation_flag;
 use crate::progress::ProgressCallback;
 use crate::progress::ProgressEvent;
 use crate::repository::Repository;
-use crate::revision::WalkOptions;
+use crate::rev_walk::WalkOptions;
 
 /// A single entry (full or delta object) within a pack data file, mirroring `gix_pack::data::Entry`.
 ///
@@ -234,7 +234,7 @@ pub struct PackOperationOptions {
     pub cancellation: Option<CancellationToken>,
 }
 
-/// Builder that accumulates a plan of objects to include in a packfile, then materializes the
+/// Builder that accumulates a plan of objects to include in a packfile, then materialises the
 /// pack asynchronously.
 ///
 /// Create one with the static factory [`Pack::build`]:
@@ -259,7 +259,7 @@ pub struct Pack {
 /// Result of writing a packfile into an in-memory buffer.
 #[napi(object)]
 pub struct PackBufferResult {
-    /// The serialized packfile bytes.
+    /// The serialised packfile bytes.
     pub data: Buffer,
     /// The hex object id derived from the packfile name (its trailing hash).
     pub pack_hash: String,
@@ -341,7 +341,7 @@ impl Find for OdbFind {
 
 /// Build the packfile bytes for the planned objects.
 ///
-/// Returns the serialized packfile, its name hash, and the number of objects written.
+/// Returns the serialised packfile, its name hash, and the number of objects written.
 /// An empty plan produces the canonical empty packfile.
 fn build_pack_bytes(
     repo: &Arc<gix::ThreadSafeRepository>,

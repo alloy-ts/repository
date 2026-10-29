@@ -162,14 +162,12 @@ fn resolve_commit(
                 email: String::new(),
                 time: 0,
                 timezone_offset: 0,
-                date: None,
             },
             Signature {
                 name: String::new(),
                 email: String::new(),
                 time: 0,
                 timezone_offset: 0,
-                date: None,
             },
             None,
         )

@@ -49,7 +49,7 @@ use tokio::time::{Instant, sleep_until};
 ///
 /// The JavaScript handle is an opaque `id` into a process-wide registry; the
 /// actual wait/cancel state lives in [`CancellationInner`]. napi classes
-/// serialize every struct field, so a non-serializable `Arc` cannot sit
+/// serialise every struct field, so a non-serializable `Arc` cannot sit
 /// directly on the handle — hence the indirection. Construct instances with
 /// [`create_cancellation_token`] rather than the `id`-based constructor.
 #[derive(Clone, Copy, Debug)]

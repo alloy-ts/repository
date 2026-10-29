@@ -53,7 +53,7 @@ pub fn path_realpath_with_cwd(
 /// beyond the root), which indicates an inconsistent path. Leading `.` components
 /// and duplicate separators are left untouched; symlinks are never resolved.
 #[napi]
-pub fn path_normalize(path: String, current_dir: String) -> Option<String> {
+pub fn path_normalise(path: String, current_dir: String) -> Option<String> {
     gix::path::normalize(
         std::path::PathBuf::from(path).into(),
         std::path::Path::new(&current_dir),
@@ -61,25 +61,25 @@ pub fn path_normalize(path: String, current_dir: String) -> Option<String> {
     .map(|p| path_to_string(&p))
 }
 
-/// Like [`pathNormalize()`], but treats `..` components beyond the filesystem
+/// Like [`pathNormalise()`], but treats `..` components beyond the filesystem
 /// root as no-ops instead of returning `null`.
 ///
 /// Throws when normalization exhausts an empty or relative `currentDir`.
 #[napi]
-pub fn path_normalize_saturating(path: String, current_dir: String) -> napi::Result<String> {
+pub fn path_normalise_saturating(path: String, current_dir: String) -> napi::Result<String> {
     gix::path::normalize_saturating(
         std::path::PathBuf::from(path).into(),
         std::path::Path::new(&current_dir),
     )
     .map(|p| path_to_string(&p))
-    .map_err(|e| err("normalize_saturating", e))
+    .map_err(|e| err("normalise_saturating", e))
 }
 
-/// Like [`pathNormalize()`], but also removes `.` components and duplicate or
+/// Like [`pathNormalise()`], but also removes `.` components and duplicate or
 /// trailing separators. If cleaning leaves no components, `currentDir` is
 /// returned. Returns `null` when normalization exhausts `currentDir`.
 #[napi]
-pub fn path_normalize_and_clean(path: String, current_dir: String) -> Option<String> {
+pub fn path_normalise_and_clean(path: String, current_dir: String) -> Option<String> {
     gix::path::normalize_and_clean(
         std::path::PathBuf::from(path).into(),
         std::path::Path::new(&current_dir),
@@ -92,7 +92,7 @@ pub fn path_normalize_and_clean(path: String, current_dir: String) -> Option<Str
 /// `../foo` from a subdirectory). A no-op when `prefix` is empty; returns `.`
 /// when the result would be empty.
 ///
-/// Both inputs are assumed to be normalized and case-equal.
+/// Both inputs are assumed to be normalised and case-equal.
 #[napi]
 pub fn path_relativize_with_prefix(relative_path: String, prefix: String) -> String {
     path_to_string(&gix::path::relativize_with_prefix(

@@ -15,7 +15,7 @@ use crate::blob::{Blob, build_blob};
 use crate::commit::{Commit, VerifyOutcome, build_commit, signing_options};
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::identity::{Signature, signature_from_dto, to_signature};
-use crate::object::{Object, build_object, kind_to_string};
+use crate::object::{Object, build_object, kind_to_string, rfc3339};
 use crate::reference::{Reference, build_reference};
 use crate::repository::Repository;
 use crate::tree::{Tree, build_tree};
@@ -202,7 +202,17 @@ impl Tag {
     /// or `null` for a lightweight tag (which has no tagger).
     #[napi(getter)]
     pub fn tagger_date(&self) -> napi::Result<Option<String>> {
-        Ok(self.tagger()?.and_then(|s| s.date))
+        let r = thread_local(&self.repo);
+        let tag = r.find_tag(self.id).map_err(|e| err("find_tag", e))?;
+        let tag = tag.decode().map_err(|e| err("decode", e))?;
+        let tagger = tag.tagger().map_err(|e| err("tagger", e))?;
+        match tagger {
+            Some(s) => {
+                let time = s.time().map_err(|e| err("tagger.time", e))?;
+                Ok(Some(rfc3339(time.seconds, time.offset)))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Sign this annotated tag, producing a *new* tag object that carries the signature, and return it.

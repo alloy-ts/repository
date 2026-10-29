@@ -149,7 +149,7 @@ split index repositories work transparently through any open method.
 | Method          | Signature                                   | Notes                                                                                                                                                                                                                                        |
 | --------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `write`         | `(skipHash?: boolean) => number`            | Write to `path()` under a lock file; returns the version actually written. `skipHash` zeroes the trailing checksum (≈2x faster). The tree-cache extension, if present, is written as-is — drop it after mutating entries (see caveat below). |
-| `writeToBuffer` | `(skipHash?: boolean) => IndexWriteOutcome` | Serialize to bytes without touching the filesystem (bare repos, archives, transport).                                                                                                                                                        |
+| `writeToBuffer` | `(skipHash?: boolean) => IndexWriteOutcome` | Serialise to bytes without touching the filesystem (bare repos, archives, transport).                                                                                                                                                        |
 
 `IndexWriteOutcome`:
 
@@ -162,7 +162,7 @@ split index repositories work transparently through any open method.
 ```
 
 **Tree-cache caveat** (applies to both `write` and `writeToBuffer`, inherited
-from gix-index): the tree extension is serialized from its in-memory state and
+from gix-index): the tree extension is serialised from its in-memory state and
 is _not_ recomputed to match mutated entries. After any entry mutation, code
 that writes an index should drop the stale cache — `Repository.editIndex()` does
 exactly that internally.
@@ -188,7 +188,7 @@ const entry = idx.entryByPath("src/main.ts");
 const conflicted = idx.entryByPathAndStage("merging.txt", 2); // "ours" during a conflict
 const isDir = idx.pathIsDirectory("src");
 
-// In-memory mutation, then serialize to bytes (no disk write)
+// In-memory mutation, then serialise to bytes (no disk write)
 idx.removeEntryAtIndex(idx.len() - 1);
 idx.sortEntries();
 const out = idx.writeToBuffer();

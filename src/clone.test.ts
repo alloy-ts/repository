@@ -49,7 +49,7 @@ describe("Cloner", () => {
     expect(Cloner.isValidGitUrl("not-a-url")).toBe(false);
   });
 
-  test("extractRepoName derives a sanitized name", () => {
+  test("extractRepoName derives a sanitised name", () => {
     expect(Cloner.extractRepoName("https://github.com/user/repo.git")).toBe("repo");
     expect(Cloner.extractRepoName("git@github.com:user/repo.git")).toBe("repo");
     expect(Cloner.extractRepoName("ssh://git@example.com/path/to/repo.git")).toBe("repo");
@@ -137,7 +137,7 @@ describe("Repository clone helpers (static)", () => {
     expect(Repository.isValidGitUrl("not-a-url")).toBe(false);
   });
 
-  test("Repository.extractRepoName derives a sanitized name", () => {
+  test("Repository.extractRepoName derives a sanitised name", () => {
     expect(Repository.extractRepoName("https://github.com/user/repo.git")).toBe("repo");
     expect(Repository.extractRepoName("git@github.com:user/repo.git")).toBe("repo");
     expect(() => Repository.extractRepoName("not-a-url")).toThrow();

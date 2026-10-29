@@ -246,7 +246,7 @@ pub struct SubmoduleStatus {
 /// of libgit2's `git_submodule_update_options`.
 #[napi(object)]
 pub struct SubmoduleUpdateOptions {
-    /// When `true`, initialize the submodule's local `.git/config` (and, for `update`, clone it if
+    /// When `true`, initialise the submodule's local `.git/config` (and, for `update`, clone it if
     /// not already present) before updating. Corresponds to `git submodule update --init`.
     pub init: Option<bool>,
 }
@@ -441,7 +441,7 @@ impl Submodule {
     }
 
     /// The object id of the submodule's currently checked-out `HEAD`, or `null` if the submodule
-    /// is not yet initialized (or its `HEAD` is unborn). Equivalent to opening the submodule and
+    /// is not yet initialised (or its `HEAD` is unborn). Equivalent to opening the submodule and
     /// reading its `HEAD`.
     #[napi]
     pub fn workdir_id(&self) -> napi::Result<Option<String>> {
@@ -544,7 +544,7 @@ impl Submodule {
 
     /// Synchronize the submodule's `remote.origin.url` with the URL configured in the
     /// superproject (the equivalent of `git submodule sync`). Requires the submodule to be
-    /// initialized.
+    /// initialised.
     #[napi]
     pub fn sync(&self) -> napi::Result<()> {
         let r = thread_local(&self.repo);
@@ -553,7 +553,7 @@ impl Submodule {
         let open = sm.open().map_err(|e| err("submodule_open", e))?;
         let Some(sub_repo) = open else {
             return Err(napi::Error::from_reason(
-                "submodule is not initialized; cannot sync",
+                "submodule is not initialised; cannot sync",
             ));
         };
         let sub_cfg = sub_repo.git_dir().join("config");
@@ -568,7 +568,7 @@ impl Submodule {
 
     /// Record the submodule's currently checked-out `HEAD` as a gitlink entry in the superproject's
     /// index (the gitlink bookkeeping done by `git submodule add`/`update`). Requires the submodule
-    /// to be initialized. With `writeIndex` (default `true`), the index is written to disk.
+    /// to be initialised. With `writeIndex` (default `true`), the index is written to disk.
     #[napi(js_name = "addToIndex")]
     pub fn add_to_index(&self, write_index: Option<bool>) -> napi::Result<()> {
         let r = thread_local(&self.repo);
@@ -576,7 +576,7 @@ impl Submodule {
         let open = sm.open().map_err(|e| err("submodule_open", e))?;
         let Some(sub_repo) = open else {
             return Err(napi::Error::from_reason(
-                "submodule is not initialized; cannot record gitlink",
+                "submodule is not initialised; cannot record gitlink",
             ));
         };
         let head = sub_repo.head_id().map_err(|e| err("head_id", e))?;
@@ -601,8 +601,8 @@ impl Submodule {
     /// Stage the `.gitmodules` file into the superproject's index (the final step of
     /// `git submodule add`). Must be called after the `.gitmodules` file exists (e.g. after
     /// `addSubmodule`).
-    #[napi(js_name = "addFinalize")]
-    pub fn add_finalize(&self) -> napi::Result<()> {
+    #[napi(js_name = "addFinalise")]
+    pub fn add_finalise(&self) -> napi::Result<()> {
         let r = thread_local(&self.repo);
         let workdir = r
             .workdir()
@@ -627,7 +627,7 @@ impl Submodule {
             mode: Some("100644".into()),
         };
         repo.add_to_index(&mut index, entry)
-            .map_err(|e| err("add_finalize", e))?;
+            .map_err(|e| err("add_finalise", e))?;
         index.write(None).map_err(|e| err("write_index", e))?;
         Ok(())
     }
@@ -673,7 +673,7 @@ impl Submodule {
 
     /// Update the submodule: fetch from its remote and check out the commit recorded in the
     /// superproject's index (the equivalent of `git submodule update`). With `options.init`, clone
-    /// it first if it is not yet initialized (`git submodule update --init`).
+    /// it first if it is not yet initialised (`git submodule update --init`).
     #[napi]
     pub fn update(&self, options: Option<SubmoduleUpdateOptions>) -> napi::Result<()> {
         let r = thread_local(&self.repo);
@@ -688,7 +688,7 @@ impl Submodule {
         Ok(())
     }
 
-    /// Initialize the submodule's local git repository (the equivalent of
+    /// Initialise the submodule's local git repository (the equivalent of
     /// `git_submodule_repo_init`). With `useGitlink` (default `true`) the submodule's git
     /// directory is created under `.git/modules/<name>` and the worktree gains a `.git` file that
     /// points to it, matching git's standard submodule layout. With `false`, a normal `.git`
@@ -732,7 +732,7 @@ impl Submodule {
         Ok(())
     }
 
-    /// Open the submodule as its own repository, or `null` if not yet initialized.
+    /// Open the submodule as its own repository, or `null` if not yet initialised.
     #[napi]
     pub fn open(&self) -> napi::Result<Option<Repository>> {
         let r = thread_local(&self.repo);

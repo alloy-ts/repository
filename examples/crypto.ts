@@ -34,14 +34,14 @@ try {
   const repo = Repository.init(baseDir, false);
   const crypt = repo.crypt();
 
-  assert.strictEqual(crypt.isInitialized(), false);
+  assert.strictEqual(crypt.isInitialised(), false);
 
   // 2a. Default Hybrid Mode (git-crypt clean/smudge filters + git-remote-gcrypt entire repo encryption)
   const repoId = crypt.init();
-  assert.strictEqual(crypt.isInitialized(), true);
+  assert.strictEqual(crypt.isInitialised(), true);
   assert.strictEqual(crypt.mode(), 2); // CryptoMode.Hybrid (2)
   assert.ok(crypt.isEntireRepoMode());
-  console.log("Crypt default Hybrid mode initialized with Remote Repo ID:", repoId);
+  console.log("Crypt default Hybrid mode initialised with Remote Repo ID:", repoId);
 
   const secretData = Buffer.from("Confidential repository payload");
   const encryptedPayload = crypt.encrypt(secretData);

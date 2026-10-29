@@ -42,7 +42,7 @@ fn source_name(s: gix::config::Source) -> String {
 
 /// Simplified fnmatch for `entries(glob)`: matches when the key equals the pattern or,
 /// when the pattern contains `*`, when each literal segment appears in order (a trailing
-/// `*` is implicit). Case-sensitive, matching git's normalized variable matching.
+/// `*` is implicit). Case-sensitive, matching git's normalised variable matching.
 fn key_glob_match(key: &[u8], glob: &[u8]) -> bool {
     if !glob.contains(&b'*') {
         return key == glob;
@@ -437,7 +437,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         let full_key = match subsection {
             Some(sub) => format!("{}.{}.{}", section, sub, key),
             None => format!("{}.{}", section, key),
@@ -457,7 +457,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         tx.remove_section(
             section.as_str(),
             subsection.as_deref().map(gix::bstr::BStr::new),
@@ -477,7 +477,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         let mut sec = tx
             .section_mut(
                 section.as_str(),
@@ -501,7 +501,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         tx.set_raw_value(full.as_str(), if value { "true" } else { "false" })
             .map(|_| ())
             .map_err(|e| err("set_bool", e))
@@ -520,7 +520,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         tx.set_raw_value(full.as_str(), value.to_string().as_str())
             .map(|_| ())
             .map_err(|e| err("set_int32", e))
@@ -539,7 +539,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         tx.set_raw_value(full.as_str(), value.to_string().as_str())
             .map(|_| ())
             .map_err(|e| err("set_int64", e))
@@ -559,7 +559,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         let re = regex::Regex::new(&regexp).map_err(|e| err_str("set_multivar", e.to_string()))?;
         let mut sec = tx
             .section_mut_or_create_new(
@@ -599,7 +599,7 @@ impl ConfigTransaction {
         let tx = self
             .inner
             .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("transaction already finalized"))?;
+            .ok_or_else(|| napi::Error::from_reason("transaction already finalised"))?;
         let re =
             regex::Regex::new(&regexp).map_err(|e| err_str("remove_multivar", e.to_string()))?;
         let mut sec = tx
@@ -624,7 +624,7 @@ impl ConfigTransaction {
     #[napi]
     pub fn commit(&mut self) -> napi::Result<()> {
         let Some(tx) = self.inner.take() else {
-            return Err(napi::Error::from_reason("transaction already finalized"));
+            return Err(napi::Error::from_reason("transaction already finalised"));
         };
         tx.commit().map_err(|e| err("commit", e))
     }

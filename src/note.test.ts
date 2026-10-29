@@ -44,7 +44,7 @@ describe("Repository notes (src/notes.rs)", () => {
     expect(notes[0].reference).toBe("refs/notes/commits");
     expect(notes[0].content).toBe("review: looks good");
     expect(notes[0].blobId).toMatch(/^[0-9a-f]{40}$/);
-    // contentBytes mirrors content as a byte array (napi serializes object byte
+    // contentBytes mirrors content as a byte array (napi serialises object byte
     // fields as number[]; Buffer.from reconstructs the text)
     expect(Array.isArray(notes[0].contentBytes)).toBe(true);
     expect(Buffer.from(notes[0].contentBytes as number[]).toString("utf8")).toBe(

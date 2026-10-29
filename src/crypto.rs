@@ -37,11 +37,11 @@ pub enum CryptoError {
     #[error("cryptography error: {0}")]
     Crypto(String),
 
-    #[error("repository not initialized for crypt; run init() first")]
-    NotInitialized,
+    #[error("repository not initialised for crypt; run init() first")]
+    NotInitialised,
 
-    #[error("repository already initialized for crypt")]
-    AlreadyInitialized,
+    #[error("repository already initialised for crypt")]
+    AlreadyInitialised,
 
     #[error("key not found: {0}")]
     KeyNotFound(String),
@@ -131,9 +131,9 @@ pub struct RepoManifest {
     pub extensions: Vec<String>,
 }
 
-/// Serialize a RepoManifest object into standard gcrypt manifest format.
+/// Serialise a RepoManifest object into standard gcrypt manifest format.
 #[napi]
-pub fn serialize_manifest(manifest: RepoManifest) -> String {
+pub fn serialise_manifest(manifest: RepoManifest) -> String {
     let mut lines = Vec::new();
 
     // 1. Refs list: <hex40> <ref_name>
@@ -701,7 +701,7 @@ mod legacy_webcrypto {
             Ok(self)
         }
 
-        /// Construct from a BLS12-381 signature (`blsful::Signature`) with an explicit codec —
+        /// Construct from a BLS12-381 signature (`rustls::Signature`) with an explicit codec —
         /// `"bls12_381-g1-msig"` (48-byte sig) or `"bls12_381-g2-msig"` (96-byte sig).
         #[napi(factory)]
         pub fn new_from_bls_signature(
@@ -712,7 +712,7 @@ mod legacy_webcrypto {
             let inner = match c {
                 multi_codec::Codec::Bls12381G1Msig => {
                     let sig =
-                        blsful::Signature::<blsful::Bls12381G1Impl>::try_from(signature.as_ref())
+                        rustls::Signature::<rustls::Bls12381G1Impl>::try_from(signature.as_ref())
                             .map_err(|e| {
                             napi::Error::from_reason(format!("invalid BLS12-381 G1 signature: {e}"))
                         })?;
@@ -721,7 +721,7 @@ mod legacy_webcrypto {
                 }
                 multi_codec::Codec::Bls12381G2Msig => {
                     let sig =
-                        blsful::Signature::<blsful::Bls12381G2Impl>::try_from(signature.as_ref())
+                        rustls::Signature::<rustls::Bls12381G2Impl>::try_from(signature.as_ref())
                             .map_err(|e| {
                             napi::Error::from_reason(format!("invalid BLS12-381 G2 signature: {e}"))
                         })?;
@@ -737,7 +737,7 @@ mod legacy_webcrypto {
             Ok(Self { inner })
         }
 
-        /// Construct from a BLS12-381 signature *share* (`blsful::SignatureShare`) with an explicit
+        /// Construct from a BLS12-381 signature *share* (`rustls::SignatureShare`) with an explicit
         /// share codec — `"bls12_381-g1-share-msig"` or `"bls12_381-g2-share-msig"`.
         #[napi(factory)]
         pub fn new_from_bls_signature_share(
@@ -750,7 +750,7 @@ mod legacy_webcrypto {
             let inner = match c {
                 multi_codec::Codec::Bls12381G1ShareMsig => {
                     let s =
-                        blsful::SignatureShare::<blsful::Bls12381G1Impl>::try_from(share.as_ref())
+                        rustls::SignatureShare::<rustls::Bls12381G1Impl>::try_from(share.as_ref())
                             .map_err(|e| {
                                 napi::Error::from_reason(format!("invalid BLS12-381 G1 share: {e}"))
                             })?;
@@ -764,7 +764,7 @@ mod legacy_webcrypto {
                 }
                 multi_codec::Codec::Bls12381G2ShareMsig => {
                     let s =
-                        blsful::SignatureShare::<blsful::Bls12381G2Impl>::try_from(share.as_ref())
+                        rustls::SignatureShare::<rustls::Bls12381G2Impl>::try_from(share.as_ref())
                             .map_err(|e| {
                                 napi::Error::from_reason(format!("invalid BLS12-381 G2 share: {e}"))
                             })?;
@@ -902,11 +902,11 @@ impl Crypto {
         KeyManager::new(self.gix().git_dir())
     }
 
-    /// Load the default key, ensuring the repository is initialized first.
+    /// Load the default key, ensuring the repository is initialised first.
     fn load_key(&self) -> CryptoResult<SymmetricCryptoKey> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized);
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised);
         }
         km.load_key()
     }
@@ -1002,10 +1002,10 @@ impl Crypto {
         }
     }
 
-    /// Whether the repository has been initialized for crypt.
+    /// Whether the repository has been initialised for crypt.
     #[napi]
-    pub fn is_initialized(&self) -> bool {
-        self.key_manager().is_initialized()
+    pub fn is_initialised(&self) -> bool {
+        self.key_manager().is_initialised()
     }
 
     /// Path to the on-disk crypt key directory (`<git-dir>/crypt`).
@@ -1018,24 +1018,24 @@ impl Crypto {
     }
 
     /// Generate a fresh random key and persist it as the default key, overwriting any existing
-    /// default. Requires the repository to already be initialized.
+    /// default. Requires the repository to already be initialised.
     #[napi]
     pub fn generate_key(&self) -> napi::Result<SymmetricCryptoKey> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
         Ok(km.generate_key()?)
     }
 
-    /// Initialize crypt: create key directory, generate a key, set gcrypt.mode = entire_repo,
+    /// Initialise crypt: create key directory, generate a key, set gcrypt.mode = entire_repo,
     /// and configure git-crypt filter drivers.
     /// Both full repo encryption (git-remote-gcrypt) and partial worktree encryption (git-crypt)
     /// are applied by default (Hybrid mode).
     #[napi]
     pub fn init(&self, opts: Option<CryptFilterOptions>) -> napi::Result<String> {
         let km = self.key_manager();
-        if !km.is_initialized() {
+        if !km.is_initialised() {
             km.init_dirs()?;
             let _key = km.generate_key()?;
         }
@@ -1078,7 +1078,7 @@ impl Crypto {
         Ok(repo_id)
     }
 
-    /// Initialize the repository for Entire Repository Encryption mode (gcrypt mode).
+    /// Initialise the repository for Entire Repository Encryption mode (gcrypt mode).
     /// Alias for init() which sets up both full repository encryption and partial filter drivers.
     #[napi]
     pub fn init_entire_repo(&self, opts: Option<CryptFilterOptions>) -> napi::Result<String> {
@@ -1098,8 +1098,8 @@ impl Crypto {
     #[napi]
     pub fn lock(&self, opts: Option<CryptFilterOptions>) -> napi::Result<()> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
         let name = opts.unwrap_or_default().resolve().name;
         self.remove_filters(&name)?;
@@ -1116,8 +1116,8 @@ impl Crypto {
         opts: Option<CryptFilterOptions>,
     ) -> napi::Result<()> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
         if let Some(kf) = key_file {
             km.import_key(Path::new(&kf))?;
@@ -1131,8 +1131,8 @@ impl Crypto {
     #[napi]
     pub fn export_key(&self, output_path: String) -> napi::Result<()> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
         km.export_key(Path::new(&output_path))?;
         Ok(())
@@ -1142,8 +1142,8 @@ impl Crypto {
     #[napi]
     pub fn import_key(&self, input_path: String) -> napi::Result<()> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
         km.import_key(Path::new(&input_path))?;
         Ok(())
@@ -1175,7 +1175,7 @@ impl Crypto {
     #[napi]
     pub fn encrypt_manifest(&self, manifest: RepoManifest) -> napi::Result<Buffer> {
         let key = self.load_key()?;
-        let text = serialize_manifest(manifest);
+        let text = serialise_manifest(manifest);
         let enc = key.encrypt_raw(text.as_bytes())?;
         Ok(Buffer::from(enc))
     }
@@ -1291,8 +1291,8 @@ impl Crypto {
     #[napi]
     pub fn add_ssh_user(&self, ssh_key_path: String, alias: Option<String>) -> napi::Result<()> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
 
         let key = km.load_key()?;
@@ -1300,7 +1300,7 @@ impl Crypto {
         let encrypted_key = IdentityManager::encrypt_key_for_ssh_recipient(&key, &ssh_key)?;
 
         let name = alias
-            .map(|s| sanitize_label(&s))
+            .map(|s| sanitise_label(&s))
             .filter(|s: &String| !s.is_empty())
             .unwrap_or_else(|| derive_recipient_name(&ssh_key, Path::new(&ssh_key_path)));
 
@@ -1321,8 +1321,8 @@ impl Crypto {
         passphrase: Option<String>,
     ) -> napi::Result<()> {
         let km = self.key_manager();
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
 
         let encrypted = std::fs::read(&encrypted_path)?;
@@ -1618,8 +1618,8 @@ impl Crypto {
     pub fn add_gpg_user(gpg_id: String) -> napi::Result<()> {
         let git_dir = open_repo_git_dir(".")?;
         let km = KeyManager::new(&git_dir);
-        if !km.is_initialized() {
-            return Err(CryptoError::NotInitialized.into());
+        if !km.is_initialised() {
+            return Err(CryptoError::NotInitialised.into());
         }
         let key = km.load_key()?;
         let encrypted_key = GpgManager::encrypt_key_for_recipient(&key, &gpg_id)?;
@@ -1686,13 +1686,13 @@ fn derive_recipient_name(ssh_key: &str, ssh_key_path: &Path) -> String {
     ssh_key
         .split_whitespace()
         .nth(2)
-        .map(sanitize_label)
+        .map(sanitise_label)
         .filter(|s| !s.is_empty())
         .or_else(|| {
             ssh_key_path
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .map(sanitize_label)
+                .map(sanitise_label)
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| fallback_fingerprint(ssh_key))
@@ -1700,7 +1700,7 @@ fn derive_recipient_name(ssh_key: &str, ssh_key_path: &Path) -> String {
 
 /// Keep only filesystem-safe characters.
 #[cfg(feature = "ssh")]
-fn sanitize_label(input: &str) -> String {
+fn sanitise_label(input: &str) -> String {
     input
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -1713,7 +1713,7 @@ fn fallback_fingerprint(data: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
-    let digest = hasher.finalize();
+    let digest = hasher.finalise();
     format!("ssh-{}", hex::encode(&digest[..8]))
 }
 
@@ -2086,7 +2086,7 @@ fn ed25519_public_openssh_text(public: &[u8; 32]) -> CryptoResult<String> {
     let pk = ssh_key::PublicKey::from_bytes(&wire)
         .map_err(|e| CryptoError::Ssh(format!("build public key: {e}")))?;
     pk.to_openssh()
-        .map_err(|e| CryptoError::Ssh(format!("serialize public key: {e}")))
+        .map_err(|e| CryptoError::Ssh(format!("serialise public key: {e}")))
 }
 
 /// Derive the ed25519 public key from a 32-byte seed.
@@ -2444,7 +2444,7 @@ mod legacy_webcrypto_key {
         pub name: String,
     }
 
-    /// The normalized `algorithm` dictionary of a [`CryptoKey`].
+    /// The normalised `algorithm` dictionary of a [`CryptoKey`].
     #[napi(object)]
     #[derive(Clone)]
     pub struct CryptoKeyAlgorithm {
@@ -2548,7 +2548,7 @@ mod legacy_webcrypto_key {
         Ok(())
     }
 
-    /// Normalize an algorithm argument that may be given either as a bare name
+    /// Normalise an algorithm argument that may be given either as a bare name
     /// string (Node allows `"AES-GCM"`) or as a full algorithm dictionary.
     fn to_key_algorithm(a: Either<String, CryptoKeyAlgorithm>) -> CryptoKeyAlgorithm {
         match a {
@@ -2682,10 +2682,7 @@ mod legacy_webcrypto_key {
         /// Export a key. `jwk` returns the JWK object; every other format returns a
         /// `Buffer` of DER/raw bytes.
         #[napi]
-        pub fn export_key(
-            _format: String,
-            _key: &CryptoKey,
-        ) -> napi::Result<Buffer> {
+        pub fn export_key(_format: String, _key: &CryptoKey) -> napi::Result<Buffer> {
             Err(not_implemented())
         }
 
@@ -2882,10 +2879,7 @@ mod legacy_webcrypto_key {
         }
 
         #[napi]
-        pub fn export_key_instance(
-            &self,
-            format: String,
-        ) -> napi::Result<Buffer> {
+        pub fn export_key_instance(&self, format: String) -> napi::Result<Buffer> {
             Self::export_key(format, self)
         }
 
@@ -2903,7 +2897,13 @@ mod legacy_webcrypto_key {
             extractable: bool,
             key_usages: Vec<String>,
         ) -> napi::Result<CryptoKey> {
-            Self::derive_key_static(algorithm, base_key, derived_key_type, extractable, key_usages)
+            Self::derive_key_static(
+                algorithm,
+                base_key,
+                derived_key_type,
+                extractable,
+                key_usages,
+            )
         }
 
         #[napi]
@@ -2952,7 +2952,9 @@ mod legacy_webcrypto_key {
             _algorithm: CryptoOpParams,
             _public_key: &CryptoKey,
         ) -> napi::Result<Buffer> {
-            Err(bad("encapsulateBits (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "encapsulateBits (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "decapsulateBits")]
@@ -2961,7 +2963,9 @@ mod legacy_webcrypto_key {
             _private_key: &CryptoKey,
             _ciphertext: Uint8Array,
         ) -> napi::Result<Buffer> {
-            Err(bad("decapsulateBits (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "decapsulateBits (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "encapsulateKey")]
@@ -2972,7 +2976,9 @@ mod legacy_webcrypto_key {
             _extractable: bool,
             _key_usages: Vec<String>,
         ) -> napi::Result<CryptoKey> {
-            Err(bad("encapsulateKey (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "encapsulateKey (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "decapsulateKey")]
@@ -2984,7 +2990,9 @@ mod legacy_webcrypto_key {
             _extractable: bool,
             _key_usages: Vec<String>,
         ) -> napi::Result<CryptoKey> {
-            Err(bad("decapsulateKey (ML-KEM) is not implemented in this build"))
+            Err(bad(
+                "decapsulateKey (ML-KEM) is not implemented in this build",
+            ))
         }
 
         #[napi(js_name = "encapsulateBits")]
@@ -3163,10 +3171,10 @@ mod tests {
     fn init_generate_and_load() {
         let temp = TempDir::new().unwrap();
         let km = KeyManager::new(temp.path());
-        assert!(!km.is_initialized());
+        assert!(!km.is_initialised());
 
         km.init_dirs().unwrap();
-        assert!(km.is_initialized());
+        assert!(km.is_initialised());
         assert!(km.init_dirs().is_err(), "double init fails");
 
         let key = km.generate_key().unwrap();
@@ -3221,10 +3229,10 @@ mod tests {
 
     #[cfg(feature = "ssh")]
     #[test]
-    fn sanitize_label_strips_invalid_chars() {
-        assert_eq!(sanitize_label("alice@example.com"), "aliceexample.com");
-        assert_eq!(sanitize_label("Team-Name_01"), "Team-Name_01");
-        assert_eq!(sanitize_label("weird label!*"), "weirdlabel");
+    fn sanitise_label_strips_invalid_chars() {
+        assert_eq!(sanitise_label("alice@example.com"), "aliceexample.com");
+        assert_eq!(sanitise_label("Team-Name_01"), "Team-Name_01");
+        assert_eq!(sanitise_label("weird label!*"), "weirdlabel");
     }
 
     #[cfg(feature = "ssh")]

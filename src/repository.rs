@@ -125,7 +125,7 @@ pub struct AheadBehind {
 
 /// The primary handle to a git repository, exposed to TypeScript as a class.
 ///
-/// Internally wraps `Arc<gix::ThreadSafeRepository>` so it can be shared and offloaded to worker
+/// Internally wraps `Arc<gix::ThreadSafeRepository>` so it can be shared and offloaded to task
 /// threads for async network operations, while sync methods obtain a cheap thread-local view.
 ///
 /// This is a *handle-based* API (open a `Repository` once, then call methods on it) rather than
@@ -148,6 +148,7 @@ pub struct Repository {
 }
 
 /// Trust level to force for the git directory while opening.
+#[derive(Clone)]
 #[napi]
 pub enum Trust {
     /// Caution is warranted; configuration from untrusted sources is not used.
@@ -160,6 +161,7 @@ pub enum Trust {
 ///
 /// Every field is optional; omitted fields use `gix`'s defaults. Pass one of these to
 /// [`Repository::open_opts`].
+#[derive(Clone, Default)]
 #[napi(object)]
 pub struct OpenOptions {
     /// Open `path` as-is without verifying it is a `.git` directory.
@@ -440,6 +442,31 @@ impl Repository {
         format!("{:?}", r.object_hash())
     }
 
+    /// The repository's canonical object format (`"sha1"` or `"sha256"`), matching
+    /// [`object_hash`](Self::object_hash) but lower-cased for consistency with the
+    /// `sha1`/`sha256` spellings used elsewhere.
+    #[napi]
+    pub fn object_format(&self) -> String {
+        let r = thread_local(&self.inner);
+        match r.object_hash() {
+            gix::hash::Kind::Sha1 => "sha1",
+            _ => "sha256",
+        }
+        .to_string()
+    }
+
+    /// The compatibility object format for a repository whose canonical object
+    /// format is SHA-256 (`extensions.compatObjectFormat`). Git sets this to
+    /// `"sha1"` so the store also accepts SHA-1 object ids; `null` means the
+    /// repository only understands its canonical hash.
+    #[napi]
+    pub fn compat_object_format(&self) -> Option<String> {
+        let r = thread_local(&self.inner);
+        r.config_snapshot()
+            .string("extensions.compatObjectFormat")
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+    }
+
     /// The operation currently in progress (e.g. `Merge`, `Rebase`, `CherryPick`), or `null`.
     #[napi]
     pub fn state(&self) -> Option<String> {
@@ -489,14 +516,14 @@ impl Repository {
             .map(|p| p.display().to_string()))
     }
 
-    /// Normalize `path` into a repository-relative Git path with slash separators.
+    /// Normalise `path` into a repository-relative Git path with slash separators.
     #[napi]
-    pub fn normalize_path(&self, path: String) -> napi::Result<String> {
+    pub fn normalise_path(&self, path: String) -> napi::Result<String> {
         let r = thread_local(&self.inner);
-        let normalized = r
+        let normalised = r
             .normalize_path(path.as_str())
-            .map_err(|e| err("normalize_path", e))?;
-        let bytes: &[u8] = &normalized;
+            .map_err(|e| err("normalise_path", e))?;
+        let bytes: &[u8] = &normalised;
         Ok(lossy(bytes))
     }
 

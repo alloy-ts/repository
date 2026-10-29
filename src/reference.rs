@@ -14,33 +14,6 @@ use crate::repository::Repository;
 use crate::tag::{Tag, build_tag};
 use crate::tree::{Tree, build_tree};
 
-/// The repository HEAD, exposed to TypeScript.
-#[napi(object)]
-pub struct Head {
-    /// The name of the reference `HEAD` points at (`refs/heads/...`), or `null`
-    /// when `HEAD` is detached or unborn.
-    pub referent: Option<String>,
-    /// The kind of `HEAD`: `"symbolic"` (points at a branch), `"detached"`
-    /// (points directly at an object), or `"unborn"` (points at a branch that
-    /// does not exist yet).
-    pub kind: String,
-}
-
-pub fn build_head(_repo: &Arc<gix::ThreadSafeRepository>, head: gix::Head) -> napi::Result<Head> {
-    let referent = head.referent_name().map(|n| n.to_string());
-    let kind = if head.is_detached() {
-        "detached"
-    } else if head.is_unborn() {
-        "unborn"
-    } else {
-        "symbolic"
-    };
-    Ok(Head {
-        referent,
-        kind: kind.to_string(),
-    })
-}
-
 /// A git reference (branch, tag, or HEAD) exposed to TypeScript.
 #[napi]
 pub struct Reference {
@@ -577,21 +550,21 @@ pub fn ref_branch_name_is_valid(name: String) -> bool {
     gix::validate::reference::branch_name(gix::bstr::BStr::new(name.as_bytes())).is_ok()
 }
 
-/// Sanitize `name` into a valid partial reference name, replacing illegal
+/// Sanitise `name` into a valid partial reference name, replacing illegal
 /// characters and sequences (this is the closest gix equivalent to libgit2's
-/// `git_reference_normalize_name`; it does not support the `ReferenceFormat`
+/// `git_reference_normalise_name`; it does not support the `ReferenceFormat`
 /// flags). Empty or fully-stripped input yields `-`.
 #[napi]
-pub fn ref_name_sanitize(name: String) -> String {
-    let sanitized =
+pub fn ref_name_sanitise(name: String) -> String {
+    let sanitised =
         gix::validate::reference::name_partial_or_sanitize(gix::bstr::BStr::new(name.as_bytes()));
-    String::from_utf8_lossy(sanitized.as_ref()).into_owned()
+    String::from_utf8_lossy(sanitised.as_ref()).into_owned()
 }
 
-/// Options controlling [`ref_name_normalize`].
+/// Options controlling [`ref_name_normalise`].
 #[derive(Default)]
 #[napi(object)]
-pub struct RefNameNormalizeOptions {
+pub struct RefNameNormaliseOptions {
     /// Allow one-level (unprefixed) names such as `HEAD` or `ORIG_HEAD`.
     pub allow_one_level: Option<bool>,
     /// Also allow shorthand branch names (`main`) together with `allowOneLevel`.
@@ -600,8 +573,8 @@ pub struct RefNameNormalizeOptions {
     pub refspec_pattern: Option<bool>,
 }
 
-/// Normalize `name` into a valid reference name, mirroring git2's
-/// `git_reference_normalize_name` as closely as `gix` permits: collapse runs of
+/// Normalise `name` into a valid reference name, mirroring git2's
+/// `git_reference_normalise_name` as closely as `gix` permits: collapse runs of
 /// adjacent slashes, then validate as a full name (default), a partial/one-level
 /// name (`allowOneLevel` / `refspecShorthand`), or a refspec pattern
 /// (`refspecPattern`). Throws when the result is not a valid name.
@@ -609,9 +582,9 @@ pub struct RefNameNormalizeOptions {
 /// Unlike git2 this is a best-effort wrapper around `gix`'s validators and does
 /// not implement the precise flag matrix byte-for-byte.
 #[napi]
-pub fn ref_name_normalize(
+pub fn ref_name_normalise(
     name: String,
-    opts: Option<RefNameNormalizeOptions>,
+    opts: Option<RefNameNormaliseOptions>,
 ) -> napi::Result<String> {
     // 1. Collapse runs of adjacent '/' into a single '/' and strip leading/trailing '/'.
     let mut collapsed = String::with_capacity(name.len());
@@ -639,7 +612,7 @@ pub fn ref_name_normalize(
     let validation_target = if refspec_pattern {
         if collapsed.chars().filter(|&c| c == '*').count() > 1 {
             return Err(err_str(
-                "ref_name_normalize",
+                "ref_name_normalise",
                 "a refspec pattern may contain at most one '*'",
             ));
         }
@@ -650,10 +623,10 @@ pub fn ref_name_normalize(
 
     if refspec_pattern || allow_one_level || refspec_shorthand {
         <&gix::refs::PartialNameRef>::try_from(validation_target.as_str())
-            .map_err(|e| err("ref_name_normalize", e))?;
+            .map_err(|e| err("ref_name_normalise", e))?;
     } else {
         gix::refs::FullName::try_from(validation_target.as_str())
-            .map_err(|e| err("ref_name_normalize", e))?;
+            .map_err(|e| err("ref_name_normalise", e))?;
     }
 
     Ok(collapsed)
@@ -846,77 +819,6 @@ fn build_ref_edit(input: &RefEditInput) -> napi::Result<gix::refs::transaction::
 
 #[napi]
 impl Repository {
-    /// The repository `HEAD`.
-    #[napi]
-    pub fn head(&self) -> napi::Result<Head> {
-        let r = thread_local(&self.inner);
-        build_head(&self.inner, r.head().map_err(|e| err("head", e))?)
-    }
-
-    /// The commit `HEAD` points to.
-    #[napi]
-    pub fn head_commit(&self) -> napi::Result<Commit> {
-        let r = thread_local(&self.inner);
-        build_commit(
-            &self.inner,
-            r.head_commit().map_err(|e| err("head_commit", e))?,
-        )
-    }
-
-    /// The object id `HEAD` points to.
-    #[napi]
-    pub fn head_id(&self) -> napi::Result<String> {
-        let r = thread_local(&self.inner);
-        let id = r.head_id().map_err(|e| err("head_id", e))?;
-        Ok(id.to_string())
-    }
-
-    /// The symbolic referent name of `HEAD`, if it is not detached.
-    #[napi]
-    pub fn head_name(&self) -> napi::Result<Option<String>> {
-        let r = thread_local(&self.inner);
-        Ok(r.head_name()
-            .map_err(|e| err("head_name", e))?
-            .map(|n| n.to_string()))
-    }
-
-    /// The object id of the root tree pointed to by HEAD.
-    #[napi]
-    pub fn head_tree_id(&self) -> napi::Result<String> {
-        let r = thread_local(&self.inner);
-        let id = r.head_tree_id().map_err(|e| err("head_tree_id", e))?;
-        Ok(id.to_string())
-    }
-
-    /// The object id of the root tree pointed to by HEAD, falling back to the empty tree
-    /// if HEAD is unborn.
-    #[napi]
-    pub fn head_tree_id_or_empty(&self) -> napi::Result<String> {
-        let r = thread_local(&self.inner);
-        let id = r
-            .head_tree_id_or_empty()
-            .map_err(|e| err("head_tree_id_or_empty", e))?;
-        Ok(id.to_string())
-    }
-
-    /// The reference HEAD points to, or null if HEAD is detached or unborn.
-    #[napi]
-    pub fn head_ref(&self) -> napi::Result<Option<Reference>> {
-        let r = thread_local(&self.inner);
-        match r.head_ref().map_err(|e| err("head_ref", e))? {
-            Some(rf) => Ok(Some(build_reference(&self.inner, rf)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// The root tree object HEAD points to.
-    #[napi]
-    pub fn head_tree(&self) -> napi::Result<Tree> {
-        let r = thread_local(&self.inner);
-        let tree = r.head_tree().map_err(|e| err("head_tree", e))?;
-        build_tree(&self.inner, tree.id)
-    }
-
     /// Point HEAD at a commit id (detached HEAD) or at a branch/ref name (symbolic HEAD).
     ///
     /// `target` is interpreted as a 40-hex object id when it parses as one; otherwise it is
@@ -956,14 +858,6 @@ impl Repository {
         );
         r.edit_reference(edit).map_err(|e| err("set_head", e))?;
         Ok(())
-    }
-
-    /// Whether HEAD is detached (points directly at an object id rather than a branch).
-    /// Mirrors git2's `git_repository_head_detached`.
-    #[napi]
-    pub fn head_detached(&self) -> napi::Result<bool> {
-        let r = thread_local(&self.inner);
-        Ok(r.head().map_err(|e| err("head", e))?.is_detached())
     }
 
     /// Point HEAD directly at a commit object id (detached HEAD). `target` must parse as a
@@ -1264,7 +1158,7 @@ impl Repository {
         force: Option<bool>,
     ) -> napi::Result<Reference> {
         let r = thread_local(&self.inner);
-        // Normalized here (instead of handing the name to gix's `tag_reference`) so that a
+        // Normalised here (instead of handing the name to gix's `tag_reference`) so that a
         // name that already carries `refs/tags/` is not prefixed a second time.
         let full = crate::tag::to_tag_full_name(&name)?;
         let constraint = if force.unwrap_or(false) {

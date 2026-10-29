@@ -5,10 +5,14 @@ use napi::Task;
 use napi::bindgen_prelude::AsyncTask;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
+use prolly::{FileNodeStore, Prolly as Store, Tree};
 
 use crate::commit::Commit;
+use crate::entry::{mode_string, mode_to_entry_kind};
 use crate::error::{err, err_str, parse_oid, thread_local};
+use crate::object::lossy;
 use crate::repository::Repository;
+use crate::tree::open_prolly;
 
 /// A secondary worktree descriptor.
 #[derive(Clone)]
@@ -71,9 +75,9 @@ pub enum WorktreeHeadKind {
 #[derive(Clone, Copy)]
 #[napi]
 pub enum WorktreeRemoveForce {
-    /// Refuse to remove a dirty worktree or one containing initialized submodules.
+    /// Refuse to remove a dirty worktree or one containing initialised submodules.
     Never,
-    /// Discard changes and initialized submodules, but retain locked worktrees.
+    /// Discard changes and initialised submodules, but retain locked worktrees.
     DiscardChanges,
     /// Also override a worktree lock.
     OverrideLock,
@@ -109,7 +113,7 @@ fn resolve_prune_opts(opts: &Option<WorktreePruneOptions>) -> (bool, bool, bool)
     )
 }
 
-/// One materialized entry of a worktree stream.
+/// One materialised entry of a worktree stream.
 ///
 /// Deliberately plain data — no `Buffer` and no repository handle — so the type is
 /// `Send` and can be produced by [`StreamTask`] on the libuv thread pool. Unlike
@@ -154,7 +158,7 @@ impl Task for StreamTask {
             // Capture the metadata first, then drain the entry: gix panics on the
             // next `next_entry()` call if an entry is dropped before exhaustion.
             let path = String::from_utf8_lossy(entry.relative_path().as_ref()).into_owned();
-            let mode = format!("{:?}", entry.mode);
+            let mode = format!("{:?}", entry.mode.kind());
             let id = entry.id.to_string();
             let size = entry.bytes_remaining().map(|n| n as f64);
             std::io::copy(&mut entry, &mut std::io::sink())
@@ -274,6 +278,7 @@ impl Task for AddWorktreeTask {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| err_str("add_worktree", "could not determine the worktree id"))?;
+        publish_snapshot(&self.repo, &added, &id)?;
         let wt = Worktree {
             repo: Arc::clone(&self.repo),
             path: self.destination.clone(),
@@ -296,6 +301,9 @@ pub struct RemoveWorktreeTask {
     repo: Arc<gix::ThreadSafeRepository>,
     target: String,
     force: gix::worktree::remove::Force,
+    /// The worktree id whose prolly snapshot to drop, or `None` when the id is
+    /// unknown (the path-based `Repository.removeWorktree` entry point).
+    id: Option<String>,
 }
 
 impl RemoveWorktreeTask {
@@ -303,11 +311,13 @@ impl RemoveWorktreeTask {
         repo: Arc<gix::ThreadSafeRepository>,
         target: String,
         force: gix::worktree::remove::Force,
+        id: Option<String>,
     ) -> Self {
         Self {
             repo,
             target,
             force,
+            id,
         }
     }
 }
@@ -323,7 +333,12 @@ impl Task for RemoveWorktreeTask {
             self.force,
             gix::progress::Discard,
         )
-        .map_err(|e| err("remove_worktree", e))
+        .map_err(|e| err("remove_worktree", e))?;
+        // Drop the checkout's prolly snapshot alongside the administrative files.
+        if let Some(id) = &self.id {
+            delete_snapshot(&self.repo, id)?;
+        }
+        Ok(())
     }
 
     fn resolve(&mut self, _env: napi::Env, output: ()) -> napi::Result<()> {
@@ -344,6 +359,134 @@ fn repo_or_current(repo: Option<&Repository>) -> napi::Result<Arc<gix::ThreadSaf
 fn admin_dir(repo: &Arc<gix::ThreadSafeRepository>) -> std::path::PathBuf {
     let r = thread_local(repo);
     r.common_dir().join("worktrees")
+}
+
+/// Named-root prefix under which each worktree's prolly snapshot is published:
+/// `worktrees/<id>`.
+const WORKTREE_ROOT_PREFIX: &str = "worktrees/";
+
+/// The durable prolly name of the snapshot belonging to the worktree `id`.
+fn snapshot_root_name(id: &str) -> Vec<u8> {
+    format!("{WORKTREE_ROOT_PREFIX}{id}").into_bytes()
+}
+
+/// One indexed entry of a worktree's prolly snapshot.
+#[napi(object)]
+pub struct WorktreeSnapshotEntry {
+    /// Slash-separated path relative to the worktree root, e.g. `"src/lib.rs"`.
+    pub path: String,
+    /// Entry mode (`100644`, `100755`, `120000` or `160000`).
+    pub mode: String,
+    /// The object id the path resolves to.
+    pub id: String,
+}
+
+/// Encode a checkout entry as the value of its prolly snapshot entry.
+///
+/// The layout is `"{mode} {oid}"`, e.g. `"100644 9f2c…"`. Directories are not
+/// stored — they are implied by the leaves below them.
+fn encode_snapshot_entry(kind: gix::object::tree::EntryKind, id: gix::ObjectId) -> Vec<u8> {
+    format!("{} {}", mode_string(kind), id).into_bytes()
+}
+
+/// Decode a value produced by [`encode_snapshot_entry`].
+///
+/// Both halves are round-tripped through `gix`, so a corrupt record surfaces as
+/// a proper error rather than as a bogus mode or id.
+fn decode_snapshot_entry(value: &[u8]) -> napi::Result<(String, String)> {
+    let text = std::str::from_utf8(value).map_err(|e| err("worktree.decode_snapshot_entry", e))?;
+    let Some((mode, id)) = text.split_once(' ') else {
+        return Err(err_str(
+            "worktree.decode_snapshot_entry",
+            format!("malformed snapshot entry {text:?}"),
+        ));
+    };
+    Ok((
+        mode_string(mode_to_entry_kind(mode)?),
+        parse_oid(id)?.to_string(),
+    ))
+}
+
+/// Append every leaf below `tree_id` to `out` as `(path, kind, id)` triples.
+///
+/// Subtrees are recursed into; directories themselves are not emitted.
+fn collect_leaves(
+    r: &gix::Repository,
+    tree_id: gix::ObjectId,
+    prefix: &str,
+    out: &mut Vec<(String, gix::object::tree::EntryKind, gix::ObjectId)>,
+) -> napi::Result<()> {
+    let tree = r.find_tree(tree_id).map_err(|e| err("find_tree", e))?;
+    let tree = tree.decode().map_err(|e| err("decode", e))?;
+    for entry in &tree.entries {
+        let name = lossy(entry.filename);
+        let path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let kind: gix::object::tree::EntryKind = entry.mode.into();
+        let oid: gix::ObjectId = entry.oid.to_owned();
+        if matches!(kind, gix::object::tree::EntryKind::Tree) {
+            collect_leaves(r, oid, &path, out)?;
+        } else {
+            out.push((path, kind, oid));
+        }
+    }
+    Ok(())
+}
+
+/// Index `checkout`'s working tree into a prolly tree and publish it as the
+/// snapshot of the worktree `id`, returning the new root node id.
+///
+/// `checkout` is the freshly added worktree itself, so the snapshot reflects exactly
+/// what landed on disk — its `HEAD` — rather than the [`Head`](gix::worktree::add::Head)
+/// that was requested. An unborn `HEAD` yields an empty snapshot. The tree shares
+/// the repository's node store, so untouched nodes are reused between snapshots.
+fn publish_snapshot(
+    repo: &Arc<gix::ThreadSafeRepository>,
+    checkout: &gix::Repository,
+    id: &str,
+) -> napi::Result<Option<String>> {
+    let tree_id = checkout
+        .head_tree_id_or_empty()
+        .map_err(|e| err("worktree.head_tree_id", e))?
+        .detach();
+    let mut leaves = Vec::new();
+    collect_leaves(checkout, tree_id, "", &mut leaves)?;
+    // `build_from_sorted_entries` needs byte-ascending keys, and git's own tree
+    // order differs from full-path byte order (`a-b.txt` sorts after `a/x`).
+    leaves.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let entries = leaves
+        .into_iter()
+        .map(|(path, kind, oid)| (path.into_bytes(), encode_snapshot_entry(kind, oid)))
+        .collect::<Vec<_>>();
+    let prolly = open_prolly(repo)?;
+    let tree = prolly
+        .build_from_sorted_entries(entries)
+        .map_err(|e| err("worktree.prolly.build", e))?;
+    let root = tree.root.as_ref().map(|cid| hex::encode(cid.as_bytes()));
+    prolly
+        .publish_named_root(&snapshot_root_name(id), &tree)
+        .map_err(|e| err("worktree.prolly.publish_named_root", e))?;
+    Ok(root)
+}
+
+/// Delete the prolly snapshot named after the worktree `id`, if any.
+///
+/// No-op when the node store does not exist yet (the worktree was created outside
+/// this API and never had a snapshot), so pruning cannot leave a stray store
+/// directory behind. Only the named root is removed; the content-addressed nodes
+/// are left for the store's own GC. The store lives at `git_dir/prolly` — the
+/// same location [`open_prolly`] opens.
+fn delete_snapshot(repo: &Arc<gix::ThreadSafeRepository>, id: &str) -> napi::Result<()> {
+    if !thread_local(repo).git_dir().join("prolly").exists() {
+        return Ok(());
+    }
+    let prolly = open_prolly(repo)?;
+    prolly
+        .delete_named_root(&snapshot_root_name(id))
+        .map_err(|e| err("worktree.prolly.delete_named_root", e))
 }
 
 /// A linked working tree attached to a repository.
@@ -462,6 +605,7 @@ impl Worktree {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| err_str("add_worktree", "could not determine the worktree id"))?;
+        publish_snapshot(&repo, &added, &id)?;
         let wt = Worktree {
             repo,
             path,
@@ -490,6 +634,81 @@ impl Worktree {
     #[napi(getter)]
     pub fn git_dir(&self) -> String {
         self.git_dir.clone()
+    }
+
+    /// This worktree's prolly snapshot together with the driver over the node
+    /// store that holds it. The snapshot is `None` when none has been published
+    /// yet — which only happens for worktrees added outside this API.
+    fn snapshot(&self) -> napi::Result<(Store<FileNodeStore>, Option<Tree>)> {
+        let prolly = open_prolly(&self.repo)?;
+        let tree = prolly
+            .load_named_root(&snapshot_root_name(&self.id))
+            .map_err(|e| err("worktree.prolly.load_named_root", e))?;
+        Ok((prolly, tree))
+    }
+
+    /// The root node id of this worktree's prolly snapshot — a hex SHA-256 over
+    /// the root node — or `null` when there is no snapshot, or the checkout is
+    /// empty and thus has no root node.
+    ///
+    /// Every worktree added through this API is indexed into a prolly tree as it
+    /// is created (`new Worktree(...)`, `Worktree.fromBranch(...)`,
+    /// `Repository.addWorktree(...)`). Nodes land in the same content-addressed
+    /// store the tree builder uses, so identical subtrees are shared between
+    /// snapshots.
+    #[napi(getter, js_name = "prollyRoot")]
+    pub fn prolly_root(&self) -> napi::Result<Option<String>> {
+        Ok(self
+            .snapshot()?
+            .1
+            .as_ref()
+            .and_then(|tree| tree.root.as_ref().map(|cid| hex::encode(cid.as_bytes()))))
+    }
+
+    /// Look up `path` in this worktree's prolly snapshot, returning `null` when
+    /// the snapshot has no such entry (or there is no snapshot).
+    ///
+    /// This is an `O(log n)` lookup over the index — no tree objects are read —
+    /// unlike [`Worktree::stream`], which materialises a tree from the object
+    /// database.
+    #[napi]
+    pub fn prolly_entry(&self, path: String) -> napi::Result<Option<WorktreeSnapshotEntry>> {
+        let (prolly, tree) = self.snapshot()?;
+        let Some(tree) = tree else {
+            return Ok(None);
+        };
+        let Some(value) = prolly
+            .get(&tree, path.as_bytes())
+            .map_err(|e| err("worktree.prolly.get", e))?
+        else {
+            return Ok(None);
+        };
+        let (mode, id) = decode_snapshot_entry(&value)?;
+        Ok(Some(WorktreeSnapshotEntry { path, mode, id }))
+    }
+
+    /// Every entry of this worktree's prolly snapshot, in ascending path order.
+    /// Empty when there is no snapshot.
+    #[napi]
+    pub fn prolly_entries(&self) -> napi::Result<Vec<WorktreeSnapshotEntry>> {
+        let (prolly, tree) = self.snapshot()?;
+        let Some(tree) = tree else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for item in prolly
+            .range(&tree, b"", None)
+            .map_err(|e| err("worktree.prolly.range", e))?
+        {
+            let (path, value) = item.map_err(|e| err("worktree.prolly.range", e))?;
+            let (mode, id) = decode_snapshot_entry(&value)?;
+            out.push(WorktreeSnapshotEntry {
+                path: lossy(&path),
+                mode,
+                id,
+            });
+        }
+        Ok(out)
     }
 
     /// Open the linked worktree as its own repository, sharing the object
@@ -656,6 +875,7 @@ impl Worktree {
             Arc::clone(&self.repo),
             self.path.clone(),
             to_remove_force(force),
+            Some(self.id.clone()),
         )))
     }
 
@@ -700,8 +920,10 @@ impl Worktree {
                 let _ = std::fs::remove_dir_all(&target);
             }
             std::fs::remove_dir_all(&admin).map_err(|e| err("worktree.prune", e))?;
-            if let Some(id) = admin.file_name() {
-                pruned.push(id.to_string_lossy().into_owned());
+            if let Some(name) = admin.file_name() {
+                let id = name.to_string_lossy().into_owned();
+                delete_snapshot(&inner, &id)?;
+                pruned.push(id);
             }
         }
         Ok(pruned)
@@ -734,6 +956,7 @@ impl Worktree {
             let _ = std::fs::remove_dir_all(&target);
         }
         std::fs::remove_dir_all(admin).map_err(|e| err("worktree.prune", e))?;
+        delete_snapshot(&self.repo, &self.id)?;
         Ok(vec![self.id.clone()])
     }
 
@@ -787,7 +1010,7 @@ impl Worktree {
         Ok(repaired)
     }
 
-    /// Materialize the worktree stream of the tree at `tree_id` into entries
+    /// Materialise the worktree stream of the tree at `tree_id` into entries
     /// (path, mode, id, size), with filters applied and `export-ignore` honored.
     /// The whole stream is drained on the thread pool.
     #[napi]
@@ -905,7 +1128,7 @@ impl Repository {
     /// suffix of whole path components) and remove the linked worktree.
     ///
     /// `force` controls the safety checks: `never` (default) refuses a dirty
-    /// worktree or one containing initialized submodules, `discardChanges`
+    /// worktree or one containing initialised submodules, `discardChanges`
     /// permits their deletion, `overrideLock` additionally overrides a lock.
     /// The main worktree cannot be removed.
     #[napi]
@@ -918,10 +1141,11 @@ impl Repository {
             self.inner.clone(),
             target,
             to_remove_force(force),
+            None,
         )))
     }
 
-    /// Materialize the worktree stream of the tree at `tree_id` into an array of
+    /// Materialise the worktree stream of the tree at `tree_id` into an array of
     /// entries (path, mode, id, size), with filters applied and `export-ignore`
     /// honored. A live stream cannot cross the FFI boundary, so the whole stream
     /// is drained on the thread pool.
@@ -938,7 +1162,7 @@ impl Repository {
     /// instead of draining entries into metadata, it yields the precise bytes
     /// the encoder writes, which can be stored or re-fed into a decoder
     /// elsewhere (e.g. for `git archive`-style transport). Like the
-    /// materialized variant, the whole stream is produced on the thread pool.
+    /// materialised variant, the whole stream is produced on the thread pool.
     #[napi]
     pub fn worktree_stream_raw(&self, tree_id: String) -> napi::Result<AsyncTask<StreamRawTask>> {
         Ok(AsyncTask::new(StreamRawTask::new(

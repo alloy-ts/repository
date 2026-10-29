@@ -14,7 +14,7 @@ use sequoia_openpgp::parse::stream::{
     VerificationHelper,
 };
 use sequoia_openpgp::policy::StandardPolicy;
-use sequoia_openpgp::serialize::stream::{Encryptor2, LiteralWriter, Message, Recipient, Signer};
+use sequoia_openpgp::serialise::stream::{Encryptor2, LiteralWriter, Message, Recipient, Signer};
 use sequoia_openpgp::types::SymmetricAlgorithm;
 
 #[derive(Debug)]
@@ -81,7 +81,7 @@ pub fn symmetric_encrypt(pass: &[u8], plaintext: &[u8]) -> napi::Result<Vec<u8>,
             .build()
             .map_err(PgpError::from)?;
         literal.write_all(plaintext).map_err(PgpError::from)?;
-        literal.finalize().map_err(PgpError::from)?;
+        literal.finalise().map_err(PgpError::from)?;
     }
     Ok(sink)
 }
@@ -151,14 +151,14 @@ pub fn public_encrypt(
                     .build()
                     .map_err(PgpError::from)?;
                 literal.write_all(plaintext).map_err(PgpError::from)?;
-                literal.finalize().map_err(PgpError::from)?;
+                literal.finalise().map_err(PgpError::from)?;
             }
             None => {
                 let mut literal = LiteralWriter::new(Message::new(encryptor))
                     .build()
                     .map_err(PgpError::from)?;
                 literal.write_all(plaintext).map_err(PgpError::from)?;
-                literal.finalize().map_err(PgpError::from)?;
+                literal.finalise().map_err(PgpError::from)?;
             }
         }
     }
@@ -295,22 +295,22 @@ pub fn hex_hash(algo: &str, data: &[u8]) -> napi::Result<String, PgpError> {
         "SHA224" => {
             let mut h = Sha224::new();
             h.update(data);
-            h.finalize().to_vec()
+            h.finalise().to_vec()
         }
         "SHA256" => {
             let mut h = Sha256::new();
             h.update(data);
-            h.finalize().to_vec()
+            h.finalise().to_vec()
         }
         "SHA384" => {
             let mut h = Sha384::new();
             h.update(data);
-            h.finalize().to_vec()
+            h.finalise().to_vec()
         }
         "SHA512" => {
             let mut h = Sha512::new();
             h.update(data);
-            h.finalize().to_vec()
+            h.finalise().to_vec()
         }
         _ => return Err(PgpError::UnsupportedHash(algo.to_string())),
     };

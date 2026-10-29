@@ -6,7 +6,7 @@ use crate::error::{cached_namespace_get, cached_namespace_set, err, thread_local
 use crate::reference::Reference;
 use crate::repository::Repository;
 
-/// Canonicalize a raw namespace name into its `refs/namespaces/...` form.
+/// Canonicalise a raw namespace name into its `refs/namespaces/...` form.
 ///
 /// Falls back to the raw name when it is not a valid namespace, so values that
 /// were never validated (e.g. set by the environment) still display sensibly.

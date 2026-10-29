@@ -240,7 +240,7 @@ describe("Repository merge options, virtual merge base, state, pathspec & locati
     expect(repo.prefix() === null || typeof repo.prefix() === "string").toBe(true);
     expect(repo.isPristine() === null || typeof repo.isPristine() === "boolean").toBe(true);
     expect(repo.workdirPath("Cargo.toml")).toContain("Cargo.toml");
-    expect(repo.normalizePath("Cargo.toml")).toBe("Cargo.toml");
+    expect(repo.normalisePath("Cargo.toml")).toBe("Cargo.toml");
   });
 
   test("setWorkdir() round-trips the current working tree", () => {

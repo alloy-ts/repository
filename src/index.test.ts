@@ -233,7 +233,7 @@ describe("Index lookups, stat data, mutation, extensions, persistence", () => {
     expect(typeof idx.hadOffsetTable()).toBe("boolean");
   });
 
-  test("writeToBuffer serializes to bytes without touching disk", () => {
+  test("writeToBuffer serialises to bytes without touching disk", () => {
     const idx = repo.index();
     const before = repo.indexEntries().length;
 

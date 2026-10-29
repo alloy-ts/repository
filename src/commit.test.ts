@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 
-import { Commit, format_trailer, format_trailers, Repository, Signature } from "./main.ts";
+import { Commit, formatTrailer, formatTrailers, Repository, type Signature } from "./main.ts";
 
 let fixture: string;
 let repo: Repository;
@@ -72,10 +72,10 @@ describe("Commit handle getters", () => {
     const head = entries[0];
     const commit: Commit = repo.findCommit(head.sha);
 
-    expect(head.sha.startsWith(commit.shortSha())).toBe(true);
-    expect(commit.subject()).toBe("second");
-    expect(RFC3339.test(commit.authorDate())).toBe(true);
-    expect(RFC3339.test(commit.committerDate())).toBe(true);
+    expect(head.sha.startsWith(commit.shortSha)).toBe(true);
+    expect(commit.subject).toBe("second");
+    expect(RFC3339.test(commit.authorDate)).toBe(true);
+    expect(RFC3339.test(commit.committerDate)).toBe(true);
   });
 
   test("nthAncestor follows first-parent history", () => {
@@ -83,15 +83,39 @@ describe("Commit handle getters", () => {
     const head = entries[0];
     const commit: Commit = repo.findCommit(head.sha);
     const parent = commit.nthAncestor(1);
-    expect(parent.id()).toBe(entries[1].sha);
+    expect(parent.id).toBe(entries[1].sha);
     // nthAncestor(0) is the commit itself.
-    expect(commit.nthAncestor(0).id()).toBe(head.sha);
+    expect(commit.nthAncestor(0).id).toBe(head.sha);
   });
 
   test("nthAncestor past the root errors", () => {
     const entries = repo.log();
     const root = repo.findCommit(entries[entries.length - 1].sha);
     expect(() => root.nthAncestor(1)).toThrow();
+  });
+
+  test("parentId / parent / parentIds agree on the first parent", () => {
+    const entries = repo.log();
+    const commit: Commit = repo.findCommit(entries[0].sha);
+    expect(commit.parentCount()).toBe(1);
+    // parentId(i) returns the parent oid without loading the commit from the ODB.
+    expect(commit.parentId(0)).toBe(entries[1].sha);
+    // Consistent with the parent ids getter and the loaded parent commit.
+    expect(commit.parentIds[0]).toBe(entries[1].sha);
+    expect(commit.parent(0).id).toBe(entries[1].sha);
+    // Out-of-bounds parent id errors.
+    expect(() => commit.parentId(1)).toThrow();
+  });
+
+  test("headCommit returns the HEAD commit with a readable id", () => {
+    const current = repo.headCommit();
+    expect(current.id).toMatch(/^[0-9a-f]{40}$/);
+    expect(current.id).toBe(repo.headCommit().id);
+  });
+
+  test("headCommitId returns the HEAD sha (or null when unborn)", () => {
+    expect(repo.headCommitId).toMatch(/^[0-9a-f]{40}$/);
+    expect(repo.headCommitId).toBe(repo.headCommit().id);
   });
 
   test("info() mirrors the CommitInfo shape from log()", () => {
@@ -210,7 +234,7 @@ describe("writeCommit (loose object) with headers / encoding", () => {
     expect(oid).toMatch(/^[0-9a-f]{40}$/);
 
     const c: Commit = repo.findCommit(oid);
-    expect(c.encoding()).toBe("UTF-8");
+    expect(c.encoding).toBe("UTF-8");
     expect(c.headerField("Reviewed-by")).toBe("Reviewer <r@e.com>");
     expect(c.extraHeaders().map((h) => h.name)).toContain("Reviewed-by");
 
@@ -230,26 +254,59 @@ describe("writeCommit (loose object) with headers / encoding", () => {
       message: "plain loose commit",
     });
     const c: Commit = repo.findCommit(oid);
-    expect(c.encoding()).toBeNull();
+    expect(c.encoding).toBeNull();
     expect(c.extraHeaders().length).toBe(0);
     expect(c.toObjectText()).toContain("plain loose commit");
   });
 });
 
-describe("Trailer rendering (format_trailer / format_trailers)", () => {
-  test("format_trailer renders token + separator + value", () => {
-    const t = { token: "Signed-off-by", value: "A <a@e.com>" };
-    expect(format_trailer(t)).toBe("Signed-off-by: A <a@e.com>");
-    expect(format_trailer(t, "=>")).toBe("Signed-off-by=>A <a@e.com>");
+describe("Commit.toBuffer (raw object bytes)", () => {
+  test("returns a Buffer whose bytes equal toObjectText's content", () => {
+    const head = repo.headCommit();
+    const oid = repo.writeCommit({
+      tree: head.treeId,
+      parents: head.parentIds,
+      author: head.author(),
+      committer: head.committer(),
+      message: "buffer commit\n\nSigned-off-by: A <a@e.com>\n",
+    });
+    const c: Commit = repo.findCommit(oid);
+
+    const buf = c.toBuffer();
+    expect(Buffer.isBuffer(buf)).toBe(true);
+    // Byte-for-byte identical to the canonical object text.
+    const text = c.toObjectText();
+    expect(buf.length).toBe(Buffer.byteLength(text, "utf8"));
+    expect(buf.toString("utf8")).toBe(text);
+    expect(buf.toString("utf8")).toContain("tree ");
+    expect(buf.toString("utf8")).toContain("Signed-off-by: A <a@e.com>");
   });
 
-  test("format_trailers joins trailers one per line with the separator", () => {
+  test("matches `git cat-file commit` for an existing commit", () => {
+    const head = repo.headCommit();
+    const expected = execSync(`git cat-file commit ${head.id}`, {
+      cwd: repo.path(),
+      stdio: "pipe",
+    }).toString("utf8");
+    // `git cat-file` emits the exact stored object bytes, same as toBuffer().
+    expect(head.toBuffer().toString("utf8")).toBe(expected);
+  });
+});
+
+describe("Trailer rendering (formatTrailer / formatTrailers)", () => {
+  test("formatTrailer renders token + separator + value", () => {
+    const t = { token: "Signed-off-by", value: "A <a@e.com>" };
+    expect(formatTrailer(t)).toBe("Signed-off-by: A <a@e.com>");
+    expect(formatTrailer(t, "=>")).toBe("Signed-off-by=>A <a@e.com>");
+  });
+
+  test("formatTrailers joins trailers one per line with the separator", () => {
     const trailers = [
       { token: "Co-authored-by", value: "B <b@e.com>" },
       { token: "Reviewed-by", value: "C <c@e.com>" },
     ];
-    expect(format_trailers(trailers)).toBe("Co-authored-by: B <b@e.com>\nReviewed-by: C <c@e.com>");
-    expect(format_trailers(trailers, "=")).toBe(
+    expect(formatTrailers(trailers)).toBe("Co-authored-by: B <b@e.com>\nReviewed-by: C <c@e.com>");
+    expect(formatTrailers(trailers, "=")).toBe(
       "Co-authored-by=B <b@e.com>\nReviewed-by=C <c@e.com>",
     );
   });
@@ -265,9 +322,9 @@ describe("Trailer rendering (format_trailer / format_trailers)", () => {
     });
     const trailers = repo.findCommit(oid).trailers();
     expect(trailers.length).toBe(2);
-    const text = format_trailers(trailers);
+    const text = formatTrailers(trailers);
     expect(text).toContain("Signed-off-by: A <a@e.com>");
     expect(text).toContain("Reviewed-by: B <b@e.com>");
-    expect(format_trailer(trailers[0])).toBe("Signed-off-by: A <a@e.com>");
+    expect(formatTrailer(trailers[0])).toBe("Signed-off-by: A <a@e.com>");
   });
 });

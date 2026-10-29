@@ -2,7 +2,7 @@
 //!
 //! Reached through [`Repository::checkout`] and [`Repository::checkout_branch`],
 //! both of which offload the (disk-bound) work to libuv-thread-pool tasks. The
-//! working tree is materialized by shelling out to the `git` binary (the same
+//! working tree is materialised by shelling out to the `git` binary (the same
 //! approach the rest of this crate uses for `commit`/`push`/`gpg`), since gix's
 //! own worktree checkout depends on a `gix_worktree_state`/`gix_filter` pair
 //! whose re-exported types are skewed in this crate's dependency graph.
@@ -50,7 +50,7 @@ pub struct CheckoutPathsOptions {
 }
 
 /// Run `git` with `args` in `dir`, returning an error if it exits non-zero.
-fn git_run(dir: &Path, args: &[String]) -> napi::Result<()> {
+pub(crate) fn git_run(dir: &Path, args: &[String]) -> napi::Result<()> {
     let git = find_git().ok_or_else(|| err_str("checkout", "git binary not found"))?;
     let output = ProcCommand::new(&git)
         .current_dir(dir)
@@ -98,7 +98,7 @@ pub(crate) fn checkout_worktree(r: &gix::Repository, rev: &str) -> napi::Result<
     )
 }
 
-/// Run `git merge --no-commit [--no-ff] <commits…>` to materialize a merge into the working tree
+/// Run `git merge --no-commit [--no-ff] <commits…>` to materialise a merge into the working tree
 /// and index, leaving the repository in a *merging state* (like `git merge`). A non-zero exit of
 /// 1 (git's "conflicts present" code) is treated as the expected outcome, not an error; any other
 /// failure propagates. `no_ff` forces a merge even when a fast-forward is possible (used by
@@ -244,7 +244,7 @@ impl Task for CheckoutHeadTask {
 }
 
 /// `git checkout [--force] <treeish> -- <paths|".">` on the libuv thread pool.
-/// Materializes an arbitrary tree/commit into the working tree and index without
+/// Materialises an arbitrary tree/commit into the working tree and index without
 /// changing `HEAD` or the current branch.
 pub struct CheckoutTreeTask {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
@@ -379,7 +379,7 @@ impl Repository {
         }))
     }
 
-    /// Materialize an arbitrary tree/commit (`treeish`) into the working tree and
+    /// Materialise an arbitrary tree/commit (`treeish`) into the working tree and
     /// index, without changing `HEAD` or the current branch. Equivalent to
     /// `git checkout [--force] <treeish> -- [paths]`. Resolves to `undefined`.
     #[napi(ts_return_type = "Promise<void>")]
@@ -403,7 +403,7 @@ impl Repository {
     /// Sync the index into the working tree without touching `HEAD`, mirroring
     /// git2's `checkout_index`. If `index` is provided, it is flushed to the
     /// repository's on-disk index first (so its in-memory entries are
-    /// materialized); otherwise the repository's current index is used. `paths`
+    /// materialised); otherwise the repository's current index is used. `paths`
     /// restricts the operation. Equivalent to
     /// `git checkout-index [-f] [-a | -- <paths>]`. Resolves to `undefined`.
     #[napi(ts_return_type = "Promise<void>")]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::error::RepositoryResult as Result;
 use napi::bindgen_prelude::AsyncTask;
+use napi::bindgen_prelude::Buffer;
 use napi::{Env, Task};
 use napi_derive::napi;
 
@@ -22,7 +23,7 @@ use crate::log::{CommitInfo, log_summary};
 use crate::mailmap::Mailmap;
 use crate::object::{Object, build_object};
 use crate::repository::Repository;
-use crate::tree::{Tree, build_tree};
+use crate::tree::{Tree, TreeStore, build_tree};
 
 fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -92,7 +93,7 @@ fn resolve_with_mailmap(mailmap: &Mailmap, signature: gix::actor::SignatureRef<'
 
 /// Borrow a napi `Signature` as a `gix_actor::SignatureRef`.
 ///
-/// The time is serialized into `time_buf` in git's raw format (`<seconds> <±HHMM>`),
+/// The time is serialised into `time_buf` in git's raw format (`<seconds> <±HHMM>`),
 /// because `SignatureRef.time` is a string that gets parsed later — an unparsable time
 /// would silently become the unix epoch.
 pub(crate) fn signature_ref<'a>(
@@ -227,6 +228,20 @@ impl Commit {
     #[napi(getter)]
     pub fn id(&self) -> String {
         self.id.to_string()
+    }
+
+    /// Mirror this commit and its entire reachable object graph (trees, blobs,
+    /// tags, and ancestor commits) into the repository's canonical prolly node
+    /// store.
+    ///
+    /// Returns the [`TreeStore`]: `root` is the content id of the top-level
+    /// prolly tree and is reproducible for identical commit content. Reuses the
+    /// same engine as [`crate::tree::prolly_mirror_objects`], so it is consistent
+    /// with [`crate::export::export_prolly`].
+    #[napi]
+    pub fn prolly_tree(&self) -> napi::Result<TreeStore> {
+        let r = thread_local(&self.repo);
+        crate::tree::prolly_mirror_objects(&r, &[self.id], &[])
     }
 
     /// Full commit message, with leading newlines removed (libgit2's
@@ -494,7 +509,7 @@ impl Commit {
         build_commit(&self.repo, commit)
     }
 
-    /// Serialize this commit to the same flat [`CommitInfo`] snapshot that [`Repository::log`] returns,
+    /// Serialise this commit to the same flat [`CommitInfo`] snapshot that [`Repository::log`] returns,
     /// so a single commit can be rendered with the same shape as history.
     #[napi]
     pub fn info(&self) -> napi::Result<CommitInfo> {
@@ -529,7 +544,7 @@ impl Commit {
         Ok(header_field(&self.raw_header_bytes()?, &name))
     }
 
-    /// Serialize this commit to its canonical raw git object text — the exact bytes that
+    /// Serialise this commit to its canonical raw git object text — the exact bytes that
     /// `git cat-file commit <oid>` (or `git hash-object -t commit`) would produce: the raw
     /// header block, a blank line, and the message exactly as stored. Useful to confirm what
     /// gets hashed before writing, or to reconstruct an object from its parts.
@@ -544,6 +559,24 @@ impl Commit {
         out.push(b'\n'); // completes the blank line separating the header from the message
         out.extend_from_slice(message.as_ref());
         Ok(lossy(&out))
+    }
+
+    /// Serialise this commit to its canonical raw git object bytes — the exact bytes that
+    /// `git cat-file commit <oid>` (or `git hash-object -t commit`) would produce. This is the
+    /// byte-for-byte counterpart of [`to_object_text`](Self::to_object_text) (which returns the
+    /// same content as a string); it is what gets hashed when the commit is written. Mirrors
+    /// nodegit's `Commit.prototype.toBuffer()`.
+    #[napi]
+    pub fn to_buffer(&self) -> napi::Result<Buffer> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let header = self.raw_header_bytes()?;
+        let message = commit.message_raw().map_err(|e| err("message_raw", e))?;
+        let mut out = Vec::with_capacity(header.len() + message.len() + 1);
+        out.extend_from_slice(&header);
+        out.push(b'\n'); // completes the blank line separating the header from the message
+        out.extend_from_slice(message.as_ref());
+        Ok(Buffer::from(out))
     }
 
     /// The commit (committer) time as `{ seconds, offset }`, where `offset` is in
@@ -576,6 +609,23 @@ impl Commit {
         let r = thread_local(&self.repo);
         let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
         Ok(commit.parent_ids().count() as u32)
+    }
+
+    /// The id of the parent at `index`, **without** loading that commit from the
+    /// object database. Errors when the index is out of bounds. Mirrors libgit2's
+    /// `git_commit_parent_id` (distinct from [`parent`](Self::parent), which
+    /// rounds-trips the parent through the ODB).
+    #[napi]
+    pub fn parent_id(&self, index: u32) -> napi::Result<String> {
+        let r = thread_local(&self.repo);
+        let commit = r.find_commit(self.id).map_err(|e| err("find_commit", e))?;
+        let id = commit.parent_ids().nth(index as usize).ok_or_else(|| {
+            err_str(
+                "parent_id",
+                format!("parent index {index} is out of bounds"),
+            )
+        })?;
+        Ok(id.to_string())
     }
 
     /// The parent commit at `index`, or an error when the index is out of bounds.
@@ -1030,6 +1080,27 @@ impl Repository {
             .find_commit(parse_oid(&id)?)
             .map_err(|e| err("find_commit", e))?;
         build_commit(&self.inner, commit)
+    }
+
+    /// The commit `HEAD` points to. Returns a `Commit` handle; read its sha via
+    /// `commit.id`.
+    #[napi]
+    pub fn head_commit(&self) -> napi::Result<Commit> {
+        let r = thread_local(&self.inner);
+        let commit = r.head_commit().map_err(|e| err("head_commit", e))?;
+        build_commit(&self.inner, commit)
+    }
+
+    /// The hex sha of the commit `HEAD` currently points to, as a plain string.
+    /// Returns `null` when `HEAD` is unborn (no commit yet) — handy for build
+    /// banners and version strings without constructing a `Commit`.
+    #[napi(getter)]
+    pub fn head_commit_id(&self) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        match r.head_commit() {
+            Ok(commit) => Ok(Some(commit.id.to_string())),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Write a loose commit object directly to the object database without moving references.

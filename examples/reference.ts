@@ -8,7 +8,7 @@ import {
   refCategoryFullName,
   type Reference,
   refNameIsValid,
-  refNameSanitize,
+  refNameSanitise,
   refPartialNameIsValid,
   RefStore,
   refStoreTypeName,
@@ -54,8 +54,8 @@ console.log(`refPartialNameIsValid("heads/main")     = ${refPartialNameIsValid("
 console.log(`refPartialNameIsValid("x@{y}")          = ${refPartialNameIsValid("x@{y}")}`);
 console.log(`refBranchNameIsValid("refs/heads/main") = ${refBranchNameIsValid("refs/heads/main")}`);
 console.log(`refBranchNameIsValid("refs/heads/HEAD") = ${refBranchNameIsValid("refs/heads/HEAD")}`);
-console.log(`refNameSanitize("feature//a b..c")      = ${refNameSanitize("feature//a b..c")}`);
-console.log(`refNameSanitize("")                     = ${refNameSanitize("")}`);
+console.log(`refNameSanitise("feature//a b..c")      = ${refNameSanitise("feature//a b..c")}`);
+console.log(`refNameSanitise("")                     = ${refNameSanitise("")}`);
 console.log(
   `refCategoryFullName("remote_branch", "origin/main") = ${refCategoryFullName(
     "remote_branch",

@@ -53,7 +53,7 @@ describe("Repository.blame / blameWithOptions (src/blame.rs)", () => {
       expect(e.startInBlamedFile).toBeGreaterThanOrEqual(prevStart);
       // An unrenamed file exposes no source file name (absent optional field).
       expect(e.sourceFileName).toBeUndefined();
-      // Default behavior leaves commit details unresolved (napi serializes
+      // Default behavior leaves commit details unresolved (napi serialises
       // absent `Option` object fields as `undefined`).
       expect(e.author).toBeUndefined();
       expect(e.committer).toBeUndefined();

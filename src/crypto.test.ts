@@ -16,7 +16,7 @@ import {
   parseManifest,
   Protocol,
   Repository,
-  serializeManifest,
+  serialiseManifest,
   Signature,
   SignatureBuilder,
   SignatureBytes,
@@ -56,11 +56,11 @@ describe("Crypto (repository-bound crypt handle)", () => {
       const repo = Repository.init(base, false);
       const crypt = repo.crypt();
 
-      expect(crypt.isInitialized()).toBe(false);
+      expect(crypt.isInitialised()).toBe(false);
       expect(crypt.mode()).toBe(CryptoMode.Filter);
 
       crypt.init();
-      expect(crypt.isInitialized()).toBe(true);
+      expect(crypt.isInitialised()).toBe(true);
       expect(crypt.mode()).toBe(CryptoMode.Hybrid);
       expect(typeof crypt.keyDir()).toBe("string");
 
@@ -120,11 +120,11 @@ describe("Crypto (repository-bound crypt handle)", () => {
         extensions: ["extn comment"],
       };
 
-      const serialized = serializeManifest(manifest);
-      expect(serialized).toContain("1234567890123456789012345678901234567890 refs/heads/main");
-      expect(serialized).toContain("pack :SHA256:");
+      const serialised = serialiseManifest(manifest);
+      expect(serialised).toContain("1234567890123456789012345678901234567890 refs/heads/main");
+      expect(serialised).toContain("pack :SHA256:");
 
-      const parsed = parseManifest(serialized);
+      const parsed = parseManifest(serialised);
       expect(parsed.refs.length).toBe(1);
       expect(parsed.refs[0].name).toBe("refs/heads/main");
       expect(parsed.packs.length).toBe(1);
@@ -162,11 +162,11 @@ describe("Crypto (repository-bound crypt handle)", () => {
       const repo = Repository.init(base, false);
       const crypt = repo.crypt();
 
-      // Initialize default Hybrid mode
+      // Initialise default Hybrid mode
       crypt.init();
       expect(crypt.mode()).toBe(CryptoMode.Hybrid);
 
-      // Initialize full repo encryption on top
+      // Initialise full repo encryption on top
       crypt.initEntireRepo();
       expect(crypt.mode()).toBe(CryptoMode.Hybrid);
       expect(crypt.isEntireRepoMode()).toBe(true);
@@ -216,7 +216,7 @@ describe("GPG / OpenPGP (rPGP NAPI bindings)", () => {
     expect(armored.intoBytes().toString()).toBe(armoredStr);
   });
 
-  test("GpgContext initializes with default and custom protocols", () => {
+  test("GpgContext initialises with default and custom protocols", () => {
     const ctx = new GpgContext(Protocol.OpenPgp);
     expect(ctx.protocol).toBe(Protocol.OpenPgp);
     ctx.setArmor(true);

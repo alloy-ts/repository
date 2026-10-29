@@ -45,18 +45,18 @@ Commit headers are `key<space>value` (not `key: value`); `headerField` and
 | Method        | Signature                   | Notes                                                                |
 | ------------- | --------------------------- | -------------------------------------------------------------------- |
 | `time`        | `() => CommitTime`          | `{ seconds, offset }` — the committer time.                          |
-| `tree`        | `() => Tree`                | The root tree, materialized (libgit2's `git_commit_tree`).           |
+| `tree`        | `() => Tree`                | The root tree, materialised (libgit2's `git_commit_tree`).           |
 | `treeId`      | `() => string`              | The root tree id — no object database access, cheaper than `tree()`. |
 | `parentCount` | `() => number`              | Number of parents (`0` for a root commit).                           |
 | `parentIds`   | `() => string[]`            | Parent ids in order, without loading the parent objects.             |
-| `parents`     | `() => Commit[]`            | All parents, materialized and in order.                              |
+| `parents`     | `() => Commit[]`            | All parents, materialised and in order.                              |
 | `parent`      | `(index: number) => Commit` | A single parent; throws when `index` is out of bounds.               |
 
 ### Mailmap
 
 | Method                 | Signature                         | Notes                                                                                |
 | ---------------------- | --------------------------------- | ------------------------------------------------------------------------------------ |
-| `authorWithMailmap`    | `(mailmap: Mailmap) => Signature` | The author as canonicalized by the mailmap; the original identity when nothing maps. |
+| `authorWithMailmap`    | `(mailmap: Mailmap) => Signature` | The author as canonicalised by the mailmap; the original identity when nothing maps. |
 | `committerWithMailmap` | `(mailmap: Mailmap) => Signature` | Same for the committer.                                                              |
 
 Both preserve the original timestamp — mailmap entries only rewrite the name and
@@ -138,14 +138,16 @@ commit.coAuthors(); // [{ token: "Co-authored-by", value: "A U Thor <a@example.c
 
 ## Creating commits (`Repository`)
 
-| Method        | Signature                                                                                | Notes                                                                                  |
-| ------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `findCommit`  | `(id: string) => Commit`                                                                 | Throws when the object is missing or is not a commit.                                  |
-| `writeCommit` | `(input: CommitInput) => string`                                                         | Writes a loose commit object without touching any reference. Returns the id.           |
-| `newCommit`   | `(message: string, tree: string, parents: string[]) => string`                           | Like `writeCommit`, using the configured author/committer identities. No ref is moved. |
-| `newCommitAs` | `(committer: Signature, author: Signature, message, tree, parents) => string`            | Like `newCommit` with explicit identities, which also fixes both timestamps.           |
-| `commit`      | `(reference: string, message: string, tree: string, parents: string[]) => string`        | Creates a commit **and** moves `reference` to it.                                      |
-| `commitAs`    | `(committer: Signature, author: Signature, reference, message, tree, parents) => string` | Like `commit` with explicit identities.                                                |
+| Method         | Signature                                                                                | Notes                                                                                                            |
+| -------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `findCommit`   | `(id: string) => Commit`                                                                 | Throws when the object is missing or is not a commit.                                                            |
+| `headCommit`   | `() => Commit`                                                                           | The commit `HEAD` currently points to — an alias of `headCommit()`. Read `commit.id` for the sha.                |
+| `headCommitId` | `() => string \| null`                                                                   | Hex sha of the commit `HEAD` points to, or `null` when `HEAD` is unborn. Convenience for build banners/versions. |
+| `writeCommit`  | `(input: CommitInput) => string`                                                         | Writes a loose commit object without touching any reference. Returns the id.                                     |
+| `newCommit`    | `(message: string, tree: string, parents: string[]) => string`                           | Like `writeCommit`, using the configured author/committer identities. No ref is moved.                           |
+| `newCommitAs`  | `(committer: Signature, author: Signature, message, tree, parents) => string`            | Like `newCommit` with explicit identities, which also fixes both timestamps.                                     |
+| `commit`       | `(reference: string, message: string, tree: string, parents: string[]) => string`        | Creates a commit **and** moves `reference` to it.                                                                |
+| `commitAs`     | `(committer: Signature, author: Signature, reference, message, tree, parents) => string` | Like `commit` with explicit identities.                                                                          |
 
 `CommitInput` is `{ tree, parents, message, author?, committer? }` — the
 identities default to the repository configuration and throw when none is

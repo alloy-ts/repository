@@ -29,7 +29,7 @@ assert.equal(signature.timezoneOffset, 8 * 60 * 60);
 // owned.write_to(&mut out) -> b"Taylor Example <taylor@example.com> 1711398853 +0800"
 assert.equal(signatureToRaw(signature), "Taylor Example <taylor@example.com> 1711398853 +0800");
 
-// Bonus: serialize the bare identity (a signature without the timestamp).
+// Bonus: serialise the bare identity (a signature without the timestamp).
 assert.equal(identityToRaw(actor), "Taylor Example <taylor@example.com>");
 
 console.log("actor:      ", JSON.stringify(actor));

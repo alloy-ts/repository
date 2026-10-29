@@ -65,13 +65,13 @@ describe("identity parsing", () => {
 });
 
 describe("identity formatting", () => {
-  test("identityToRaw() serializes `Name <email>`", () => {
+  test("identityToRaw() serialises `Name <email>`", () => {
     expect(identityToRaw({ name: "Taylor Example", email: "taylor@example.com" })).toBe(
       "Taylor Example <taylor@example.com>",
     );
   });
 
-  test("signatureToRaw() serializes the full git actor format", () => {
+  test("signatureToRaw() serialises the full git actor format", () => {
     expect(
       signatureToRaw({
         name: "Taylor Example",

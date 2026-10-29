@@ -50,9 +50,9 @@ function demo(label: string, before: string, after: string, algo?: Algorithm) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. A localized edit: every algorithm agrees
+// 1. A localised edit: every algorithm agrees
 // ---------------------------------------------------------------------------
-console.log("=== Localized change: all algorithms agree ===");
+console.log("=== Localised change: all algorithms agree ===");
 const beforeLocal = `fn main() {
     println!("hello");
 }

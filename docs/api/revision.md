@@ -3,6 +3,10 @@
 Resolving revision specifications (`HEAD~2`, `main`, `v1.0.0^{commit}`, `a..b`),
 walking commit history, and describing commits `git describe`-style.
 
+There are two walk styles: `revWalk` returns the whole commit list in one call,
+while `revwalk()` returns a configurable `Revwalk` you drive commit-by-commit
+(see [Revwalk](./rev_walk.md)).
+
 All spec parsing goes through the repository's revspec parser, which accepts the
 same syntax as `git rev-parse`: anchors (names, hashes, prefixes), `~`/`^`
 navigation, `@{n}`/`@{<date>}` reflog lookups, `@{u}`/`@{push}` sibling
@@ -37,6 +41,7 @@ lookup at stage 0).
 | `revParseExt`    | `(spec: string) => RevParseExt`                                          | Resolve a spec and report which reference provided it (`"main"` → `refs/heads/main`); `referenceName` is `null` when the spec is not a ref name.         |
 | `revParse`       | `(spec: string) => RevSpec`                                              | Parse a spec and report its kind plus the resolved id(s) — distinguishes ranges, merges and exclusions.                                                  |
 | `revWalk`        | `(tips: string[], options?: WalkOptions) => string[]`                    | Walk all commits reachable from the tips — which may be specs, not just ids — with exclusions, reference globs, and ranges.                              |
+| `revwalk`        | `() => Revwalk`                                                          | Create an incremental `Revwalk`: push/hide tips one at a time and pull commits via `next()`/`toArray()`. See [Revwalk](./rev_walk.md).                   |
 | `describe`       | `(commit: string, options?: DescribeOptions) => DescribeOutcome \| null` | `git describe`: closest tag/branch containing `commit`. `null` when no candidate exists and `idAsFallback` is off. Throws when `commit` is not a commit. |
 
 ## Result and option objects

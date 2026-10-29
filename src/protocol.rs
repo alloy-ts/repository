@@ -16,7 +16,7 @@
 //! (prefix computation, capability parsing) around it.
 //!
 //! `gix_protocol::ls_refs::RefPrefixes` keeps its `prefixes` field and `into_args` method private,
-//! so we mirror the computed prefixes locally to serialize them (the wire form prepends
+//! so we mirror the computed prefixes locally to serialise them (the wire form prepends
 //! `ref-prefix `).
 
 use std::collections::HashSet;

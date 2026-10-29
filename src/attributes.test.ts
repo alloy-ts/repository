@@ -11,7 +11,7 @@ let repo: Repository;
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "repo-attrs-"));
-  // Initialize a throwaway repo with known attribute/ignore rules so the tests
+  // Initialise a throwaway repo with known attribute/ignore rules so the tests
   // are deterministic regardless of the host project's configuration.
   execSync("git init -q -b main", { cwd: dir, stdio: "ignore" });
   writeFileSync(join(dir, ".gitattributes"), "*.txt myattr=hello\nsecret.bin binary\n");

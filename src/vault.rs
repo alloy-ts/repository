@@ -736,7 +736,7 @@ fn acquire_lock(path: &Path) -> SafeResult<LockGuard> {
     for _ in 0..2 {
         let contents = serde_json::to_string(&LockFileContents::new()).map_err(|e| {
             SafeError::InvalidVault {
-                reason: format!("lock serialize: {e}"),
+                reason: format!("lock serialise: {e}"),
             }
         })?;
         match std::fs::OpenOptions::new()
@@ -1247,7 +1247,7 @@ impl Vault {
         )?));
         let json =
             serde_json::to_string_pretty(&self.file).map_err(|e| SafeError::InvalidVault {
-                reason: format!("serialize vault: {e}"),
+                reason: format!("serialise vault: {e}"),
             })?;
         let tmp = self.path.with_extension("vault.tmp");
         fsperm::write_owner_only(&tmp, json.as_bytes())?;
@@ -2143,15 +2143,15 @@ impl KeyManager {
     pub fn init_dirs(&self) -> crate::crypto::CryptoResult<()> {
         let crypt_dir = self.git_crypt_dir();
         if crypt_dir.exists() {
-            return Err(crate::crypto::CryptoError::AlreadyInitialized);
+            return Err(crate::crypto::CryptoError::AlreadyInitialised);
         }
         std::fs::create_dir_all(&crypt_dir)?;
         std::fs::create_dir(crypt_dir.join("keys"))?;
         Ok(())
     }
 
-    /// Whether the repository has been initialized for crypt.
-    pub fn is_initialized(&self) -> bool {
+    /// Whether the repository has been initialised for crypt.
+    pub fn is_initialised(&self) -> bool {
         self.git_crypt_dir().exists()
     }
 
@@ -2840,7 +2840,7 @@ impl From<RbacProfile> for VaultAccessProfile {
 // ── KvVault: local embedded KV store (fjall) as an opaque blob backend ──────────
 
 /// A synchronous, local key–value store backed by `fjall`. Values are opaque
-/// blobs — e.g. a serialized encrypted `VaultFile` — and the caller wires the
+/// blobs — e.g. a serialised encrypted `VaultFile` — and the caller wires the
 /// bytes to/from a [`Vault`]. No network, no external services.
 ///
 /// This is intentionally separate from the file-backed [`Vault`]; it only

@@ -129,7 +129,7 @@ describe("Repository config (src/config.rs)", () => {
     const ctx = repo.commandContext();
     // `git_dir` is always set for a cloned repository.
     expect(typeof ctx.gitDir).toBe("string");
-    // Unset `Option` fields on a napi object serialize as `undefined`, not `null`.
+    // Unset `Option` fields on a napi object serialise as `undefined`, not `null`.
     expect(typeof ctx.worktreeDir === "string" || ctx.worktreeDir === undefined).toBe(true);
     expect(typeof ctx.noReplaceObjects === "boolean" || ctx.noReplaceObjects === undefined).toBe(
       true,

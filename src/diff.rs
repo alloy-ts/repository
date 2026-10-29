@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::error::{err, parse_oid, thread_local};
 use crate::repository::{Repository, lossy};
-use crate::revision::WalkOptions;
+use crate::rev_walk::WalkOptions;
 use gix::bstr::BString;
 use gix_imara_diff as imara;
 

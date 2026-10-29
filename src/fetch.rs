@@ -148,6 +148,8 @@ pub struct FetchOutcome {
     pub dry_run: bool,
     /// Whether any negotiation with the remote occurred.
     pub negotiated: bool,
+    /// Whether the fetch was a full clone (the local repository had no references before).
+    pub clone: bool,
     /// Each local reference affected by the fetch.
     pub updated_refs: Vec<UpdatedRef>,
 }
@@ -183,6 +185,8 @@ impl Task for FetchTask {
         // TODO: replace with a proper `gix::credentials::Program` / config overlay.
         let _guard = self.auth.take().map(|o| Auth::new(Some(o)).env_guard());
         let r = thread_local(&self.repo);
+        // A fetch into a repository that had no references beforehand is a full clone.
+        let is_clone = is_full_clone(&r);
 
         // Prune is not exposed by gix's fetch, so honor it via the system `git` binary, which
         // inherits the credential environment set up by `_guard` above.
@@ -318,12 +322,26 @@ impl Task for FetchTask {
             pack_received,
             dry_run,
             negotiated,
+            clone: is_clone,
             updated_refs,
         })
     }
 
     fn resolve(&mut self, _env: Env, output: FetchOutcome) -> napi::Result<FetchOutcome> {
         Ok(output)
+    }
+}
+
+/// Whether the repository currently has no references — meaning the next successful
+/// fetch will be a full clone (nothing existed locally beforehand). Errors resolving the
+/// ref database are treated as "not a clone" so the flag stays conservative.
+fn is_full_clone(r: &gix::Repository) -> bool {
+    match r.references() {
+        Ok(platform) => match platform.all() {
+            Ok(iter) => iter.count() == 0,
+            Err(_) => false,
+        },
+        Err(_) => false,
     }
 }
 
@@ -335,6 +353,7 @@ fn fetch_with_prune(
     name: &Option<String>,
     refspecs: &Option<Vec<String>>,
 ) -> napi::Result<FetchOutcome> {
+    let is_clone = is_full_clone(r);
     let git = find_git().ok_or_else(|| err_str("fetch_prune", "no system git binary found"))?;
     let mut cmd = std::process::Command::new(&git);
     cmd.arg("fetch").arg("--prune");
@@ -355,6 +374,7 @@ fn fetch_with_prune(
             pack_received: true,
             dry_run: false,
             negotiated: true,
+            clone: is_clone,
             updated_refs: vec![],
         }),
         Ok(out) => Err(err_str(

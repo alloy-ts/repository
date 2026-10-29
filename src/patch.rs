@@ -12,7 +12,7 @@ use gix::diff::blob::{InternedInput, UnifiedDiff, diff_with_slider_heuristics};
 use crate::diff::{Algorithm, Change};
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::{Repository, lossy};
-use crate::revision::WalkOptions;
+use crate::rev_walk::WalkOptions;
 
 /// How much of a patch to emit when rendering it to text.
 ///
@@ -118,7 +118,7 @@ pub struct PatchDelta {
 /// A diff of a single file, modeled after `git2::Patch`.
 ///
 /// Instances are produced by the `Repository.patchFrom*` constructors and are
-/// immutable snapshots: hunks and lines are fully materialized on construction.
+/// immutable snapshots: hunks and lines are fully materialised on construction.
 ///
 /// Deviations from `git2::Patch`:
 /// * `toBuf()`/`print()` accept optional [`PatchTextOptions`] so header
@@ -859,7 +859,7 @@ impl Repository {
     }
 }
 
-/// Normalize the `Change.kind` strings produced by `diff.rs`, keeping git2's
+/// Normalise the `Change.kind` strings produced by `diff.rs`, keeping git2's
 /// `DiffDelta` vocabulary.
 fn kind_str(kind: &str) -> &'static str {
     match kind {

@@ -1,4 +1,4 @@
-# Objects API
+# Object
 
 Everything that reads, writes, or decodes git objects: the raw object store, and
 the typed wrappers for blobs, commits, tags, and trees.
@@ -156,16 +156,17 @@ blob.content(); // Buffer
 
 ### `Repository`
 
-| Method        | Signature                                                                                                                  | Notes                                                                                                                                                            |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `headId`      | `() => string`                                                                                                             | The id that `HEAD` resolves to.                                                                                                                                  |
-| `headCommit`  | `() => Commit`                                                                                                             | Throws if `HEAD` is unborn.                                                                                                                                      |
-| `findCommit`  | `(id: string) => Commit`                                                                                                   | Throws when missing or not a commit.                                                                                                                             |
-| `writeCommit` | `(input: CommitInput) => string`                                                                                           | Writes a commit object directly to the ODB **without moving any reference**; returns the id. Author/committer fall back to the repository identity when omitted. |
-| `commit`      | `(reference: string, message: string, tree: string, parents: string[]) => string`                                          | Creates a commit and advances `reference`; returns the id.                                                                                                       |
-| `commitAs`    | `(committer: Signature, author: Signature, reference: string, message: string, tree: string, parents: string[]) => string` | Same, with explicit identities and times.                                                                                                                        |
-| `newCommit`   | `(message: string, tree: string, parents: string[]) => string`                                                             | Writes the commit without updating any reference.                                                                                                                |
-| `newCommitAs` | `(committer: Signature, author: Signature, message: string, tree: string, parents: string[]) => string`                    | Same, with explicit identities and times.                                                                                                                        |
+| Method        | Signature                                                                                                                  | Notes                                                                                                                                                                                                                   |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `headId`      | `() => string`                                                                                                             | The id that `HEAD` resolves to.                                                                                                                                                                                         |
+| `headCommit`  | `() => Commit`                                                                                                             | Throws if `HEAD` is unborn.                                                                                                                                                                                             |
+| `head`        | `() => Reference`                                                                                                          | The `HEAD` reference itself: symbolic when `HEAD` points at a branch, direct when detached. Inspect `reference.name`, `reference.symbolicTarget`, `reference.target`, or call `reference.peelToId()` for the commit id. |
+| `findCommit`  | `(id: string) => Commit`                                                                                                   | Throws when missing or not a commit.                                                                                                                                                                                    |
+| `writeCommit` | `(input: CommitInput) => string`                                                                                           | Writes a commit object directly to the ODB **without moving any reference**; returns the id. Author/committer fall back to the repository identity when omitted.                                                        |
+| `commit`      | `(reference: string, message: string, tree: string, parents: string[]) => string`                                          | Creates a commit and advances `reference`; returns the id.                                                                                                                                                              |
+| `commitAs`    | `(committer: Signature, author: Signature, reference: string, message: string, tree: string, parents: string[]) => string` | Same, with explicit identities and times.                                                                                                                                                                               |
+| `newCommit`   | `(message: string, tree: string, parents: string[]) => string`                                                             | Writes the commit without updating any reference.                                                                                                                                                                       |
+| `newCommitAs` | `(committer: Signature, author: Signature, message: string, tree: string, parents: string[]) => string`                    | Same, with explicit identities and times.                                                                                                                                                                               |
 
 ```ts
 interface CommitInput {
@@ -238,14 +239,32 @@ tag.verify(); // VerifyOutcome | null — shells out to GPG/SSH; slow
 Directory snapshots. Entries point at blobs, subtrees (`mode "040000"`),
 symlinks (`"120000"`), or submodules (`"160000"`).
 
+# Tree
+
+Directory snapshots: reading, walking, authoring and canonicalising git trees.
+
+A `Tree` is a content-addressed **prolly tree** and compatible with a **git
+tree**. They expose the same API. Data is stored in a content-addressed
+`FileNodeStore` holding the canonical tree structure — the flat
+`path -> "mode oid"` leaves, and also surfaced to the git object database as
+well. Identical content always yields an identical 64-hex root. Their reads are
+served straight from the flat prolly map — no gix tree decode — and their git
+tree oid is _derived_ by serialising the tree and hashing it, without touching
+the git object database.
+
+See [Tree](tree.md) for the full reference (prolly-backed reads, id derivation,
+and the `TreeBuilder`).
+
 ### `Repository`
 
-| Method      | Signature                                                | Notes                                                                                                                                                                                |
-| ----------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `findTree`  | `(id: string) => Tree`                                   | Throws when missing or not a tree.                                                                                                                                                   |
-| `writeTree` | `(entries: TreeItemInput[]) => string`                   | Builds a tree object from explicit entries; returns the id.                                                                                                                          |
-| `editTree`  | `(baseTreeId: string, edits: TreeEditInput[]) => string` | Applies upserts/removals on top of a base tree; returns the new tree id. Intermediate trees along nested paths are created automatically; now-empty subtrees are pruned, like `git`. |
-| `emptyTree` | `() => Tree`                                             | The well-known empty tree (`4b825dc6…`), even when it is not in the database.                                                                                                        |
+| Method               | Signature                                                | Notes                                                                                                                                                                                |
+| -------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `findTree`           | `(id: string) => Tree`                                   | Throws when missing or not a tree.                                                                                                                                                   |
+| `writeTree`          | `(entries: TreeItemInput[]) => string`                   | Builds a tree object from explicit entries; returns the id.                                                                                                                          |
+| `editTree`           | `(baseTreeId: string, edits: TreeEditInput[]) => string` | Applies upserts/removals on top of a base tree; returns the new tree id. Intermediate trees along nested paths are created automatically; now-empty subtrees are pruned, like `git`. |
+| `emptyTree`          | `() => Tree`                                             | The well-known empty tree (`4b825dc6…`), even when it is not in the database.                                                                                                        |
+| `prollyTree`         | `(root: string) => Tree`                                 | Opens the prolly-backed tree for a prolly root (64-hex).                                                                                                                             |
+| `prollyTreeFromTree` | `(treeId: string) => GenericTreeRef`                     | Flattens a single git tree into the prolly store; returns `{ root, nodeStore }`.                                                                                                     |
 
 ```ts
 interface TreeItemInput {
@@ -275,6 +294,7 @@ tree.id; // hex id
 tree.entries; // TreeEntry[] — all direct entries
 tree.entry("file.txt"); // TreeEntry | null — single-level lookup by name
 tree.entryByPath("a/b/c.txt"); // Entry | null — nested lookup, follows subtrees
+tree.canonicalise(); // 64-hex prolly root — the canonical form of this tree
 ```
 
 ```ts
@@ -297,6 +317,26 @@ entry.treeId; // id of the tree it was resolved from
 entry.isTree(); // true for directories ("040000")
 entry.asTree(); // Tree | null — resolve directory entries for further traversal
 ```
+
+### Prolly-backed trees
+
+```ts
+// Canonicalise a git tree into the repository's prolly node store.
+const root = repo.findTree(repo.headCommit().treeId).canonicalise(); // 64-hex
+
+// Rebuild the tree from the prolly root alone — same entries, same derived git id.
+const tree = repo.prollyTree(root);
+tree.id === repo.findTree(repo.headCommit().treeId).id; // true
+```
+
+Prolly-backed trees answer `entries`, `len`, `get`, `getById`, `entry`,
+`entryByPath`, `walk` and `intoEntries` from the flat prolly map — no gix tree
+decode, no object-database lookup. Directory entries carry mode `"040000"` and a
+derived git tree oid.
+
+Authoring is prolly-native too: `TreeBuilder` buffers edits in a
+content-addressed prolly tree and `write()` canonicalises the result directly,
+without building a git tree. See the [Trees API](tree.md).
 
 ## Working example
 

@@ -18,7 +18,7 @@ areas:
      filter drivers, `git-remote-gcrypt` compatible entire repository
      encryption, manifest creation/decryption, and packfile AES /
      ChaCha20-Poly1305 payload encryption.
-   - `RepoManifest` & Manifest Functions: `serializeManifest` and
+   - `RepoManifest` & Manifest Functions: `serialiseManifest` and
      `parseManifest` for `git-remote-gcrypt` manifest handling (refs, packs,
      keep list, remote repository ID).
    - `CryptFilterOptions`: Configuration for `clean`, `smudge`, and `diff` Git
@@ -178,7 +178,7 @@ filters, manifest handling, and packfile encryption.
 
 ```ts
 class Crypto {
-  isInitialized(): boolean;
+  isInitialised(): boolean;
   mode(): CryptoMode;
   keyDir(): string;
   generateKey(): SymmetricCryptoKey;
@@ -227,7 +227,7 @@ interface RepoManifest {
   extensions: string[];
 }
 
-function serializeManifest(manifest: RepoManifest): string;
+function serialiseManifest(manifest: RepoManifest): string;
 function parseManifest(text: string): RepoManifest;
 ```
 

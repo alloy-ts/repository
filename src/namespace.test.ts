@@ -27,7 +27,7 @@ afterAll(() => {
 });
 
 describe("Reference namespaces (src/namespace.rs)", () => {
-  test("namespaceExpand() canonicalizes namespace names", () => {
+  test("namespaceExpand() canonicalises namespace names", () => {
     expect(namespaceExpand("foo")).toBe("refs/namespaces/foo/");
     expect(namespaceExpand("foo/bar")).toBe("refs/namespaces/foo/refs/namespaces/bar/");
     expect(() => namespaceExpand("refs/namespaces/x/")).toThrow();

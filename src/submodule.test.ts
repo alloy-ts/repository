@@ -18,7 +18,7 @@ function git(args: string, cwd: string) {
 // ---------------------------------------------------------------------------
 // Fixture 1: a parent repository with a fully-checked-out submodule.
 // Used by the read (Tier A) and write (Phase 1) suites, which require an
-// already-initialized submodule (a real HEAD to read / record).
+// already-initialised submodule (a real HEAD to read / record).
 // ---------------------------------------------------------------------------
 let fixture: string;
 let repo: Repository;
@@ -142,14 +142,14 @@ describe("Submodule write API (Phase 1)", () => {
     expect(sm.indexId()).toBe(sm.headId());
   });
 
-  test("addFinalize() stages .gitmodules into the parent index", () => {
+  test("addFinalise() stages .gitmodules into the parent index", () => {
     const sm = repo.submodule("child")!;
-    // Touch .gitmodules so its blob differs, then finalize.
+    // Touch .gitmodules so its blob differs, then finalise.
     writeFileSync(
       join(fixture, "parent", ".gitmodules"),
       '[submodule "child"]\n\tpath = child\n\turl = file://x\n',
     );
-    sm.addFinalize();
+    sm.addFinalise();
     // The staged blob should be re-readable from the index as a gitlink companion.
     const staged = execSync("git ls-files --stage .gitmodules", {
       cwd: join(fixture, "parent"),

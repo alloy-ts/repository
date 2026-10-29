@@ -13,7 +13,7 @@ use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::replace::{ReplaceOptions, ReplaceResult};
 use crate::repository::Repository;
 use crate::tag::Tag;
-use crate::tree::Tree;
+use crate::tree::{Tree, TreeStore};
 
 /// The kind of a git object, mirroring libgit2's `ObjectType`.
 ///
@@ -183,6 +183,20 @@ impl Object {
         self.id.to_string()
     }
 
+    /// Mirror this object and any objects reachable from it into the repository's
+    /// canonical prolly node store.
+    ///
+    /// A blob mirrors just itself; a tree, commit, or tag mirrors its whole
+    /// subgraph. Returns the [`TreeStore`]: `root` is the content id of the
+    /// top-level prolly tree and is reproducible for identical object content.
+    /// This generalises the commit-only mirror onto every object kind, reusing the
+    /// same engine as [`crate::tree::prolly_mirror_objects`].
+    #[napi]
+    pub fn prolly_tree(&self) -> napi::Result<TreeStore> {
+        let r = thread_local(&self.repo);
+        crate::tree::prolly_mirror_objects(&r, &[self.id], &[])
+    }
+
     /// The object kind (`"blob"`, `"tree"`, `"commit"`, or `"tag"`).
     #[napi(getter)]
     pub fn kind(&self) -> String {
@@ -278,10 +292,7 @@ impl Object {
     #[napi]
     pub fn as_tree(&self) -> napi::Result<Option<Tree>> {
         Ok(match &self.inner {
-            gix::objs::Object::Tree(_) => Some(Tree {
-                repo: Arc::clone(&self.repo),
-                id: self.id,
-            }),
+            gix::objs::Object::Tree(_) => Some(crate::tree::build_tree(&self.repo, self.id)?),
             _ => None,
         })
     }
@@ -332,10 +343,7 @@ impl Object {
         let peeled = obj
             .peel_to_kind(gix::object::Kind::Tree)
             .map_err(|e| err("peel_to_tree", e))?;
-        Ok(Tree {
-            repo: Arc::clone(&self.repo),
-            id: peeled.id,
-        })
+        Ok(crate::tree::build_tree(&self.repo, peeled.id)?)
     }
 
     /// Follow tag/commit objects until a blob is reached, returning it.
@@ -446,7 +454,7 @@ impl Object {
     /// Build an `Object` from a [`Tree`], resolving its content by id.
     #[napi]
     pub fn from_tree(tree: &Tree) -> napi::Result<Object> {
-        build_object(&tree.repo, tree.id)
+        build_object(&tree.repo, tree.materialize()?)
     }
 
     /// Build an `Object` from a [`Tag`], resolving its content by id.
@@ -525,6 +533,17 @@ pub(crate) fn parse_hash_kind_ci(s: &str) -> Option<gix::hash::Kind> {
         "sha1" => Some(gix::hash::Kind::Sha1),
         "sha256" => Some(gix::hash::Kind::Sha256),
         _ => None,
+    }
+}
+
+/// Resolve an optional object-format name to a [`gix::hash::Kind`], defaulting to SHA-1
+/// (libgit2's default for the zero / empty-object ids). Used by the `Oid` factories so
+/// that `"sha256"` selects the SHA-256 empty/zero id.
+pub(crate) fn oid_kind_or_default(format: Option<&str>) -> napi::Result<gix::hash::Kind> {
+    match format {
+        None => Ok(gix::hash::Kind::Sha1),
+        Some(s) => parse_hash_kind_ci(s)
+            .ok_or_else(|| err_str("Oid", format!("unknown object hash kind {s:?}"))),
     }
 }
 
@@ -621,6 +640,8 @@ impl Oid {
     pub fn format(&self) -> String {
         match self.inner.kind() {
             gix::hash::Kind::Sha1 => "sha1",
+            // `gix::hash::Kind` is `#[non_exhaustive]`; any other (future) kind
+            // is still a 32-byte-or-larger digest and is reported as `sha256`.
             _ => "sha256",
         }
         .to_string()
@@ -667,14 +688,31 @@ impl Oid {
     /// `Oid::ZERO_SHA1` / `Oid::ZERO_SHA256`.
     #[napi(factory)]
     pub fn zero(format: Option<String>) -> napi::Result<Self> {
-        let kind = match format.as_deref() {
-            None => gix::hash::Kind::Sha1,
-            Some(other) => parse_hash_kind_ci(other).ok_or_else(|| {
-                err_str("Oid.zero", format!("unknown object hash kind {other:?}"))
-            })?,
-        };
+        let kind = oid_kind_or_default(format.as_deref())?;
         Ok(Self {
             inner: gix::hash::ObjectId::null(kind),
+        })
+    }
+
+    /// The id of an empty blob for `format` (`"sha1"` by default, or `"sha256"`).
+    /// SHA-256 repositories store the 32-byte empty-blob id, so this is the
+    /// SHA-256-aware counterpart of libgit2's empty-blob id.
+    #[napi(factory)]
+    pub fn empty_blob(format: Option<String>) -> napi::Result<Self> {
+        let kind = oid_kind_or_default(format.as_deref())?;
+        Ok(Self {
+            inner: gix::hash::ObjectId::empty_blob(kind),
+        })
+    }
+
+    /// The id of an empty tree for `format` (`"sha1"` by default, or `"sha256"`).
+    /// SHA-256 repositories store the 32-byte empty-tree id, so this is the
+    /// SHA-256-aware counterpart of libgit2's empty-tree id.
+    #[napi(factory)]
+    pub fn empty_tree(format: Option<String>) -> napi::Result<Self> {
+        let kind = oid_kind_or_default(format.as_deref())?;
+        Ok(Self {
+            inner: gix::hash::ObjectId::empty_tree(kind),
         })
     }
 }
@@ -726,11 +764,7 @@ pub fn oid_is_zero(id: String) -> bool {
 /// `sha256`. This is libgit2's `Oid::ZERO_SHA1` / `Oid::ZERO_SHA256`.
 #[napi]
 pub fn oid_zero(format: Option<String>) -> napi::Result<String> {
-    let kind = match format.as_deref() {
-        None => gix::hash::Kind::Sha1,
-        Some(other) => parse_hash_kind_ci(other)
-            .ok_or_else(|| err_str("oid_zero", format!("unknown object hash kind {other:?}")))?,
-    };
+    let kind = oid_kind_or_default(format.as_deref())?;
     Ok(gix::hash::ObjectId::null(kind).to_string())
 }
 

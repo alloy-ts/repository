@@ -667,7 +667,7 @@ impl Index {
         })
     }
 
-    /// Serialize the index to bytes without touching the file system (useful for bare
+    /// Serialise the index to bytes without touching the file system (useful for bare
     /// repositories, archives, and network transport). Returns the written version, the
     /// trailing checksum (absent when `skipHash`), and the encoded bytes.
     #[napi]
@@ -1618,7 +1618,7 @@ impl ChunkIndex {
         self.inner.planned_storage_size() as i64
     }
 
-    /// Write the planned chunks, in order, using the provided chunk data, returning the serialized
+    /// Write the planned chunks, in order, using the provided chunk data, returning the serialised
     /// chunk file (table of contents + chunks + sentinel). Each `ChunkInput.data` length must match
     /// the size planned for that `kind` via [`ChunkIndex::plan_chunk`].
     #[napi]

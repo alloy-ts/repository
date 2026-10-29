@@ -34,7 +34,7 @@ async function main() {
     assert.equal(note.blobId.length, 40); // equals git2's Note.id()
     console.log("notesFor()[0]:            ", JSON.stringify(note));
 
-    // contentBytes mirrors the text as raw bytes (napi serializes object byte
+    // contentBytes mirrors the text as raw bytes (napi serialises object byte
     // fields as number[]).
     assert.ok(Array.isArray(note.contentBytes));
     assert.equal(Buffer.from(note.contentBytes).toString("utf8"), "review: looks good");

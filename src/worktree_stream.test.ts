@@ -34,7 +34,7 @@ afterAll(() => {
 });
 
 describe("Repository.worktreeStream (src/worktree.rs)", () => {
-  test("materializes the HEAD tree into typed entries", async () => {
+  test("materialises the HEAD tree into typed entries", async () => {
     const treeId = repo.headCommit().treeId;
     const entries = await repo.worktreeStream(treeId);
 

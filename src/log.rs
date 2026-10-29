@@ -49,7 +49,7 @@ pub struct CommitInfo {
 /// - `Date` — commits ordered by commit time, newest first (`git log --date-order`).
 /// - `Topo` — strict topological order (`git log --topo-order`): a commit is emitted before
 ///   any of its descendants. Computed by an in-memory topological sort over the full walk, so
-///   it materializes the whole history (and is what powers [`Repository::log_graph`]).
+///   it materialises the whole history (and is what powers [`Repository::log_graph`]).
 #[napi(string_enum)]
 pub enum LogOrder {
     Default,
@@ -224,7 +224,7 @@ fn resolve_tip(
 
 /// Walk the full history from `tip` (honoring `first_parent`) and return every commit that
 /// passes the `since`/`until`/`author`/`paths` filters, paired with its parent and own ids.
-/// The whole history is materialized because topological ordering and graph layout require the
+/// The whole history is materialised because topological ordering and graph layout require the
 /// full commit graph in memory.
 fn collect_filtered(
     r: &gix::Repository,

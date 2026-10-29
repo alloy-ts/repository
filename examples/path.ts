@@ -4,9 +4,9 @@ import { join } from "node:path";
 
 import {
   pathIsAbsolute,
-  pathNormalize,
-  pathNormalizeAndClean,
-  pathNormalizeSaturating,
+  pathNormalise,
+  pathNormaliseAndClean,
+  pathNormaliseSaturating,
   pathRealpath,
   pathRealpathWithCwd,
   pathRelativizeWithPrefix,
@@ -52,23 +52,23 @@ try {
 rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 
 // ---------------------------------------------------------------------------
-// 2. normalize: virtual `..` elimination without filesystem access
+// 2. normalise: virtual `..` elimination without filesystem access
 // ---------------------------------------------------------------------------
-console.log("\n=== pathNormalize ===");
+console.log("\n=== pathNormalise ===");
 const cwd = "/cwd";
-console.log(`normalize("a/./b/c/.././..") -> ${pathNormalize("a/./b/c/.././..", cwd)}`);
-console.log(`normalize("/a/../b/..")       -> ${pathNormalize("/a/../b/..", cwd)}`);
-console.log(`normalize("/base/a/..")       -> ${pathNormalize("/base/a/..", cwd)}`);
-console.log(`normalize("./a/..")           -> ${pathNormalize("./a/..", cwd)}`);
+console.log(`normalise("a/./b/c/.././..") -> ${pathNormalise("a/./b/c/.././..", cwd)}`);
+console.log(`normalise("/a/../b/..")       -> ${pathNormalise("/a/../b/..", cwd)}`);
+console.log(`normalise("/base/a/..")       -> ${pathNormalise("/base/a/..", cwd)}`);
+console.log(`normalise("./a/..")           -> ${pathNormalise("./a/..", cwd)}`);
 // Leading dots and duplicate separators are preserved by design:
-console.log(`normalize(".///")             -> ${pathNormalize(".///", cwd)}`);
-console.log(`normalize("a//b")             -> ${pathNormalize("a//b", cwd)}`);
+console.log(`normalise(".///")             -> ${pathNormalise(".///", cwd)}`);
+console.log(`normalise("a//b")             -> ${pathNormalise("a//b", cwd)}`);
 // Popping past the current dir is inconsistent -> null; saturating clamps instead:
-console.log(`normalize("../../r") -> ${pathNormalize("../../r", "/c")}`);
-console.log(`normalizeSaturating("../../r") -> ${pathNormalizeSaturating("../../r", "/c")}`);
-// normalizeAndClean also strips dot components and duplicate/trailing separators:
-console.log(`normalizeAndClean("a//b/.") -> ${pathNormalizeAndClean("a//b/.", cwd)}`);
-console.log(`normalizeAndClean("a/../..") -> ${pathNormalizeAndClean("a/../..", cwd)}`);
+console.log(`normalise("../../r") -> ${pathNormalise("../../r", "/c")}`);
+console.log(`normaliseSaturating("../../r") -> ${pathNormaliseSaturating("../../r", "/c")}`);
+// normaliseAndClean also strips dot components and duplicate/trailing separators:
+console.log(`normaliseAndClean("a//b/.") -> ${pathNormaliseAndClean("a//b/.", cwd)}`);
+console.log(`normaliseAndClean("a/../..") -> ${pathNormaliseAndClean("a/../..", cwd)}`);
 
 // ---------------------------------------------------------------------------
 // 3. Display paths: relativize, absolute check, separators

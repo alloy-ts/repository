@@ -206,9 +206,9 @@ impl Task for CloneTask {
 impl Repository {
     /// Clone a repository from `url` into `path`.
     ///
-    /// When `path` is omitted, the destination defaults to a sanitized repository name
+    /// When `path` is omitted, the destination defaults to a sanitised repository name
     /// derived from `url` in the current working directory (like `git clone <url>`).
-    /// Async: the (blocking) network transfer runs on a libuv worker thread and resolves a
+    /// Async: the (blocking) network transfer runs on a libuv task thread and resolves a
     /// `Promise<Repository>`.
     ///
     /// Advanced options (bare, depth, filter, progress, auth) are passed via the trailing
@@ -263,7 +263,7 @@ impl Repository {
         is_valid_git_url(&url)
     }
 
-    /// Extract and sanitize a repository name from `url` (used as the default clone
+    /// Extract and sanitise a repository name from `url` (used as the default clone
     /// destination). Throws on an invalid URL. Pure helper, also available on [`Cloner`].
     #[napi]
     pub fn extract_repo_name(url: String) -> napi::Result<String> {
@@ -308,7 +308,7 @@ pub struct CloneOptions {
 /// A configurable clone entry point, mirroring the ergonomics of `git clone`.
 ///
 /// Unlike the low-level [`Repository::clone`], a `Cloner` carries an authenticator and
-/// lets `path` be omitted — the destination then defaults to a sanitized repository name
+/// lets `path` be omitted — the destination then defaults to a sanitised repository name
 /// derived from `url`, exactly like `git clone <url>`.
 #[napi]
 pub struct Cloner {
@@ -325,9 +325,9 @@ impl Cloner {
 
     /// Clone `url` into `path`.
     ///
-    /// When `path` is omitted, the destination defaults to a sanitized repository name
+    /// When `path` is omitted, the destination defaults to a sanitised repository name
     /// derived from `url` in the current working directory. Async: the blocking network
-    /// transfer runs on a libuv worker thread and resolves a `Promise<Repository>`.
+    /// transfer runs on a libuv task thread and resolves a `Promise<Repository>`.
     ///
     /// Errors if `path` already exists (mirrors `git clone` and the classic `Cloner`).
     #[napi(ts_return_type = "Promise<Repository>")]
@@ -377,7 +377,7 @@ impl Cloner {
         is_valid_git_url(&url)
     }
 
-    /// Extract and sanitize a repository name from `url` (used as the default destination).
+    /// Extract and sanitise a repository name from `url` (used as the default destination).
     /// Throws on an invalid URL.
     #[napi]
     pub fn extract_repo_name(url: String) -> napi::Result<String> {
@@ -421,7 +421,7 @@ fn is_valid_git_url(url: &str) -> bool {
     true
 }
 
-/// Extract and sanitize a repository name from a Git `url`, validating URL syntax first
+/// Extract and sanitise a repository name from a Git `url`, validating URL syntax first
 /// (throws on an invalid URL). This is the strict, URL-only variant exposed for callers that
 /// want validation; the automatic destination used when `path` is omitted is derived by the
 /// more lenient [`default_destination_name`], which also accepts bare local filesystem paths.
@@ -438,18 +438,18 @@ fn extract_repo_name(url: &str) -> napi::Result<String> {
     if name.is_empty() {
         return Err(napi::Error::from_reason(format!("invalid git url: {url}")));
     }
-    let sanitized: String = name
+    let sanitised: String = name
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
         .collect();
-    if sanitized.is_empty() {
+    if sanitised.is_empty() {
         return Err(napi::Error::from_reason(format!("invalid git url: {url}")));
     }
-    Ok(sanitized)
+    Ok(sanitised)
 }
 
 /// Derive a default clone destination name from `url`, handling both Git URLs and bare local
-/// filesystem paths (like `git clone <url>`). Strips a trailing `.git` and sanitizes the
+/// filesystem paths (like `git clone <url>`). Strips a trailing `.git` and sanitises the
 /// result. This is intentionally more lenient than [`extract_repo_name`] so that local-path
 /// clones also get a sensible default directory name.
 fn default_destination_name(url: &str) -> napi::Result<String> {
@@ -461,16 +461,16 @@ fn default_destination_name(url: &str) -> napi::Result<String> {
             "cannot derive a repository name from: {url}"
         )));
     }
-    let sanitized: String = name
+    let sanitised: String = name
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
         .collect();
-    if sanitized.is_empty() {
+    if sanitised.is_empty() {
         return Err(napi::Error::from_reason(format!(
             "cannot derive a repository name from: {url}"
         )));
     }
-    Ok(sanitized)
+    Ok(sanitised)
 }
 
 /// Convert an SSH URL (`git@host:user/repo` or `ssh://git@host/user/repo`) to its HTTPS

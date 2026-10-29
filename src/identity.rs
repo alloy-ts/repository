@@ -1,7 +1,7 @@
 use napi_derive::napi;
 
 use crate::error::{err, thread_local};
-use crate::object::{lossy, rfc3339};
+use crate::object::lossy;
 use crate::repository::Repository;
 
 /// A person with name and email (no timestamp), mirroring `gix_actor::Identity`.
@@ -23,7 +23,6 @@ pub struct Signature {
     pub email: String,
     pub time: i64,
     pub timezone_offset: i32,
-    pub date: Option<String>,
 }
 
 /// Build a NAPI [`Signature`] from raw actor parts.
@@ -33,7 +32,6 @@ pub(crate) fn to_signature(name: &[u8], email: &[u8], seconds: i64, offset: i32)
         email: lossy(email),
         time: seconds,
         timezone_offset: offset,
-        date: Some(rfc3339(seconds, offset)),
     }
 }
 
@@ -76,7 +74,7 @@ pub fn signature_to_identity(sig: Signature) -> Identity {
     }
 }
 
-/// Serialize a signature to the git actor format `Name <email> <seconds> <offset>`.
+/// Serialise a signature to the git actor format `Name <email> <seconds> <offset>`.
 #[napi]
 pub fn signature_to_raw(sig: Signature) -> napi::Result<String> {
     let s = signature_from_dto(&sig)?;
@@ -86,7 +84,7 @@ pub fn signature_to_raw(sig: Signature) -> napi::Result<String> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// Serialize an identity to the git identity format `Name <email>`
+/// Serialise an identity to the git identity format `Name <email>`
 /// (a signature without timestamp).
 #[napi]
 pub fn identity_to_raw(identity: Identity) -> napi::Result<String> {

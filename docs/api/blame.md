@@ -90,10 +90,10 @@ interface BlameOptions {
 }
 ```
 
-> **Note on `undefined` vs `null`:** napi serializes absent optional _object_
+> **Note on `undefined` vs `null`:** napi serialises absent optional _object_
 > fields (`sourceFileName`, `author`, `committer`, `summary`, `blamePath`) as
 > `undefined` in JavaScript, not `null`. Only `Option` values returned directly
-> from a function are materialized as `null`.
+> from a function are materialised as `null`.
 
 `entries` cover the entire file with no gaps and in ascending
 `startInBlamedFile` order, so `sum(entry.len)` equals the number of blamed

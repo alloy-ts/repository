@@ -45,6 +45,33 @@ function makeEntryTree(): { treeId: string; blobId: string } {
   return { treeId, blobId };
 }
 
+function makeNestedTree(): {
+  treeId: string;
+  root: string;
+  ids: Record<string, string>;
+} {
+  const fileId = repo.writeBlob(Buffer.from("file content\n"));
+  const topId = repo.writeBlob(Buffer.from("top content\n"));
+  const cId = repo.writeBlob(Buffer.from("nested c\n"));
+  const dId = repo.writeBlob(Buffer.from("a d\n"));
+  const builder = Tree.build(repo);
+  builder.upsert("file.txt", fileId);
+  builder.upsert("top.txt", topId);
+  builder.upsert("a/b/c.txt", cId);
+  builder.upsert("a/d.txt", dId);
+  const tree = builder.write();
+  return {
+    treeId: tree.id,
+    root: tree.canonicalise(),
+    ids: {
+      "file.txt": fileId,
+      "top.txt": topId,
+      "a/b/c.txt": cId,
+      "a/d.txt": dId,
+    },
+  };
+}
+
 describe("Repository trees", () => {
   test("findTree resolves the commit's tree", () => {
     const tree = repo.findTree(repo.headCommit().treeId);
@@ -99,6 +126,144 @@ describe("Repository trees", () => {
     expect(tree.entryByPath("a/missing/b.txt")).toBeNull();
     expect(tree.entryByPath("missing/b/c.txt")).toBeNull();
     expect(tree.entryByPath("")).toBeNull();
+  });
+
+  test("len / isEmpty report the direct entry count", () => {
+    const { treeId, blobId } = makeEntryTree();
+    const tree = repo.findTree(treeId);
+    expect(tree.len()).toBe(1);
+    expect(tree.isEmpty).toBe(false);
+    expect(repo.findTree(repo.emptyTree().id).isEmpty).toBe(true);
+    // entries(), get(), and getById() all agree on the same entry.
+    expect(tree.get(0)?.id).toBe(blobId);
+    expect(tree.get(1)).toBeNull();
+  });
+
+  test("getById() looks up an entry by object id", () => {
+    const { treeId, blobId } = makeEntryTree();
+    const tree = repo.findTree(treeId);
+    expect(tree.getById(blobId)?.filename).toBe("file.txt");
+    expect(tree.getById("0".repeat(40))).toBeNull();
+  });
+
+  test("asObject() views the tree as a generic Object", () => {
+    const { treeId } = makeEntryTree();
+    const obj = repo.findTree(treeId).asObject();
+    expect(obj.id).toBe(treeId);
+    expect(obj.kind).toBe("tree");
+  });
+
+  test("TreeEntry exposes name, filemode, filemodeRaw, and toObject", () => {
+    const { treeId, blobId } = makeEntryTree();
+    const entry = repo.findTree(treeId).entries[0];
+    expect(entry.name).toBe("file.txt"); // alias of `filename`
+    expect(entry.filemode).toBe(0o100644);
+    expect(entry.filemodeRaw).toBe(0o100644);
+    const obj = entry.toObject(repo);
+    expect(obj.kind).toBe("blob");
+    expect(obj.id).toBe(blobId);
+  });
+
+  test("canonicalise() returns a 64-hex prolly root for a git tree", () => {
+    const { treeId } = makeEntryTree();
+    const root = repo.findTree(treeId).canonicalise();
+    expect(root).toMatch(/^[0-9a-f]{64}$/);
+    // Deterministic: identical content always yields an identical root.
+    expect(repo.findTree(treeId).canonicalise()).toBe(root);
+  });
+
+  test("prollyTree(root) reconstructs the tree and its git id matches", () => {
+    const { treeId } = makeEntryTree();
+    const root = repo.findTree(treeId).canonicalise();
+    const tree = repo.prollyTree(root);
+    // The derived git oid equals the original tree (git stays the cache).
+    expect(tree.id).toBe(treeId);
+    // canonicalise short-circuits back to the same root.
+    expect(tree.canonicalise()).toBe(root);
+    expect(tree.entries[0].filename).toBe("file.txt");
+    expect(tree.entryByPath("file.txt")?.id).toBe(
+      repo.findTree(treeId).entryByPath("file.txt")?.id,
+    );
+  });
+
+  test("prolly-backed reads (served from the flat map) match the git tree", () => {
+    const { treeId, root, ids } = makeNestedTree();
+    const gitTree = repo.findTree(treeId);
+    const prollyTree = repo.prollyTree(root);
+
+    // The derived git oid matches the original tree (git stays the cache).
+    expect(prollyTree.id).toBe(treeId);
+
+    // entries: same names, modes, and derived subtree oids.
+    const gitEntries = gitTree.entries;
+    const prollyEntries = prollyTree.entries;
+    expect(prollyEntries.map((e) => e.filename).sort()).toEqual(
+      gitEntries.map((e) => e.filename).sort(),
+    );
+    for (const name of ["file.txt", "top.txt", "a"]) {
+      const g = gitEntries.find((e) => e.filename === name)!;
+      const p = prollyEntries.find((e) => e.filename === name)!;
+      expect(p.mode).toBe(g.mode);
+      expect(p.id).toBe(g.id);
+    }
+    // Directory entries are advertised as trees with a derived git oid.
+    const dir = prollyEntries.find((e) => e.filename === "a")!;
+    expect(dir.mode).toBe("040000");
+    expect(dir.id).toBe(gitEntries.find((e) => e.filename === "a")!.id);
+
+    // len / get / getById / entry agree with the git-backed tree.
+    expect(prollyTree.len()).toBe(gitTree.len());
+    for (let i = 0; i < gitTree.len(); i++) {
+      expect(prollyTree.get(i)?.id).toBe(gitTree.get(i)?.id);
+      expect(prollyTree.get(i)?.filename).toBe(gitTree.get(i)?.filename);
+    }
+    for (const name of ["file.txt", "top.txt", "a"]) {
+      expect(prollyTree.entry(name)?.id).toBe(gitTree.entry(name)?.id);
+      expect(prollyTree.getById(gitTree.entry(name)!.id)?.filename).toBe(name);
+    }
+
+    // entryByPath resolves leaves and directories identically.
+    for (const path of ["file.txt", "top.txt", "a", "a/b/c.txt", "a/d.txt"]) {
+      const g = gitTree.entryByPath(path);
+      const p = prollyTree.entryByPath(path);
+      expect(p?.id).toBe(g?.id);
+      expect(p?.isTree()).toBe(g?.isTree());
+      expect(p?.filename).toBe(g?.filename);
+    }
+    // Leaf ids are the actual blobs (read straight off the flat map).
+    expect(prollyTree.entryByPath("file.txt")?.id).toBe(ids["file.txt"]);
+    expect(prollyTree.entryByPath("a/b/c.txt")?.id).toBe(ids["a/b/c.txt"]);
+
+    // walk yields every leaf with matching path/mode/id.
+    const key = (w: { path: string; mode: string; id: string }) => `${w.path}:${w.mode}:${w.id}`;
+    expect(prollyTree.walk().map(key).sort()).toEqual(gitTree.walk().map(key).sort());
+    // walk with contents still returns the blob bytes for leaves.
+    const withContent = prollyTree.walk({ contents: true });
+    const fileEntry = withContent.find((w) => w.path === "file.txt")!;
+    expect(fileEntry.content).toBeInstanceOf(Buffer);
+    expect(fileEntry.content!.toString()).toBe("file content\n");
+
+    // intoEntries returns live Entry objects matching the git tree's.
+    const gitInto = gitTree.intoEntries();
+    const prollyInto = prollyTree.intoEntries();
+    expect(prollyInto.map((e) => e.filename).sort()).toEqual(gitInto.map((e) => e.filename).sort());
+    for (const name of ["file.txt", "top.txt", "a"]) {
+      const g = gitInto.find((e) => e.filename === name)!;
+      const p = prollyInto.find((e) => e.filename === name)!;
+      expect(p.id).toBe(g.id);
+      expect(p.isTree()).toBe(g.isTree());
+    }
+  });
+
+  test("TreeBuilder.writeProlly returns the canonical prolly root", () => {
+    const blobId = repo.writeBlob(Buffer.from("prolly write\n"));
+    const builder = Tree.build(repo);
+    builder.file("p.txt", blobId);
+    const root = builder.writeProlly();
+    expect(root).toMatch(/^[0-9a-f]{64}$/);
+    // The git tree written alongside has the same canonical root.
+    const gitTree = builder.write();
+    expect(gitTree.canonicalise()).toBe(root);
   });
 
   test("writeTree() creates a tree and tryFindObject() retrieves it", () => {

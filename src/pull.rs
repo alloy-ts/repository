@@ -15,7 +15,7 @@ use crate::merge::MergeConflict;
 use crate::progress::ProgressEvent;
 use crate::remote::FetchTags;
 use crate::repository::Repository;
-use crate::revision::WalkOptions;
+use crate::rev_walk::WalkOptions;
 use crate::stash::StashSaveOptions;
 
 use gix::refs::transaction::PreviousValue;
@@ -311,7 +311,7 @@ impl Task for PullTask {
                     // Cannot write a merge commit; leave the branch as-is and surface conflicts.
                     applied_new_id = Some(head_commit_id.clone());
                     applied_conflicts = Some(merged.conflict_details);
-                    // `onConflict: "leave"` — materialize the conflicted index and conflict
+                    // `onConflict: "leave"` — materialise the conflicted index and conflict
                     // markers into the working tree (git-like) instead of leaving it untouched.
                     // The branch ref is NOT advanced and the auto-stash is left in place for the
                     // caller to pop after resolving.
