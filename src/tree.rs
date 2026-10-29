@@ -1,8 +1,13 @@
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
 use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
+use prolly::{
+    BatchBuilder, BlobStore, Config as GenericConfig, DEFAULT_INLINE_VALUE_THRESHOLD,
+    FileBlobStore, FileNodeStore, Prolly as Store, Tree as GenericTree, ValueRef,
+};
 
 use crate::blob::{Blob, build_blob};
 use crate::entry::{DEFAULT_ENTRY_MODE, Entry, build_entry, mode_string, mode_to_entry_kind};
@@ -523,18 +528,123 @@ enum RemoveMode {
     IfLeaf,
 }
 
-/// One recorded edit, replayed onto a fresh editor when the builder is written.
-#[derive(Clone)]
+/// Parse the `removeMode` string accepted by [`TreeBuilder::remove`].
+fn parse_remove_mode(mode: &str) -> napi::Result<RemoveMode> {
+    match mode {
+        "any" => Ok(RemoveMode::Any),
+        "leaf" => Ok(RemoveMode::Leaf),
+        "ifLeaf" => Ok(RemoveMode::IfLeaf),
+        other => Err(err_str(
+            "TreeBuilder",
+            format!("invalid removeMode {other}; expected \"any\", \"leaf\", or \"ifLeaf\""),
+        )),
+    }
+}
+
+/// The wire value of a [`RemoveMode`], as stored by [`encode_edit`].
+fn remove_mode_str(mode: RemoveMode) -> &'static str {
+    match mode {
+        RemoveMode::Any => "any",
+        RemoveMode::Leaf => "leaf",
+        RemoveMode::IfLeaf => "ifLeaf",
+    }
+}
+
+/// One recorded edit, keyed by its path in the builder's prolly index.
+///
+/// Repeated edits to the same path collapse into a single entry holding the
+/// latest one, so a builder holding thousands of edits still replays in time
+/// proportional to the number of *distinct* paths.
+#[derive(Clone, Copy)]
 enum Edit {
     Upsert {
-        path: String,
         kind: gix::object::tree::EntryKind,
         oid: gix::ObjectId,
     },
     Remove {
-        path: String,
         mode: RemoveMode,
     },
+}
+
+/// Directory (relative to the git dir) holding the prolly node store.
+///
+/// [`FileNodeStore`] shards content-addressed nodes below it
+/// (`nodes/sha256/<aa>/<bb>/<cid>`), next to its `hints/` and `roots/` namespaces.
+pub(crate) const PROLLY_STORE_DIR: &str = "prolly";
+
+/// Open — creating on first use — the repository's prolly node store and the
+/// tree handle driver over it.
+pub(crate) fn open_prolly(
+    repo: &Arc<gix::ThreadSafeRepository>,
+) -> napi::Result<Store<FileNodeStore>> {
+    let root = thread_local(repo).git_dir().join(PROLLY_STORE_DIR);
+    let store = FileNodeStore::open(root).map_err(|e| err("prolly.FileNodeStore.open", e))?;
+    Ok(Store::new(store, GenericConfig::default()))
+}
+
+/// Encode an edit as the value of its prolly index entry.
+///
+/// The layout is `"{seq} {tag} {payload}"`: `"7 u 100644 <oid>"` for upserts and
+/// `"7 r ifLeaf"` for removals. `seq` is what makes last-write-wins well defined
+/// in [`TreeBuilder::get`], where an edit can be shadowed by a later removal of
+/// one of its ancestors.
+fn encode_edit(seq: u64, edit: Edit) -> Vec<u8> {
+    match edit {
+        Edit::Upsert { kind, oid } => format!("{seq} u {} {oid}", mode_string(kind)).into_bytes(),
+        Edit::Remove { mode } => format!("{seq} r {}", remove_mode_str(mode)).into_bytes(),
+    }
+}
+
+/// Decode a value produced by [`encode_edit`] back into its sequence number and edit.
+fn decode_edit(value: &[u8]) -> napi::Result<(u64, Edit)> {
+    let text = std::str::from_utf8(value).map_err(|e| err("TreeBuilder.decode_edit", e))?;
+    let mut parts = text.splitn(3, ' ');
+    let (seq, tag, payload) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(seq), Some(tag), Some(payload)) => (seq, tag, payload),
+        _ => {
+            return Err(err_str(
+                "TreeBuilder.decode_edit",
+                format!("malformed edit record {text:?}"),
+            ));
+        }
+    };
+    let seq = seq
+        .parse::<u64>()
+        .map_err(|e| err("TreeBuilder.decode_edit", e))?;
+    match tag {
+        "u" => {
+            let (mode, id) = payload.split_once(' ').ok_or_else(|| {
+                err_str(
+                    "TreeBuilder.decode_edit",
+                    format!("malformed upsert record {text:?}"),
+                )
+            })?;
+            Ok((
+                seq,
+                Edit::Upsert {
+                    kind: mode_to_entry_kind(mode)?,
+                    oid: parse_oid(id)?,
+                },
+            ))
+        }
+        "r" => Ok((
+            seq,
+            Edit::Remove {
+                mode: parse_remove_mode(payload)?,
+            },
+        )),
+        other => Err(err_str(
+            "TreeBuilder.decode_edit",
+            format!("unknown edit tag {other:?}"),
+        )),
+    }
+}
+
+/// Every strict ancestor path of `path`: `"a/b/c.txt"` yields `["a", "a/b"]`.
+fn ancestor_paths(path: &str) -> Vec<&str> {
+    path.match_indices('/')
+        .map(|(idx, _)| &path[..idx])
+        .collect()
 }
 
 /// Options for [`TreeBuilder::write`].
@@ -549,14 +659,25 @@ pub struct TreeBuilderWriteOptions {
 
 /// Incremental tree builder: record upserts/removals, then `write()` the resulting tree.
 ///
-/// Edits are buffered in memory and replayed onto a base tree (or the empty tree) at
-/// `write()` time, so intermediate builder calls never touch the object database. Open
-/// one via `Tree.build(repo, baseTreeId?)` or `new TreeBuilder(repo, baseTreeId?)`.
+/// Edits are buffered in a content-addressed prolly tree keyed by path — every
+/// `upsert()`/`remove()` write derives a new root over the previous one's nodes, so
+/// repeated edits keep their share of untouched nodes and [`TreeBuilder::get`] costs
+/// `O(log n)` instead of scanning the whole edit history. The result is materialized
+/// into git tree objects at `write()` time, so nothing reaches the object database
+/// until then. Nodes are persisted under `<git_dir>/prolly` via [`FileNodeStore`].
+///
+/// Open one via `Tree.build(repo, baseTreeId?)` or `new TreeBuilder(repo, baseTreeId?)`.
 #[napi]
 pub struct TreeBuilder {
     repo: Arc<gix::ThreadSafeRepository>,
+    /// Content-addressed node store driver for [`TreeBuilder::index`].
+    store: Store<FileNodeStore>,
+    /// The effective overlay: `path -> [`encode_edit`] payload`. Empty until the
+    /// first edit; the base tree is never copied into it.
+    index: GenericTree,
     base: Option<gix::ObjectId>,
-    log: Vec<Edit>,
+    /// Monotonic counter stamped onto each edit so that later edits win.
+    seq: u64,
 }
 
 #[napi]
@@ -575,10 +696,14 @@ impl TreeBuilder {
             }
             None => None,
         };
+        let prolly = open_prolly(&repo.inner)?;
+        let index = prolly.create();
         Ok(TreeBuilder {
             repo: Arc::clone(&repo.inner),
+            prolly,
+            index,
             base,
-            log: Vec::new(),
+            seq: 0,
         })
     }
 
@@ -590,8 +715,7 @@ impl TreeBuilder {
     pub fn upsert(&mut self, path: String, id: String, mode: Option<String>) -> napi::Result<()> {
         let kind = mode_to_entry_kind(mode.as_deref().unwrap_or(DEFAULT_ENTRY_MODE))?;
         let oid = parse_oid(&id)?;
-        self.log.push(Edit::Upsert { path, kind, oid });
-        Ok(())
+        self.stage(path, Edit::Upsert { kind, oid })
     }
 
     /// Remove the entry at `path`. `removeMode` defaults to `"any"`:
@@ -600,21 +724,8 @@ impl TreeBuilder {
     /// - `"ifLeaf"`: leave an existing tree at `path` untouched
     #[napi]
     pub fn remove(&mut self, path: String, remove_mode: Option<String>) -> napi::Result<()> {
-        let mode = match remove_mode.as_deref() {
-            None | Some("any") => RemoveMode::Any,
-            Some("leaf") => RemoveMode::Leaf,
-            Some("ifLeaf") => RemoveMode::IfLeaf,
-            Some(other) => {
-                return Err(err_str(
-                    "TreeBuilder",
-                    format!(
-                        "invalid removeMode {other}; expected \"any\", \"leaf\", or \"ifLeaf\""
-                    ),
-                ));
-            }
-        };
-        self.log.push(Edit::Remove { path, mode });
-        Ok(())
+        let mode = parse_remove_mode(remove_mode.as_deref().unwrap_or("any"))?;
+        self.stage(path, Edit::Remove { mode })
     }
 
     /// Write `content` as a blob and upsert it at `path` (intermediate trees are
@@ -646,8 +757,7 @@ impl TreeBuilder {
             .map_err(|e| err("write_blob", e))?
             .detach();
         let kind = mode_to_entry_kind(mode.as_deref().unwrap_or(DEFAULT_ENTRY_MODE))?;
-        self.log.push(Edit::Upsert { path, kind, oid });
-        Ok(())
+        self.stage(path, Edit::Upsert { kind, oid })
     }
 
     /// Look up the entry at `path` in the builder's current effective state: the last
@@ -657,31 +767,34 @@ impl TreeBuilder {
     /// tree returned by `write()`.
     #[napi]
     pub fn get(&self, path: String) -> napi::Result<Option<TreeEntry>> {
-        let mut resolved: Option<Option<TreeEntry>> = None;
-        for edit in &self.log {
-            match edit {
-                Edit::Upsert { path: p, kind, oid } if p == &path => {
-                    let filename = p.rsplit('/').next().unwrap_or(p).to_string();
-                    resolved = Some(Some(TreeEntry {
-                        mode: mode_string(*kind),
-                        filename,
-                        id: oid.to_string(),
-                    }));
-                }
-                Edit::Remove { path: p, .. } if p == &path => resolved = Some(None),
-                // Removing an ancestor takes everything below it with it.
-                Edit::Remove { path: p, .. }
-                    if path.len() > p.len()
-                        && path.starts_with(p.as_str())
-                        && path.as_bytes()[p.len()] == b'/' =>
-                {
-                    resolved = Some(None)
-                }
-                _ => {}
+        // Last-write-wins over the exact path plus any ancestor removals: removing
+        // a directory takes everything below it with it, but only if nothing was
+        // staged for a descendant afterwards.
+        let mut winner: Option<(u64, Edit)> = None;
+        for key in std::iter::once(path.as_str()).chain(ancestor_paths(&path)) {
+            let Some(value) = self
+                .prolly
+                .get(&self.index, key.as_bytes())
+                .map_err(|e| err("TreeBuilder.get", e))?
+            else {
+                continue;
+            };
+            let candidate = decode_edit(&value)?;
+            let is_exact = key.len() == path.len();
+            let cascades = is_exact || matches!(candidate.1, Edit::Remove { .. });
+            if cascades && winner.is_none_or(|(seq, _)| candidate.0 > seq) {
+                winner = Some(candidate);
             }
         }
-        if let Some(entry) = resolved {
-            return Ok(entry);
+        if let Some((_, edit)) = winner {
+            return Ok(match edit {
+                Edit::Upsert { kind, oid } => Some(TreeEntry {
+                    mode: mode_string(kind),
+                    filename: path.rsplit('/').next().unwrap_or(&path).to_string(),
+                    id: oid.to_string(),
+                }),
+                Edit::Remove { .. } => None,
+            });
         }
         let Some(base) = self.base else {
             return Ok(None);
@@ -699,10 +812,14 @@ impl TreeBuilder {
     }
 
     /// Reset the builder to an empty-tree base and drop all recorded edits.
+    ///
+    /// The prolly index is replaced by a fresh empty root; nodes written for the
+    /// discarded overlays become unreachable and stay in the node store.
     #[napi]
     pub fn clear(&mut self) {
         self.base = None;
-        self.log.clear();
+        self.index = self.prolly.create();
+        self.seq = 0;
     }
 
     /// Replay the recorded edits onto the base tree and write the resulting tree to the
@@ -744,20 +861,47 @@ impl TreeBuilder {
 }
 
 impl TreeBuilder {
-    /// Replay the edit log onto the validating facade editor.
+    /// Record `edit` at `path`, deriving a new prolly root over the previous one.
+    fn stage(&mut self, path: String, edit: Edit) -> napi::Result<()> {
+        self.seq += 1;
+        let value = encode_edit(self.seq, edit);
+        self.index = self
+            .prolly
+            .put(&self.index, path.into_bytes(), value)
+            .map_err(|e| err("TreeBuilder.put", e))?;
+        Ok(())
+    }
+
+    /// Every edit in the overlay, in path order (prolly range order — which is also
+    /// git tree order, so replays are deterministic regardless of insertion order).
+    fn edits(&self) -> napi::Result<Vec<(String, Edit)>> {
+        let mut out = Vec::new();
+        for item in self
+            .prolly
+            .range(&self.index, b"", None)
+            .map_err(|e| err("TreeBuilder.range", e))?
+        {
+            let (path, value) = item.map_err(|e| err("TreeBuilder.range", e))?;
+            let (_, edit) = decode_edit(&value)?;
+            out.push((String::from_utf8_lossy(&path).into_owned(), edit));
+        }
+        Ok(out)
+    }
+
+    /// Replay the overlay onto the validating facade editor.
     fn replay_facade(
         &self,
         r: &gix::Repository,
         editor: &mut gix::object::tree::Editor<'_>,
     ) -> napi::Result<()> {
-        for edit in &self.log {
+        for (path, edit) in self.edits()? {
             match edit {
-                Edit::Upsert { path, kind, oid } => {
+                Edit::Upsert { kind, oid } => {
                     editor
-                        .upsert(path.as_str(), *kind, *oid)
+                        .upsert(path.as_str(), kind, oid)
                         .map_err(|e| err("TreeBuilder.upsert", e))?;
                 }
-                Edit::Remove { path, mode } => match mode {
+                Edit::Remove { mode } => match mode {
                     RemoveMode::Any => {
                         editor
                             .remove(path.as_str())
@@ -771,7 +915,7 @@ impl TreeBuilder {
                     RemoveMode::IfLeaf => {
                         // The facade editor has no `remove_if_leaf()`; emulate it against
                         // the base tree (same approach as `Repository::edit_tree`).
-                        let is_tree = base_entry_is_tree(r, self.base, path)?;
+                        let is_tree = base_entry_is_tree(r, self.base, &path)?;
                         if is_tree == Some(false) {
                             editor
                                 .remove(path.as_str())
@@ -784,29 +928,29 @@ impl TreeBuilder {
         Ok(())
     }
 
-    /// Replay the edit log onto the unvalidated plumbing editor.
+    /// Replay the overlay onto the unvalidated plumbing editor.
     fn replay_plumbing(&self, editor: &mut gix::objs::tree::Editor<'_>) -> napi::Result<()> {
-        for edit in &self.log {
+        for (path, edit) in self.edits()? {
             match edit {
-                Edit::Upsert { path, kind, oid } => {
+                Edit::Upsert { kind, oid } => {
                     editor
-                        .upsert(components(path), *kind, *oid)
+                        .upsert(components(&path), kind, oid)
                         .map_err(|e| err("TreeBuilder.upsert", e))?;
                 }
-                Edit::Remove { path, mode } => match mode {
+                Edit::Remove { mode } => match mode {
                     RemoveMode::Any => {
                         editor
-                            .remove(components(path))
+                            .remove(components(&path))
                             .map_err(|e| err("TreeBuilder.remove", e))?;
                     }
                     RemoveMode::Leaf => {
                         editor
-                            .remove_leaf(components(path))
+                            .remove_leaf(components(&path))
                             .map_err(|e| err("TreeBuilder.remove_leaf", e))?;
                     }
                     RemoveMode::IfLeaf => {
                         editor
-                            .remove_if_leaf(components(path))
+                            .remove_if_leaf(components(&path))
                             .map_err(|e| err("TreeBuilder.remove_if_leaf", e))?;
                     }
                 },
@@ -837,4 +981,374 @@ fn base_entry_is_tree(
 /// Split `path` into the components the plumbing editor expects.
 fn components(path: &str) -> impl Iterator<Item = &gix::bstr::BStr> {
     path.split('/').map(|c| gix::bstr::BStr::new(c.as_bytes()))
+}
+
+/// Map a git object kind to the single-byte tag used in canonical prolly tree keys:
+/// commits `1`, trees `2`, blobs `3`, tags `4`.
+pub(crate) fn type_tag_of(kind: gix::object::Kind) -> u8 {
+    match kind {
+        gix::object::Kind::Commit => 1,
+        gix::object::Kind::Tree => 2,
+        gix::object::Kind::Blob => 3,
+        gix::object::Kind::Tag => 4,
+    }
+}
+
+/// Raw canonical bytes of a git object — exactly the bytes its object id hashes
+/// to, so they are already a deterministic normal form.
+fn object_raw(object: &gix::Object) -> Vec<u8> {
+    object.data.to_vec()
+}
+
+/// Encode an object's canonical bytes as a prolly leaf value.
+///
+/// Small objects are stored inline; larger ones are offloaded to the
+/// content-addressed [`FileBlobStore`] and referenced by blob id. Both encodings
+/// are deterministic, so identical content always yields an identical leaf value
+/// and therefore an identical tree root.
+fn prolly_value_for(store: &FileBlobStore, raw: &[u8]) -> napi::Result<Vec<u8>> {
+    if raw.len() <= DEFAULT_INLINE_VALUE_THRESHOLD {
+        Ok(ValueRef::Inline(raw.to_vec()).to_bytes())
+    } else {
+        let reference = store
+            .put_blob(raw)
+            .map_err(|e| err("prolly.blob_store", e))?;
+        Ok(ValueRef::Blob(reference).to_bytes())
+    }
+}
+
+/// Open — creating on first use — the repository's prolly node store.
+///
+/// Unlike [`open_prolly`], this takes a repository view rather than a shared
+/// handle, so it is usable from any code already holding a `gix::Repository`.
+pub(crate) fn open_prolly_nodes(r: &gix::Repository) -> napi::Result<FileNodeStore> {
+    FileNodeStore::open(r.git_dir().join(PROLLY_STORE_DIR))
+        .map_err(|e| err("prolly.FileNodeStore.open", e))
+}
+
+/// Open — creating on first use — the blob store that backs large-object
+/// offloading for the canonical prolly store.
+///
+/// It shares the `prolly` root with the node store: blobs land below
+/// `blobs/sha256/…` while nodes land below `nodes/sha256/…`, so the namespaces
+/// stay disjoint.
+pub(crate) fn open_prolly_blobs(r: &gix::Repository) -> napi::Result<FileBlobStore> {
+    FileBlobStore::open(r.git_dir().join(PROLLY_STORE_DIR))
+        .map_err(|e| err("prolly.FileBlobStore.open", e))
+}
+
+/// Hex content id of a built prolly tree; empty when the tree has no entries.
+fn prolly_root_hex(tree: &GenericTree) -> String {
+    match &tree.root {
+        Some(cid) => hex::encode(cid.as_bytes()),
+        None => String::new(),
+    }
+}
+
+/// Result of building a canonical prolly tree over a repository's object graph.
+#[napi(object)]
+pub struct TreeStore {
+    /// Content id (hex) of the top-level prolly tree — the canonical fingerprint
+    /// of the mirrored content. Identical content always yields an identical root.
+    pub root: String,
+    /// Directory holding the content-addressed prolly node store.
+    pub node_store: String,
+    /// Directory holding offloaded (large) object blobs.
+    pub blob_store: String,
+    /// Number of commit objects mirrored.
+    pub commits: u32,
+    /// Number of tree objects mirrored.
+    pub trees: u32,
+    /// Number of blob objects mirrored.
+    pub blobs: u32,
+    /// Number of tag objects mirrored.
+    pub tags: u32,
+}
+
+/// Result of building a live prolly tree from a single git tree.
+///
+/// Unlike [`TreeStore`], this mirrors exactly one tree (not a commit DAG), so
+/// it reports only the resulting tree's content id and the store it lives in.
+#[napi(object)]
+pub struct GenericTreeRef {
+    /// Content id (hex) of the built prolly tree — identical tree content always
+    /// yields an identical root.
+    pub root: String,
+    /// Directory holding the content-addressed prolly node store.
+    pub node_store: String,
+}
+
+/// Mirror every object reachable from `tips` — commits, trees, blobs and
+/// annotated tags — into the repository's canonical prolly node store.
+///
+/// Each object is stored under the key `[type_tag][oid]` with its own canonical
+/// bytes as the value; `extra` key/value pairs (e.g. a reference table) are
+/// published into the same tree. [`BatchBuilder`] sorts and deduplicates its
+/// input before building, so the published root is independent of traversal and
+/// insertion order.
+pub(crate) fn prolly_mirror_objects(
+    r: &gix::Repository,
+    tips: &[gix::ObjectId],
+    extra: &[(Vec<u8>, Vec<u8>)],
+) -> napi::Result<TreeStore> {
+    let node_store = open_prolly_nodes(r)?;
+    let blob_store = open_prolly_blobs(r)?;
+    let mut builder = BatchBuilder::new(node_store, GenericConfig::default());
+    for (key, value) in extra {
+        builder.add(key.clone(), value.clone());
+    }
+
+    let mut seen: HashSet<gix::ObjectId> = HashSet::new();
+    let mut queue: VecDeque<gix::ObjectId> = tips.iter().copied().collect();
+    let mut counts = (0u32, 0u32, 0u32, 0u32); // commits, trees, blobs, tags
+
+    while let Some(id) = queue.pop_front() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let object = r.find_object(id).map_err(|e| err("find_object", e))?;
+        let raw = object_raw(&object);
+        let mut key = Vec::with_capacity(1 + id.as_bytes().len());
+        key.push(type_tag_of(object.kind));
+        key.extend_from_slice(id.as_bytes());
+        builder.add(key, prolly_value_for(&blob_store, &raw)?);
+
+        match object.kind {
+            gix::object::Kind::Commit => {
+                counts.0 += 1;
+                let commit = r.find_commit(id).map_err(|e| err("find_commit", e))?;
+                let decoded = commit.decode().map_err(|e| err("decode_commit", e))?;
+                queue.push_back(decoded.tree());
+                for parent in decoded.parents() {
+                    queue.push_back(parent);
+                }
+            }
+            gix::object::Kind::Tree => {
+                counts.1 += 1;
+                let tree = r.find_tree(id).map_err(|e| err("find_tree", e))?;
+                let decoded = tree.decode().map_err(|e| err("decode_tree", e))?;
+                for entry in &decoded.entries {
+                    // Gitlinks point at objects in another repository; skip them.
+                    if !entry.mode.is_commit() {
+                        queue.push_back(entry.oid.into());
+                    }
+                }
+            }
+            gix::object::Kind::Blob => {
+                counts.2 += 1;
+            }
+            gix::object::Kind::Tag => {
+                counts.3 += 1;
+                let tag = r.find_tag(id).map_err(|e| err("find_tag", e))?;
+                let decoded = tag.decode().map_err(|e| err("decode_tag", e))?;
+                queue.push_back(decoded.target());
+            }
+        }
+    }
+
+    let tree = builder.build().map_err(|e| err("prolly.build", e))?;
+    let git_dir = r.git_dir().to_path_buf();
+    Ok(TreeStore {
+        root: prolly_root_hex(&tree),
+        node_store: git_dir
+            .join(PROLLY_STORE_DIR)
+            .to_string_lossy()
+            .into_owned(),
+        blob_store: git_dir
+            .join(PROLLY_STORE_DIR)
+            .join("blobs")
+            .to_string_lossy()
+            .into_owned(),
+        commits: counts.0,
+        trees: counts.1,
+        blobs: counts.2,
+        tags: counts.3,
+    })
+}
+
+/// Flatten `tree_id` into `path -> (kind, oid)`, recursing into subtrees.
+///
+/// This is the single source of truth for the "flatten a git tree to leaf
+/// entries" step shared by the canonical prolly export ([`prolly_canonicalise_tree`])
+/// and the prolly tree merge in `merge.rs` ([`crate::merge::collect_flat_entries`]).
+/// Subtrees are elided (implied by their leaves); gitlinks are kept as leaf
+/// entries. Keys are ordered by path, which is what makes a downstream prolly
+/// tree canonical regardless of creation or traversal order.
+pub(crate) fn flatten_tree(
+    r: &gix::Repository,
+    tree_id: gix::ObjectId,
+) -> napi::Result<BTreeMap<String, (gix::object::tree::EntryKind, gix::ObjectId)>> {
+    let mut map = BTreeMap::new();
+    fn recurse(
+        r: &gix::Repository,
+        map: &mut BTreeMap<String, (gix::object::tree::EntryKind, gix::ObjectId)>,
+        prefix: &str,
+        tree: &gix::Tree,
+    ) -> napi::Result<()> {
+        for entry in tree.iter() {
+            let entry = entry.map_err(|e| err("flatten_tree", e))?;
+            let name = entry.filename().to_string();
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let kind = mode_to_entry_kind(&mode_string(entry.mode().into()))?;
+            match kind {
+                gix::object::tree::EntryKind::Tree => {
+                    let sub = r.find_tree(entry.id()).map_err(|e| err("find_tree", e))?;
+                    recurse(r, map, &path, &sub)?;
+                }
+                _ => {
+                    map.insert(path, (kind, entry.id().detach()));
+                }
+            }
+        }
+        Ok(())
+    }
+    let tree = r.find_tree(tree_id).map_err(|e| err("find_tree", e))?;
+    recurse(r, &mut map, "", &tree)?;
+    Ok(map)
+}
+
+/// Canonicalise (normalise) a git tree into the repository's prolly node store.
+///
+/// The tree is flattened to its leaf entries as `path -> "mode oid"` (via
+/// [`flatten_tree`]), sorted and deduplicated by path, and published as a prolly
+/// tree. Subtree entries are implied by their leaves, so the flat leaf set is the
+/// normal form: two trees with identical content produce identical roots
+/// regardless of how their entries were created or ordered.
+///
+/// Returns the hex content id of the canonical root (empty for an empty tree).
+pub(crate) fn prolly_canonicalise_tree(
+    r: &gix::Repository,
+    tree_id: gix::ObjectId,
+) -> napi::Result<String> {
+    let flat = flatten_tree(r, tree_id)?;
+    if flat.is_empty() {
+        return Ok(String::new());
+    }
+
+    let node_store = open_prolly_nodes(r)?;
+    let mut builder = BatchBuilder::new(node_store, GenericConfig::default());
+    for (path, (kind, id)) in &flat {
+        builder.add(
+            path.clone().into_bytes(),
+            format!("{} {}", mode_string(*kind), id).into_bytes(),
+        );
+    }
+    let tree = builder.build().map_err(|e| err("prolly.build", e))?;
+    Ok(prolly_root_hex(&tree))
+}
+
+/// Build a live prolly tree by inserting `path -> value` pairs in order.
+///
+/// Shared by the prolly tree merge (`merge.rs`) and any live-tree builder, so the
+/// "insert a flattened entry set into a `Store`" step lives in exactly one place.
+/// `what` labels any store error from this tree. Returns the resulting live tree.
+pub(crate) fn build_prolly_tree_values(
+    prolly: &Store<FileNodeStore>,
+    entries: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+    what: &str,
+) -> napi::Result<GenericTree> {
+    let mut tree = prolly.create();
+    for (path, value) in entries {
+        tree = prolly.put(&tree, path, value).map_err(|e| err(what, e))?;
+    }
+    Ok(tree)
+}
+
+/// Build a live prolly tree mirroring `tree_id`, flattening it via
+/// [`flatten_tree`] and inserting each leaf as `path -> "mode oid"`.
+///
+/// Unlike [`prolly_canonicalise_tree`] (which returns only the immutable root
+/// hash via a [`BatchBuilder`]), this returns a live [`GenericTree`] handle — the
+/// form the merge resolver needs.
+pub(crate) fn build_prolly_tree_from_tree(
+    r: &gix::Repository,
+    prolly: &Store<FileNodeStore>,
+    tree_id: gix::ObjectId,
+    what: &str,
+) -> napi::Result<GenericTree> {
+    let flat = flatten_tree(r, tree_id)?;
+    let pairs = flat.into_iter().map(|(path, (kind, id))| {
+        (
+            path.into_bytes(),
+            format!("{} {}", mode_string(kind), id).into_bytes(),
+        )
+    });
+    build_prolly_tree_values(prolly, pairs, what)
+}
+
+#[napi]
+impl Tree {
+    /// Canonicalise (normalise) this tree into the repository's prolly node
+    /// store.
+    ///
+    /// Leaf entries are flattened to `path -> "mode oid"`, sorted, and published
+    /// as a content-addressed prolly tree; the return value is the hex content id
+    /// of the canonical root. Identical tree content always yields an identical
+    /// root, no matter how the entries were created or ordered.
+    #[napi]
+    pub fn canonicalise(&self) -> napi::Result<String> {
+        let r = thread_local(&self.repo);
+        prolly_canonicalise_tree(&r, self.id)
+    }
+}
+
+#[napi]
+impl Repository {
+    /// Build a canonical prolly tree from `commitId` containing the entire
+    /// commit DAG reachable from it: every commit (with its metadata — parents,
+    /// author, committer, message), tree and blob, plus any annotated tags
+    /// encountered, mirrored into the repository's content-addressed prolly node
+    /// store.
+    ///
+    /// `root` is the content id of the top-level prolly tree and is reproducible:
+    /// the same commit DAG always yields the same root. See
+    /// [`export_prolly`](crate::export::export_prolly) for the ref-aware variant.
+    #[napi]
+    pub fn prolly_tree_from_commit(&self, commit_id: String) -> napi::Result<TreeStore> {
+        let oid = parse_oid(&commit_id)?;
+        let r = thread_local(&self.inner);
+        let object = r.find_object(oid).map_err(|e| err("find_object", e))?;
+        if object.kind != gix::object::Kind::Commit {
+            return Err(err_str(
+                "prollyTreeFromCommit",
+                format!("{commit_id} is not a commit"),
+            ));
+        }
+        prolly_mirror_objects(&r, &[oid], &[])
+    }
+
+    /// Build a live prolly tree from `treeId` — the flattened leaves of that single
+    /// git tree, inserted as `path -> "mode oid"` into the repository's prolly node
+    /// store.
+    ///
+    /// This is the live-tree counterpart of [`Tree::canonicalise`]: it returns a
+    /// [`GenericTreeRef`] (root + store) rather than mirroring a whole commit DAG.
+    /// It reuses the same [`flatten_tree`] + [`build_prolly_tree_from_tree`]
+    /// primitives the prolly tree merge uses, so all three paths stay consistent.
+    #[napi]
+    pub fn prolly_tree_from_tree(&self, tree_id: String) -> napi::Result<GenericTreeRef> {
+        let oid = parse_oid(&tree_id)?;
+        let r = thread_local(&self.inner);
+        let object = r.find_object(oid).map_err(|e| err("find_object", e))?;
+        if object.kind != gix::object::Kind::Tree {
+            return Err(err_str(
+                "prollyTreeFromTree",
+                format!("{tree_id} is not a tree"),
+            ));
+        }
+        let prolly = open_prolly(&self.inner)?;
+        let tree = build_prolly_tree_from_tree(&r, &prolly, oid, "prollyTreeFromTree")?;
+        let git_dir = r.git_dir().to_path_buf();
+        Ok(GenericTreeRef {
+            root: prolly_root_hex(&tree),
+            node_store: git_dir
+                .join(PROLLY_STORE_DIR)
+                .to_string_lossy()
+                .into_owned(),
+        })
+    }
 }

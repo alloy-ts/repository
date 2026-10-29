@@ -74,6 +74,36 @@ pub struct RefStore {
     repo: Arc<gix::ThreadSafeRepository>,
 }
 
+/// One exported reference, the ref-store half of a repository export.
+///
+/// This is the same information `git fast-export` carries in its `reset`
+/// commands: a name and a target. Use [`RefStore::export_refs`] to produce
+/// these and [`RefStore::import_refs`] to apply them; combine them with
+/// [`crate::import`] / [`crate::export`] (which carry the objects)
+/// for a complete repository move.
+#[napi(object)]
+pub struct RefExport {
+    /// Fully-qualified reference name (e.g. `refs/heads/main`).
+    pub name: String,
+    /// Target object id, or `null` for a symbolic reference.
+    pub id: Option<String>,
+    /// Target of a symbolic reference (e.g. `refs/heads/main`); mutually
+    /// exclusive with `id`.
+    pub symbolic: Option<String>,
+}
+
+/// Options for [`RefStore::import_refs`].
+#[derive(Default)]
+#[napi(object)]
+pub struct RefImportOptions {
+    /// Move refs even when the update is not a fast-forward.
+    pub force: Option<bool>,
+    /// Reflog message recorded for every applied edit.
+    pub reflog_message: Option<String>,
+    /// Apply nothing and report what would happen.
+    pub dry_run: Option<bool>,
+}
+
 /// A single reference edit for use with [`RefStore::transaction`].
 ///
 /// Mirrors the parameters of [`RefStore::write`] but grouped so multiple edits
@@ -292,6 +322,107 @@ impl RefStore {
     #[napi]
     pub fn list_names(&self, glob: Option<String>) -> napi::Result<Vec<String>> {
         self.collect_names(glob, "list_names")
+    }
+
+    /// Serialize the reference store: one [`RefExport`] per reference, sorted
+    /// by name, optionally restricted to those matching `glob`.
+    ///
+    /// This is the reference half of a repository export — the complement of
+    /// `Repository.export`, which carries the objects but only the refs it
+    /// walked. Together they cover "all refs + all reachable objects"; for a
+    /// self-contained archive of every object (including unreachable ones)
+    /// combine this with [`crate::object_store::memory::MemoryObjectStore::dump`], which writes a pack.
+    #[napi]
+    pub fn export_refs(&self, glob: Option<String>) -> napi::Result<Vec<RefExport>> {
+        let r = thread_local(&self.repo);
+        let names = self.collect_names(glob, "export_refs")?;
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let reference = match r.try_find_reference(name.as_str()) {
+                Ok(Some(reference)) => reference.detach(),
+                // The ref vanished between listing and resolution; skip it.
+                Ok(None) => continue,
+                Err(e) => return Err(err("export_refs", e)),
+            };
+            let (id, symbolic) = match reference.target {
+                gix::refs::Target::Object(id) => (Some(id.to_string()), None),
+                gix::refs::Target::Symbolic(target) => (None, Some(target.to_string())),
+            };
+            out.push(RefExport {
+                name: reference.name.to_string(),
+                id,
+                symbolic,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// Apply references produced by [`RefStore::export_refs`].
+    ///
+    /// An entry whose `id` is the null object id (all zeros) deletes the
+    /// reference, mirroring git's `reset <ref>` + `from <null-oid>`. Direct and
+    /// symbolic targets are both supported. All edits land in one transaction:
+    /// either every ref is moved or none is. Returns the names that were
+    /// updated; deletions are reported as well, since a deleted ref is also a
+    /// change (and `force` is required to accept a non-fast-forward, just like
+    /// `git fast-import`).
+    #[napi]
+    pub fn import_refs(
+        &self,
+        refs: Vec<RefExport>,
+        options: Option<RefImportOptions>,
+    ) -> napi::Result<Vec<String>> {
+        let options = options.unwrap_or_default();
+        let force = options.force.unwrap_or(false);
+        let message = options
+            .reflog_message
+            .clone()
+            .unwrap_or_else(|| "import-refs".to_string());
+        let r = thread_local(&self.repo);
+        let mut edits = Vec::with_capacity(refs.len());
+        let mut names = Vec::with_capacity(refs.len());
+        for entry in &refs {
+            let full_name = gix::refs::FullName::try_from(entry.name.as_str())
+                .map_err(|e| err("import_refs", e))?;
+            let log = gix::refs::transaction::LogChange {
+                mode: gix::refs::transaction::RefLog::AndReference,
+                force_create_reflog: true,
+                message: message.clone().into(),
+            };
+            let previous = previous_value(None, Some(force), false)?;
+            let edit = match (entry.id.as_deref(), entry.symbolic.as_deref()) {
+                // A null id is a deletion, like fast-import's reset-from-null.
+                (Some(id), _) if is_null_sha(id) => {
+                    gix::refs::transaction::RefEdit::delete_with_log(
+                        full_name,
+                        previous,
+                        gix::refs::transaction::RefLog::AndReference,
+                    )
+                }
+                (Some(id), _) => {
+                    let target = parse_target(id)?;
+                    gix::refs::transaction::RefEdit::update_with_log(
+                        full_name, target, previous, log,
+                    )
+                }
+                (None, Some(symbolic)) => {
+                    let target = parse_target(symbolic)?;
+                    gix::refs::transaction::RefEdit::update_with_log(
+                        full_name, target, previous, log,
+                    )
+                }
+                // Neither id nor symbolic: nothing to point at.
+                (None, None) => continue,
+            };
+            edits.push(edit);
+            names.push(entry.name.clone());
+        }
+        if options.dry_run.unwrap_or(false) {
+            return Ok(names);
+        }
+        self.apply_edits(&r, edits, &None)?;
+        Ok(names)
     }
 
     /// Create or update a reference.
@@ -861,6 +992,12 @@ impl RefLock {
 }
 
 /// Parse `s` as a reference target: a 40-hex object id, else a symbolic name.
+/// Whether `text` is the null object id (all zeros) — the marker git uses to
+/// delete a reference.
+fn is_null_sha(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b == b'0')
+}
+
 fn parse_target(s: &str) -> napi::Result<gix::refs::Target> {
     match parse_oid(s) {
         Ok(oid) => Ok(gix::refs::Target::Object(oid)),
@@ -901,7 +1038,7 @@ fn lossy(b: &[u8]) -> String {
 }
 
 /// Minimal shell-style glob match supporting `*` and `?` (and `\` escaping).
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     fn matches(p: &[u8], t: &[u8]) -> bool {
         let (mut pi, mut ti) = (0, 0);
         while pi < p.len() {

@@ -50,7 +50,7 @@ pub struct CheckoutPathsOptions {
 }
 
 /// Run `git` with `args` in `dir`, returning an error if it exits non-zero.
-fn git_run(dir: &Path, args: &[String]) -> napi::Result<()> {
+pub(crate) fn git_run(dir: &Path, args: &[String]) -> napi::Result<()> {
     let git = find_git().ok_or_else(|| err_str("checkout", "git binary not found"))?;
     let output = ProcCommand::new(&git)
         .current_dir(dir)

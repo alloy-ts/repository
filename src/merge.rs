@@ -1,7 +1,14 @@
 use crate::error::RepositoryResult as Result;
 use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroU8;
+use std::sync::{Arc, Mutex};
+
+use prolly::{
+    Conflict as ProllyMergeConflict, FileNodeStore, Prolly, Resolution as ProllyResolution,
+    Resolver as ProllyResolver, Tree as ProllyTree,
+};
 
 use gix::bstr::BStr;
 use gix::diff::tree_with_rewrites::Change;
@@ -10,9 +17,11 @@ use gix::merge::tree::{Resolution, ResolutionFailure, TreatAsUnresolved, apply_i
 
 use gix_imara_diff as imara_diff;
 
-use crate::checkout::git_merge;
+use crate::checkout::{git_merge, git_run};
+use crate::entry::{mode_string as entry_mode_string, mode_to_entry_kind};
 use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::repository::Repository;
+use crate::tree::{build_prolly_tree_from_tree, open_prolly};
 
 /// Resolved options used for blob merges (the `text` driver configuration).
 #[napi(object)]
@@ -39,6 +48,9 @@ pub struct TreeMergeOptionsSummary {
     /// How irreconcilable tree conflicts are resolved (debug summary), or `null`
     /// when such conflicts cause resolution failures.
     pub tree_conflicts: Option<String>,
+    /// Which engine a tree merge uses, as selected by `merge.algorithm`:
+    /// `"git"` or `"prolly"`.
+    pub algorithm: String,
 }
 
 /// The result of a (recursive) virtual merge base computation.
@@ -86,6 +98,12 @@ pub struct MergeOptions {
     pub use_first_merge_base: Option<bool>,
     /// Commit merges only: allow merging commits without a merge base.
     pub allow_missing_merge_base: Option<bool>,
+    /// Which engine performs the tree merge: `"git"` (default, gix's recursive
+    /// tree merge) or `"prolly"`, which flattens every side into a prolly tree
+    /// keyed by path and three-way merges those maps. Overrides
+    /// `merge.algorithm`. Only `mergeTrees`/`mergeCommits` honour it — the
+    /// worktree-materializing `merge()` always uses git.
+    pub algorithm: Option<String>,
 }
 
 /// One side of a conflict: an addition, deletion, modification or rewrite.
@@ -338,6 +356,59 @@ fn build_commit_options(
     Ok(commit)
 }
 
+/// Config key selecting the tree-merge engine.
+const MERGE_ALGORITHM_KEY: &str = "merge.algorithm";
+
+/// Which engine performs a tree merge.
+///
+/// `Git` is gix's recursive tree merge (git semantics, rename detection).
+/// `Prolly` flattens every side into a prolly tree keyed by path and three-way
+/// merges those maps. That removes *structural* conflicts — a path cannot be a
+/// file on one side and a directory on the other — and lets unchanged entries
+/// be shared by content id. It is not a CRDT: entries both sides changed are
+/// still merged blob-wise and can stay unresolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MergeAlgorithm {
+    Git,
+    Prolly,
+}
+
+impl MergeAlgorithm {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            MergeAlgorithm::Git => "git",
+            MergeAlgorithm::Prolly => "prolly",
+        }
+    }
+}
+
+fn parse_merge_algorithm(what: &str, value: &str) -> napi::Result<MergeAlgorithm> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "git" => Ok(MergeAlgorithm::Git),
+        "prolly" => Ok(MergeAlgorithm::Prolly),
+        other => Err(err_str(
+            what,
+            format!("invalid merge algorithm {other:?} (expected \"git\" or \"prolly\")"),
+        )),
+    }
+}
+
+/// Resolve the merge engine for one call: the `algorithm` option wins over the
+/// `merge.algorithm` config key, which defaults to `"git"`.
+pub(crate) fn merge_algorithm(
+    r: &gix::Repository,
+    options: Option<&MergeOptions>,
+    what: &str,
+) -> napi::Result<MergeAlgorithm> {
+    if let Some(value) = options.and_then(|o| o.algorithm.as_deref()) {
+        return parse_merge_algorithm(what, value);
+    }
+    match r.config_snapshot().string(MERGE_ALGORITHM_KEY) {
+        Some(value) => parse_merge_algorithm(what, &value.to_string()),
+        None => Ok(MergeAlgorithm::Git),
+    }
+}
+
 fn mode_string(mode: gix::object::tree::EntryMode) -> String {
     format!("{:06o}", mode.value())
 }
@@ -549,41 +620,53 @@ pub(crate) fn merge_outcome_to_dto(
     })
 }
 
+/// One flattened tree entry: the leaf mode and object id at a path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FlatEntry {
+    kind: gix::object::tree::EntryKind,
+    id: gix::ObjectId,
+}
+
+impl FlatEntry {
+    /// Wire format of a prolly merge value: `"{mode} {oid}"`.
+    fn encode(self) -> Vec<u8> {
+        format!("{} {}", entry_mode_string(self.kind), self.id).into_bytes()
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let (mode, id) = text.split_once(' ')?;
+        Some(Self {
+            kind: mode_to_entry_kind(mode).ok()?,
+            id: parse_oid(id).ok()?,
+        })
+    }
+}
+
+/// Flatten `tree_id` into `path -> entry` (recursing into subtrees).
+///
+/// Reuses [`crate::tree::flatten_tree`], the same flatten primitive the canonical
+/// prolly export uses, so the two paths can never drift apart.
+fn collect_flat_entries(
+    r: &gix::Repository,
+    tree_id: &gix::ObjectId,
+) -> napi::Result<BTreeMap<String, FlatEntry>> {
+    let flat = crate::tree::flatten_tree(r, *tree_id)?;
+    Ok(flat
+        .into_iter()
+        .map(|(path, (kind, id))| (path, FlatEntry { kind, id }))
+        .collect())
+}
+
 /// Flatten `tree_id` into `path -> object id` (recursing into subtrees).
 fn collect_tree_entries(
     r: &gix::Repository,
     tree_id: &gix::ObjectId,
 ) -> napi::Result<HashMap<String, gix::ObjectId>> {
-    let mut map = HashMap::new();
-    fn recurse(
-        r: &gix::Repository,
-        map: &mut HashMap<String, gix::ObjectId>,
-        prefix: &str,
-        tree: &gix::Tree,
-    ) -> napi::Result<()> {
-        for entry in tree.iter() {
-            let entry = entry.map_err(|e| err("merge_tree", e))?;
-            let name = entry.filename().to_string();
-            let path = if prefix.is_empty() {
-                name
-            } else {
-                format!("{}/{}", prefix, name)
-            };
-            match entry.mode().into() {
-                gix::object::tree::EntryKind::Tree => {
-                    let sub = r.find_tree(entry.id()).map_err(|e| err("find_tree", e))?;
-                    recurse(r, map, &path, &sub)?;
-                }
-                _ => {
-                    map.insert(path, entry.id().detach());
-                }
-            }
-        }
-        Ok(())
-    }
-    let tree = r.find_tree(*tree_id).map_err(|e| err("find_tree", e))?;
-    recurse(r, &mut map, "", &tree)?;
-    Ok(map)
+    Ok(collect_flat_entries(r, tree_id)?
+        .into_iter()
+        .map(|(path, entry)| (path, entry.id))
+        .collect())
 }
 
 /// Aggregate base-relative change counts for a merge result, plus the unresolved
@@ -838,6 +921,9 @@ impl Repository {
             fail_on_conflict: opts.fail_on_conflict.is_some(),
             marker_size_multiplier: opts.marker_size_multiplier as u32,
             tree_conflicts: opts.tree_conflicts.map(|c| format!("{:?}", c)),
+            algorithm: merge_algorithm(&r, None, "tree_merge_options")?
+                .as_str()
+                .to_string(),
         })
     }
 
@@ -918,6 +1004,17 @@ impl Repository {
         let ours = parse_oid(&our_tree)?;
         let theirs = parse_oid(&their_tree)?;
         let ancestor = parse_oid(&ancestor_tree)?;
+        if merge_algorithm(&r, options.as_ref(), "merge_trees")? == MergeAlgorithm::Prolly {
+            return prolly_merge_trees(
+                self,
+                &r,
+                ancestor,
+                ours,
+                theirs,
+                options.as_ref(),
+                "merge_trees",
+            );
+        }
         let owned = owned_labels(options.as_ref());
         let tree_options = build_tree_options("merge_trees", options.as_ref())?;
         let mut outcome = r
@@ -937,18 +1034,24 @@ impl Repository {
         let r = thread_local(&self.inner);
         let ours = parse_oid(&our_commit)?;
         let theirs = parse_oid(&their_commit)?;
+        let base_tree = base_tree_of(&r, ours, theirs)?;
+        if merge_algorithm(&r, options.as_ref(), "merge_commits")? == MergeAlgorithm::Prolly {
+            let base = prolly_base_tree(&r, base_tree, options.as_ref(), "merge_commits")?;
+            return prolly_merge_trees(
+                self,
+                &r,
+                base,
+                commit_tree(&r, ours)?,
+                commit_tree(&r, theirs)?,
+                options.as_ref(),
+                "merge_commits",
+            );
+        }
         let owned = owned_labels(options.as_ref());
         let commit_options = build_commit_options("merge_commits", options.as_ref())?;
         let mut outcome = r
             .merge_commits(ours, theirs, owned.borrowed(), commit_options)
             .map_err(|e| err("merge_commits", e))?;
-        let base_tree = match r.merge_base(ours, theirs) {
-            Ok(Some(id)) => r
-                .find_commit(id)
-                .ok()
-                .and_then(|c| c.tree_id().ok().map(|t| t.detach())),
-            _ => None,
-        };
         merge_outcome_to_dto(
             &r,
             &mut outcome.tree_merge,
@@ -983,18 +1086,47 @@ impl Repository {
         // `rev_parse_single` accepts both object ids and ref names.
         let their_id = self.rev_parse_single(commits[0].clone())?;
         let theirs = parse_oid(&their_id)?;
+        if merge_algorithm(&r, options.as_ref(), "merge")? == MergeAlgorithm::Prolly {
+            // Materialize the prolly tree merge into the working tree and index,
+            // leaving the repo in a merging state so the caller commits or aborts.
+            let base_tree = base_tree_of(&r, ours, theirs)?;
+            let base = prolly_base_tree(&r, base_tree, options.as_ref(), "merge")?;
+            let outcome = prolly_merge_trees(
+                self,
+                &r,
+                base,
+                commit_tree(&r, ours)?,
+                commit_tree(&r, theirs)?,
+                options.as_ref(),
+                "merge",
+            )?;
+            if let Some(work_dir) = r.work_dir() {
+                git_run(
+                    work_dir,
+                    &[
+                        "read-tree".into(),
+                        "-u".into(),
+                        "--reset".into(),
+                        outcome.tree_id.clone(),
+                    ],
+                )
+                .map_err(|e| err("merge.prolly.read_tree", e))?;
+                // Leave the repo in a merging state so the caller can commit the
+                // (possibly conflicted) result like a regular `git merge`.
+                git_run(
+                    work_dir,
+                    &["update-ref".into(), "MERGE_HEAD".into(), theirs.to_string()],
+                )
+                .map_err(|e| err("merge.prolly.merge_head", e))?;
+            }
+            return Ok(outcome);
+        }
         let owned = owned_labels(options.as_ref());
         let commit_options = build_commit_options("merge", options.as_ref())?;
         let mut outcome = r
             .merge_commits(ours, theirs, owned.borrowed(), commit_options)
             .map_err(|e| err("merge_commits", e))?;
-        let base_tree = match r.merge_base(ours, theirs) {
-            Ok(Some(id)) => r
-                .find_commit(id)
-                .ok()
-                .and_then(|c| c.tree_id().ok().map(|t| t.detach())),
-            _ => None,
-        };
+        let base_tree = base_tree_of(&r, ours, theirs)?;
         let merged = merge_outcome_to_dto(
             &r,
             &mut outcome.tree_merge,
@@ -1230,4 +1362,386 @@ pub fn merge_blobs(
         path: result_path,
         mode: result_mode,
     })
+}
+
+// ============================================================================
+// Prolly tree merges (`merge.algorithm = prolly`)
+// ============================================================================
+
+/// A conflict recorded while merging flattened prolly entries.
+struct ProllyConflict {
+    path: String,
+    base: Option<FlatEntry>,
+    ours: Option<FlatEntry>,
+    theirs: Option<FlatEntry>,
+    /// The merged blob and how it resolved, when a content merge ran.
+    merged: Option<(gix::ObjectId, gix::merge::blob::Resolution)>,
+    /// `"resolved:<kind>"` or `"failed:<kind>"`.
+    resolution: String,
+    unresolved: bool,
+}
+
+/// What the merge resolver reports into. `Resolver` is `Fn`, so it can neither
+/// mutate shared state nor return errors through the merge signature.
+#[derive(Default)]
+struct ProllyMergeSink {
+    conflicts: Vec<ProllyConflict>,
+    error: Option<String>,
+}
+
+/// Load a flattened tree into a prolly tree keyed by path.
+/// The mode of a merged entry: identical modes win, a mode only one side
+/// changed follows that side, conflicting mode changes yield `None`.
+fn merge_entry_kind(
+    base: Option<gix::object::tree::EntryKind>,
+    left: gix::object::tree::EntryKind,
+    right: gix::object::tree::EntryKind,
+) -> Option<gix::object::tree::EntryKind> {
+    if left == right {
+        return Some(left);
+    }
+    if base == Some(left) {
+        return Some(right);
+    }
+    if base == Some(right) {
+        return Some(left);
+    }
+    None
+}
+
+/// Three-way merge two blob contents with the builtin text driver, writing the
+/// result into the object database.
+fn merge_blob_content(
+    r: &gix::Repository,
+    base: Option<gix::ObjectId>,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+    labels: &OwnedLabels,
+    file_favor: Option<&str>,
+) -> std::result::Result<(gix::ObjectId, gix::merge::blob::Resolution), String> {
+    let conflict = match file_favor {
+        Some("ours") => text::Conflict::ResolveWithOurs,
+        Some("theirs") => text::Conflict::ResolveWithTheirs,
+        _ => text::Conflict::Keep {
+            style: text::ConflictStyle::Merge,
+            marker_size: NonZeroU8::new(text::Conflict::DEFAULT_MARKER_SIZE)
+                .expect("default marker size is non-zero"),
+        },
+    };
+    let read = |id: Option<gix::ObjectId>| -> Vec<u8> {
+        id.and_then(|id| r.find_object(id).ok())
+            .map(|object| object.detach().data)
+            .unwrap_or_default()
+    };
+    let base_data = read(base);
+    let our_data = read(Some(ours));
+    let their_data = read(Some(theirs));
+    let mut out = Vec::new();
+    // The merge tokenizes all three inputs; the initial content is unused.
+    let mut input = imara_diff::InternedInput::new(&[][..], &[]);
+    let resolution = text(
+        &mut out,
+        &mut input,
+        labels.borrowed(),
+        &our_data,
+        &base_data,
+        &their_data,
+        text::Options {
+            diff_algorithm: imara_diff::Algorithm::Myers,
+            conflict,
+        },
+    );
+    let id = r
+        .write_blob(out)
+        .map_err(|e| format!("write_blob: {e}"))?
+        .detach();
+    Ok((id, resolution))
+}
+
+/// Resolve one conflicting key of a prolly merge.
+///
+/// Returns the resolution plus, when the entry could not be merged cleanly, the
+/// conflict to report.
+fn resolve_prolly_conflict(
+    r: &gix::Repository,
+    conflict: &ProllyMergeConflict,
+    labels: &OwnedLabels,
+    file_favor: Option<&str>,
+) -> std::result::Result<(ProllyResolution, Option<ProllyConflict>), String> {
+    let path = String::from_utf8_lossy(&conflict.key).into_owned();
+    let base = conflict.base.as_deref().and_then(FlatEntry::decode);
+    let ours = conflict.left.as_deref().and_then(FlatEntry::decode);
+    let theirs = conflict.right.as_deref().and_then(FlatEntry::decode);
+    let record = |resolution: &str, unresolved: bool, merged| ProllyConflict {
+        path: path.clone(),
+        base,
+        ours,
+        theirs,
+        merged,
+        resolution: resolution.to_string(),
+        unresolved,
+    };
+    match (ours, theirs) {
+        (None, None) => Ok((ProllyResolution::Delete, None)),
+        // Delete vs. modify: keep the surviving entry and report the conflict,
+        // which is what git leaves in the tree as well.
+        (Some(entry), None) => Ok((
+            ProllyResolution::value(entry.encode()),
+            Some(record("failed:oursModifiedTheirsDeleted", true, None)),
+        )),
+        (None, Some(entry)) => Ok((
+            ProllyResolution::value(entry.encode()),
+            Some(record("failed:oursDeletedTheirsModified", true, None)),
+        )),
+        (Some(left), Some(right)) => {
+            let Some(kind) = merge_entry_kind(base.map(|b| b.kind), left.kind, right.kind) else {
+                return Ok((
+                    ProllyResolution::value(left.encode()),
+                    Some(record(
+                        "failed:oursModifiedTheirsModifiedTypeMismatch",
+                        true,
+                        None,
+                    )),
+                ));
+            };
+            let base_id = base.map(|b| b.id);
+            let id = if left.id == right.id {
+                left.id
+            } else if base_id == Some(left.id) {
+                right.id
+            } else if base_id == Some(right.id) {
+                left.id
+            } else if kind == gix::object::tree::EntryKind::Commit {
+                // Submodule pointers are not merged: keep ours and report.
+                return Ok((
+                    ProllyResolution::value(FlatEntry { kind, id: left.id }.encode()),
+                    Some(record("failed:submoduleMerge", true, None)),
+                ));
+            } else {
+                let (id, resolution) =
+                    merge_blob_content(r, base_id, left.id, right.id, labels, file_favor)?;
+                let reported = match resolution {
+                    gix::merge::blob::Resolution::Complete => None,
+                    gix::merge::blob::Resolution::CompleteWithAutoResolvedConflict => Some(record(
+                        "resolved:oursModifiedTheirsModifiedThenBlobContentMerge",
+                        false,
+                        Some((id, resolution)),
+                    )),
+                    gix::merge::blob::Resolution::Conflict => Some(record(
+                        "failed:oursModifiedTheirsModifiedThenBlobContentMerge",
+                        true,
+                        Some((id, resolution)),
+                    )),
+                };
+                return Ok((
+                    ProllyResolution::value(FlatEntry { kind, id }.encode()),
+                    reported,
+                ));
+            };
+            Ok((
+                ProllyResolution::value(FlatEntry { kind, id }.encode()),
+                None,
+            ))
+        }
+    }
+}
+
+/// Convert a recorded prolly conflict into the JS-facing [`MergeConflict`].
+fn prolly_conflict_to_dto(r: &gix::Repository, conflict: &ProllyConflict) -> MergeConflict {
+    let entry = |entry: Option<FlatEntry>| {
+        entry.map(|e| MergeConflictEntry {
+            mode: entry_mode_string(e.kind),
+            id: e.id.to_string(),
+        })
+    };
+    let content = |entry: Option<FlatEntry>| {
+        entry
+            .and_then(|e| r.find_object(e.id).ok())
+            .map(|object| object.detach().data)
+    };
+    let change = |side: Option<FlatEntry>| {
+        let known = side.or(conflict.base);
+        MergeChange {
+            kind: match (side, conflict.base) {
+                (Some(_), Some(_)) => "modification".to_string(),
+                (Some(_), None) => "addition".to_string(),
+                (None, _) => "deletion".to_string(),
+            },
+            location: conflict.path.clone(),
+            mode: known
+                .map(|e| entry_mode_string(e.kind))
+                .unwrap_or_else(|| "000000".to_string()),
+            id: known
+                .map(|e| e.id.to_string())
+                .unwrap_or_else(|| gix::ObjectId::null(r.object_hash()).to_string()),
+            source_location: None,
+            source_mode: None,
+            source_id: None,
+        }
+    };
+    let (merged_blob_id, merged_blob_resolution, hunks) = match conflict.merged {
+        Some((id, resolution)) => (
+            Some(id.to_string()),
+            Some(blob_resolution_string(&resolution).to_string()),
+            build_hunks(r, &id),
+        ),
+        None => (None, None, Vec::new()),
+    };
+    MergeConflict {
+        unresolved: conflict.unresolved,
+        resolution: conflict.resolution.clone(),
+        final_location: None,
+        merged_mode: None,
+        merged_blob_id,
+        merged_blob_resolution,
+        renamed_unique_path: None,
+        ours: change(conflict.ours),
+        theirs: change(conflict.theirs),
+        base_entry: entry(conflict.base),
+        our_entry: entry(conflict.ours),
+        their_entry: entry(conflict.theirs),
+        base_content: content(conflict.base),
+        left_content: content(conflict.ours),
+        right_content: content(conflict.theirs),
+        hunks,
+    }
+}
+
+/// Three-way merge two trees by flattening every side into a prolly tree keyed
+/// by path, merging those maps, and materializing the result as a git tree.
+///
+/// Structural conflicts (file vs. directory, rename/rename) cannot occur once
+/// trees are flattened, and entries both sides left untouched are shared by
+/// content id. Entries both sides changed are still merged blob-wise with the
+/// text driver git uses, so content conflicts survive as conflicts.
+fn prolly_merge_trees(
+    repo: &Repository,
+    r: &gix::Repository,
+    base: gix::ObjectId,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+    options: Option<&MergeOptions>,
+    what: &str,
+) -> napi::Result<MergeOutcome> {
+    let prolly = open_prolly(&repo.inner)?;
+    let base_tree = build_prolly_tree_from_tree(r, &prolly, base, what)?;
+    let our_tree = build_prolly_tree_from_tree(r, &prolly, ours, what)?;
+    let their_tree = build_prolly_tree_from_tree(r, &prolly, theirs, what)?;
+
+    let sink = Arc::new(Mutex::new(ProllyMergeSink::default()));
+    let labels = owned_labels(options);
+    let file_favor = options.and_then(|o| o.file_favor.clone());
+    let resolver_sink = Arc::clone(&sink);
+    let resolver_repo = Arc::clone(&repo.inner);
+    let resolver: ProllyResolver =
+        Box::new(move |conflict: &ProllyMergeConflict| -> ProllyResolution {
+            let mut sink = resolver_sink.lock().unwrap_or_else(|e| e.into_inner());
+            let r = thread_local(&resolver_repo);
+            match resolve_prolly_conflict(&r, conflict, &labels, file_favor.as_deref()) {
+                Ok((resolution, reported)) => {
+                    sink.conflicts.extend(reported);
+                    resolution
+                }
+                Err(message) => {
+                    // The resolver cannot fail loudly; park the error and abort the
+                    // merge by leaving this conflict unresolved.
+                    sink.error.get_or_insert(message);
+                    ProllyResolution::Unresolved
+                }
+            }
+        });
+
+    let merged = prolly
+        .merge(&base_tree, &our_tree, &their_tree, Some(resolver))
+        .map_err(|e| {
+            let message = sink.lock().unwrap_or_else(|e| e.into_inner()).error.take();
+            match message {
+                Some(message) => err_str(what, message),
+                None => err("prolly_merge", e),
+            }
+        })?;
+
+    let mut editor = r
+        .edit_tree(gix::ObjectId::empty_tree(r.object_hash()))
+        .map_err(|e| err("prolly_merge.edit_tree", e))?;
+    for item in prolly
+        .range(&merged, b"", None)
+        .map_err(|e| err("prolly_merge.range", e))?
+    {
+        let (key, value) = item.map_err(|e| err("prolly_merge.range", e))?;
+        let path = String::from_utf8_lossy(&key).into_owned();
+        let entry = FlatEntry::decode(&value)
+            .ok_or_else(|| err_str(what, format!("malformed prolly merge entry at {path:?}")))?;
+        editor
+            .upsert(path.as_str(), entry.kind, entry.id)
+            .map_err(|e| err("prolly_merge.upsert", e))?;
+    }
+    let tree_id = editor
+        .write()
+        .map_err(|e| err("prolly_merge.write_tree", e))?
+        .detach();
+
+    let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
+    sink.conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+    let conflict_details: Vec<MergeConflict> = sink
+        .conflicts
+        .iter()
+        .map(|c| prolly_conflict_to_dto(r, c))
+        .collect();
+    let conflicted = conflict_details.iter().filter(|c| c.unresolved).count() as f64;
+    let stats = compute_merge_stats(r, &base, &tree_id, conflicted)?;
+    Ok(MergeOutcome {
+        tree_id: tree_id.to_string(),
+        conflicts: !conflict_details.is_empty(),
+        has_unresolved_conflicts: conflicted > 0.0,
+        failed_on_first_unresolved_conflict: false,
+        conflict_details,
+        stats,
+    })
+}
+
+/// The tree of a commit, for merges that need the ancestor tree up front.
+fn commit_tree(r: &gix::Repository, commit: gix::ObjectId) -> napi::Result<gix::ObjectId> {
+    r.find_commit(commit)
+        .and_then(|c| c.tree_id())
+        .map(|id| id.detach())
+        .map_err(|e| err("find_commit", e))
+}
+
+/// The merge base tree of two commits, when there is one.
+fn base_tree_of(
+    r: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> napi::Result<Option<gix::ObjectId>> {
+    match r.merge_base(ours, theirs) {
+        Ok(Some(id)) => Ok(r
+            .find_commit(id)
+            .ok()
+            .and_then(|c| c.tree_id().ok().map(|t| t.detach()))),
+        _ => Ok(None),
+    }
+}
+
+/// The ancestor tree a prolly merge needs: the merge base, or the empty tree for
+/// unrelated histories when `allow_missing_merge_base` is set.
+fn prolly_base_tree(
+    r: &gix::Repository,
+    base: Option<gix::ObjectId>,
+    options: Option<&MergeOptions>,
+    what: &str,
+) -> napi::Result<gix::ObjectId> {
+    if let Some(id) = base {
+        return Ok(id);
+    }
+    if options
+        .and_then(|o| o.allow_missing_merge_base)
+        .unwrap_or(false)
+    {
+        return Ok(gix::ObjectId::empty_tree(r.object_hash()));
+    }
+    Err(err_str(
+        what,
+        "prolly merges need a merge base; pass allow_missing_merge_base to merge unrelated histories",
+    ))
 }
