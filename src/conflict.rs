@@ -17,8 +17,10 @@ use crate::repository::{IndexEntryInput, Repository};
 /// codes), we read it straight from the index: a stage-1 entry means the path
 /// existed in the common ancestor, while the presence of stages 2/3 reflects
 /// which side touched it.
-#[napi(string_enum)]
-pub enum ConflictKind {
+pub use crate::status::ConflictKind;
+
+#[allow(dead_code)]
+pub enum LegacyConflictKind {
     /// Both sides modified the path (stages 1+2+3 present).
     BothModified,
     /// Both sides added the path (stages 2+3, no stage 1).

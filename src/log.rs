@@ -1,7 +1,7 @@
 //! Log / history bindings: the flat [`CommitInfo`] DTO returned by `Repository::log`, plus the
 //! `log` method itself and the commit-decoding helper it shares with `Commit::info`.
 
-use crate::error::{RepositoryError, err, err_repo, thread_local};
+use crate::error::{RepositoryError, err, err_repo, repo_error_to_napi, thread_local};
 use crate::object::{lossy, message_body, rfc3339, short_sha};
 use crate::repository::Repository;
 
