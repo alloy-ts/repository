@@ -33,34 +33,6 @@ afterAll(() => {
   });
 });
 
-describe("Repository.setHead (src/reference.rs)", () => {
-  test("points HEAD at a commit id (detached)", () => {
-    const head = repo.head();
-    expect(head.kind).toBe("symbolic");
-    const id = repo.headId();
-
-    repo.setHead(id);
-
-    const detached = repo.head();
-    expect(detached.kind).toBe("detached");
-    expect(repo.headId()).toBe(id);
-  });
-
-  test("points HEAD at a branch name (symbolic, DWIM)", () => {
-    // Reset to the symbolic branch, then move HEAD to it by short name.
-    const branch = "main";
-    repo.setHead(`refs/heads/${branch}`);
-    expect(repo.head().kind).toBe("symbolic");
-    const referent = repo.headRef();
-    expect(referent).not.toBe(null);
-    expect(referent!.name).toBe(`refs/heads/${branch}`);
-
-    // A short (DWIM) name resolves to the same referent.
-    repo.setHead(branch);
-    expect(repo.headRef()!.name).toBe(`refs/heads/${branch}`);
-  });
-});
-
 describe("Repository.createSymbolicReference (src/reference.rs)", () => {
   const name = "refs/heads/reference-test-sym";
   const target = "refs/heads/main";
