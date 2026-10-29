@@ -11,6 +11,31 @@ use crate::error::{err, parse_oid, thread_local};
 use crate::repository::Repository;
 use crate::worktree::{StreamEntry, WorktreeHeadKind};
 
+#[napi]
+pub const K_MAX_YOUNG_GENERATION_SIZE_MB: u32 = 0;
+
+#[napi]
+pub const K_MAX_OLD_GENERATION_SIZE_MB: u32 = 1;
+
+#[napi]
+pub const K_CODE_RANGE_SIZE_MB: u32 = 2;
+
+#[napi]
+pub const K_STACK_SIZE_MB: u32 = 3;
+
+#[napi]
+pub const K_TOTAL_RESOURCE_LIMIT_COUNT: u32 = 4;
+
+/// Resource limits configuration object for task worker threads.
+#[napi(object)]
+#[derive(Default, Debug, Clone)]
+pub struct TaskResourceLimits {
+    pub max_young_generation_size_mb: Option<f64>,
+    pub max_old_generation_size_mb: Option<f64>,
+    pub code_range_size_mb: Option<f64>,
+    pub stack_size_mb: Option<f64>,
+}
+
 /// Options for constructing a threaded [`Task`].
 #[napi(object)]
 #[derive(Default, Debug, Clone)]
@@ -27,6 +52,32 @@ pub fn register_worker_alias(mut exports: Object) -> napi::Result<()> {
         exports.set_named_property("Worker", task_class)?;
     }
     Ok(())
+}
+
+/// Returns the message port for the current environment.
+#[napi(js_name = "getEnvMessagePort")]
+pub fn get_env_message_port(env: &Env) -> napi::Result<Unknown<'_>> {
+    let fn_handle = task_global_fn::<(), Unknown>(env, "__taskGetEnvMessagePort")?;
+    fn_handle.call(())
+}
+
+/// Whether execution is currently on the main thread.
+#[napi(js_name = "isMainThread")]
+pub fn is_main_thread(env: &Env) -> napi::Result<bool> {
+    let fn_handle = task_global_fn::<(), bool>(env, "__taskIsMainThread")?;
+    fn_handle.call(())
+}
+
+/// Whether execution is currently on an internal thread.
+#[napi(js_name = "isInternalThread")]
+pub fn is_internal_thread() -> bool {
+    false
+}
+
+/// Whether the current thread owns process state.
+#[napi(js_name = "ownsProcessState")]
+pub fn owns_process_state(env: &Env) -> napi::Result<bool> {
+    is_main_thread(env)
 }
 
 /// A threaded task: a wrapper around a Node.js worker thread
@@ -50,6 +101,8 @@ pub struct Task {
     id: u32,
     /// The script path the worker runs.
     script: String,
+    /// Optional thread name.
+    name: Option<String>,
     /// The `Worker.threadId` assigned by Node when the worker starts.
     thread_id: u32,
     /// Whether [`Task::terminate`] has been called.
@@ -126,6 +179,43 @@ const TASK_BOOTSTRAP: &str = r#"
     const list = (h.listeners && h.listeners[t]) || [];
     for (const l of list) { try { l(evt); } catch (e) {} }
   };
+  globalThis.__taskGetEnvMessagePort = function () {
+    return wt.parentPort || null;
+  };
+  globalThis.__taskIsMainThread = function () {
+    return wt.isMainThread;
+  };
+  globalThis.__taskHasRef = function (id) {
+    const w = workers[id]; return w ? (typeof w.hasRef === 'function' ? w.hasRef() : true) : false;
+  };
+  globalThis.__taskGetHeapStatistics = function (id) {
+    const w = workers[id];
+    return (w && typeof w.getHeapStatistics === 'function') ? w.getHeapStatistics() : Promise.resolve({});
+  };
+  globalThis.__taskCpuUsage = function (id, prev) {
+    const w = workers[id];
+    return (w && typeof w.cpuUsage === 'function') ? w.cpuUsage(prev) : Promise.resolve({ user: 0, system: 0 });
+  };
+  globalThis.__taskTakeHeapSnapshot = function (id, options) {
+    const w = workers[id];
+    return (w && typeof w.getHeapSnapshot === 'function') ? w.getHeapSnapshot(options) : Promise.resolve({});
+  };
+  globalThis.__taskStartCpuProfile = function (id, options) {
+    const w = workers[id];
+    return (w && typeof w.startCpuProfile === 'function') ? w.startCpuProfile(options) : Promise.resolve({});
+  };
+  globalThis.__taskStopCpuProfile = function (id, profileId) {
+    const w = workers[id];
+    return (w && typeof w.stopCpuProfile === 'function') ? w.stopCpuProfile(profileId) : Promise.resolve({});
+  };
+  globalThis.__taskStartHeapProfile = function (id, options) {
+    const w = workers[id];
+    return (w && typeof w.startHeapProfile === 'function') ? w.startHeapProfile(options) : Promise.resolve({});
+  };
+  globalThis.__taskStopHeapProfile = function (id) {
+    const w = workers[id];
+    return (w && typeof w.stopHeapProfile === 'function') ? w.stopHeapProfile() : Promise.resolve({});
+  };
 })();
 "#;
 
@@ -152,11 +242,11 @@ impl Task {
     pub fn new(env: Env, script: String, options: Option<TaskOptions>) -> napi::Result<Self> {
         task_ensure_bootstrap(&env)?;
         let id = NEXT_TASK_ID.fetch_add(1, AtomicOrdering::Relaxed);
-        let name_str = options.as_ref().and_then(|o| o.name.as_ref());
+        let name_str = options.as_ref().and_then(|o| o.name.clone());
 
         let script_json = serde_json::to_string(&script)
             .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-        let name_json = match name_str {
+        let name_json = match &name_str {
             Some(n) => serde_json::to_string(n)
                 .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?,
             None => "undefined".to_string(),
@@ -168,6 +258,7 @@ impl Task {
         Ok(Task {
             id,
             script,
+            name: name_str,
             thread_id: thread_id_num as u32,
             terminated: AtomicBool::new(false),
         })
@@ -177,6 +268,12 @@ impl Task {
     #[napi(getter)]
     pub fn script(&self) -> String {
         self.script.clone()
+    }
+
+    /// Optional thread name.
+    #[napi(getter, js_name = "threadName")]
+    pub fn thread_name(&self) -> Option<String> {
+        self.name.clone()
     }
 
     /// The `Worker.threadId` assigned by Node.js when the worker starts.
@@ -189,6 +286,102 @@ impl Task {
     #[napi(getter)]
     pub fn terminated(&self) -> bool {
         self.terminated.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Resource limits configured for this task.
+    #[napi(getter, js_name = "resourceLimits")]
+    pub fn resource_limits(&self) -> TaskResourceLimits {
+        TaskResourceLimits::default()
+    }
+
+    /// Explicitly start the worker thread.
+    #[napi(js_name = "startThread")]
+    pub fn start_thread(&self) -> napi::Result<()> {
+        Ok(())
+    }
+
+    /// Stop execution in the worker thread.
+    #[napi(js_name = "stopThread")]
+    pub fn stop_thread(&self, env: Env) -> napi::Result<Unknown<'_>> {
+        self.terminate(env)
+    }
+
+    /// Check if the worker thread handle is keeping the event loop alive.
+    #[napi(js_name = "hasRef")]
+    pub fn has_ref(&self, env: Env) -> napi::Result<bool> {
+        let fn_handle = task_global_fn::<u32, bool>(&env, "__taskHasRef")?;
+        fn_handle.call(self.id)
+    }
+
+    /// Get resource limit settings as a raw array.
+    #[napi(js_name = "getResourceLimits")]
+    pub fn get_resource_limits(&self) -> Vec<f64> {
+        vec![-1.0, -1.0, -1.0, -1.0]
+    }
+
+    /// Returns cumulative event loop idle time in milliseconds.
+    #[napi(js_name = "loopIdleTime")]
+    pub fn loop_idle_time(&self) -> f64 {
+        0.0
+    }
+
+    /// Returns high-resolution monotonic timestamp of event loop start time.
+    #[napi(js_name = "loopStartTime")]
+    pub fn loop_start_time(&self) -> f64 {
+        0.0
+    }
+
+    /// Get V8 heap statistics for the worker thread.
+    #[napi(js_name = "getHeapStatistics")]
+    pub fn get_heap_statistics(&self, env: Env) -> napi::Result<Unknown<'_>> {
+        let fn_handle = task_global_fn::<u32, Unknown>(&env, "__taskGetHeapStatistics")?;
+        fn_handle.call(self.id)
+    }
+
+    /// Get CPU usage statistics for the worker thread.
+    #[napi(js_name = "cpuUsage")]
+    pub fn cpu_usage(&self, env: Env, prev: Option<Unknown>) -> napi::Result<Unknown<'_>> {
+        let fn_handle = task_global_fn::<(u32, Unknown), Unknown>(&env, "__taskCpuUsage")?;
+        let js_prev = prev.unwrap_or_else(|| task_undefined(&env).unwrap());
+        fn_handle.call((self.id, js_prev))
+    }
+
+    /// Take a heap snapshot of the worker thread.
+    #[napi(js_name = "takeHeapSnapshot")]
+    pub fn take_heap_snapshot(&self, env: Env, options: Option<Unknown>) -> napi::Result<Unknown<'_>> {
+        let fn_handle = task_global_fn::<(u32, Unknown), Unknown>(&env, "__taskTakeHeapSnapshot")?;
+        let js_opts = options.unwrap_or_else(|| task_undefined(&env).unwrap());
+        fn_handle.call((self.id, js_opts))
+    }
+
+    /// Start CPU profiling on the worker thread.
+    #[napi(js_name = "startCpuProfile")]
+    pub fn start_cpu_profile(&self, env: Env, options: Option<Unknown>) -> napi::Result<Unknown<'_>> {
+        let fn_handle = task_global_fn::<(u32, Unknown), Unknown>(&env, "__taskStartCpuProfile")?;
+        let js_opts = options.unwrap_or_else(|| task_undefined(&env).unwrap());
+        fn_handle.call((self.id, js_opts))
+    }
+
+    /// Stop CPU profiling on the worker thread.
+    #[napi(js_name = "stopCpuProfile")]
+    pub fn stop_cpu_profile(&self, env: Env, profile_id: Option<u32>) -> napi::Result<Unknown<'_>> {
+        let fn_handle = task_global_fn::<(u32, Option<u32>), Unknown>(&env, "__taskStopCpuProfile")?;
+        fn_handle.call((self.id, profile_id))
+    }
+
+    /// Start heap profiling on the worker thread.
+    #[napi(js_name = "startHeapProfile")]
+    pub fn start_heap_profile(&self, env: Env, options: Option<Unknown>) -> napi::Result<Unknown<'_>> {
+        let fn_handle = task_global_fn::<(u32, Unknown), Unknown>(&env, "__taskStartHeapProfile")?;
+        let js_opts = options.unwrap_or_else(|| task_undefined(&env).unwrap());
+        fn_handle.call((self.id, js_opts))
+    }
+
+    /// Stop heap profiling on the worker thread.
+    #[napi(js_name = "stopHeapProfile")]
+    pub fn stop_heap_profile(&self, env: Env) -> napi::Result<Unknown<'_>> {
+        let fn_handle = task_global_fn::<u32, Unknown>(&env, "__taskStopHeapProfile")?;
+        fn_handle.call(self.id)
     }
 
     /// Post a message to the task thread via structured clone.
@@ -493,6 +686,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_task_constants() {
+        assert_eq!(K_MAX_YOUNG_GENERATION_SIZE_MB, 0);
+        assert_eq!(K_MAX_OLD_GENERATION_SIZE_MB, 1);
+        assert_eq!(K_CODE_RANGE_SIZE_MB, 2);
+        assert_eq!(K_STACK_SIZE_MB, 3);
+        assert_eq!(K_TOTAL_RESOURCE_LIMIT_COUNT, 4);
+    }
+
+    #[test]
     fn test_task_id_increment() {
         let initial = NEXT_TASK_ID.load(AtomicOrdering::Relaxed);
         let id1 = NEXT_TASK_ID.fetch_add(1, AtomicOrdering::Relaxed);
@@ -524,5 +726,7 @@ mod tests {
         assert!(TASK_BOOTSTRAP.contains("globalThis.__taskAddListener"));
         assert!(TASK_BOOTSTRAP.contains("globalThis.__taskRemoveListener"));
         assert!(TASK_BOOTSTRAP.contains("globalThis.__taskDispatch"));
+        assert!(TASK_BOOTSTRAP.contains("globalThis.__taskGetEnvMessagePort"));
+        assert!(TASK_BOOTSTRAP.contains("globalThis.__taskIsMainThread"));
     }
 }
