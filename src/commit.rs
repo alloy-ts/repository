@@ -1032,6 +1032,27 @@ impl Repository {
         build_commit(&self.inner, commit)
     }
 
+    /// The commit `HEAD` points to. Returns a `Commit` handle; read its sha via
+    /// `commit.id`.
+    #[napi]
+    pub fn head_commit(&self) -> napi::Result<Commit> {
+        let r = thread_local(&self.inner);
+        let commit = r.head_commit().map_err(|e| err("head_commit", e))?;
+        build_commit(&self.inner, commit)
+    }
+
+    /// The hex sha of the commit `HEAD` currently points to, as a plain string.
+    /// Returns `null` when `HEAD` is unborn (no commit yet) — handy for build
+    /// banners and version strings without constructing a `Commit`.
+    #[napi(getter)]
+    pub fn head_commit_id(&self) -> napi::Result<Option<String>> {
+        let r = thread_local(&self.inner);
+        match r.head_commit() {
+            Ok(commit) => Ok(Some(commit.id.to_string())),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Write a loose commit object directly to the object database without moving references.
     #[napi]
     pub fn write_commit(&self, input: CommitInput) -> napi::Result<String> {
