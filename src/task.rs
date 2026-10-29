@@ -115,7 +115,19 @@ static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(1);
 const TASK_BOOTSTRAP: &str = r#"
 (function () {
   if (typeof globalThis.__taskInit === 'function') return;
-  const wt = globalThis.__require('node:worker_threads');
+  let wt;
+  if (typeof globalThis.__require === 'function') {
+    try { wt = globalThis.__require('node:worker_threads'); } catch (e) {}
+  }
+  if (!wt && typeof require === 'function') {
+    try { wt = require('node:worker_threads'); } catch (e) {}
+  }
+  if (!wt && typeof process !== 'undefined' && typeof process.getBuiltinModule === 'function') {
+    try { wt = process.getBuiltinModule('node:module').createRequire(process.cwd() + '/')('node:worker_threads'); } catch (e) {}
+  }
+  if (!wt && typeof process !== 'undefined' && process.mainModule && typeof process.mainModule.require === 'function') {
+    try { wt = process.mainModule.require('node:worker_threads'); } catch (e) {}
+  }
   const workers = (globalThis.__taskWorkers = {});
   const handlers = (globalThis.__taskHandlers = {});
   function fire(id, type, makeEvent) {
@@ -152,7 +164,11 @@ const TASK_BOOTSTRAP: &str = r#"
   globalThis.__taskPost = function (a) {
     const [id, msg, transfer] = a;
     const w = workers[id]; if (!w) return;
-    w.postMessage(msg, transfer === undefined ? undefined : (Array.isArray(transfer) ? transfer : [transfer]));
+    if (transfer !== undefined) {
+      w.postMessage(msg, transfer);
+    } else {
+      w.postMessage(msg);
+    }
   };
   globalThis.__taskTerminate = function (a) {
     const [id] = a; const w = workers[id]; if (!w) return Promise.resolve();
@@ -181,10 +197,11 @@ const TASK_BOOTSTRAP: &str = r#"
   globalThis.__taskDispatch = function (a) {
     const [id, evt] = a;
     const h = handlers[id] || {};
-    const t = evt && evt.type; if (!t) return;
+    const t = evt && evt.type; if (!t) return true;
     if (typeof h[t] === 'function') { try { h[t](evt); } catch (e) {} }
     const list = (h.listeners && h.listeners[t]) || [];
     for (const l of list) { try { l(evt); } catch (e) {} }
+    return !(evt && evt.defaultPrevented);
   };
   globalThis.__taskGetHeapSnapshot = function (a) {
     const [id, opts] = a; const w = workers[id]; if (!w) return undefined;
@@ -293,8 +310,8 @@ impl Task {
     }
 
     /// The `Worker.threadId` assigned to this task (available immediately after
-    /// construction). Mirrors the C++ `Task::thread_id_`.
-    #[napi(getter)]
+    /// construction).
+    #[napi(getter, js_name = "threadId")]
     pub fn get_thread_id(&self) -> u32 {
         self.thread_id
     }
@@ -306,24 +323,17 @@ impl Task {
     }
 
     /// Send `message` to the worker thread. `transfer` is an optional list of
-    /// `ArrayBuffer` / `MessagePort` objects whose ownership is transferred
-    /// (zero-copy) rather than cloned.
-    #[napi]
+    /// transferable objects or an options object.
+    #[napi(js_name = "postMessage")]
     pub fn post_message(
         &self,
         env: Env,
         message: Unknown<'static>,
-        transfer: Option<Vec<Unknown<'static>>>,
+        transfer: Option<Unknown<'static>>,
     ) -> napi::Result<()> {
         let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
         let transfer_unknown = match transfer {
-            Some(t) => {
-                let mut arr = env.create_array(t.len() as u32)?;
-                for (i, item) in t.into_iter().enumerate() {
-                    arr.set(i as u32, item)?;
-                }
-                to_unknown(&env, arr)?
-            }
+            Some(t) => t,
             None => undefined_value(&env)?,
         };
         let args = args_array(&env, &[id_unknown, message, transfer_unknown])?;
@@ -332,8 +342,8 @@ impl Task {
     }
 
     /// Terminate the worker thread. Resolves to the worker's exit code once it
-    /// has exited — mirrors C++ `Task::StopThread` / `JoinThread`.
-    #[napi(ts_return_type = "Promise<number>")]
+    /// has exited.
+    #[napi(js_name = "terminate", ts_return_type = "Promise<number>")]
     pub fn terminate(&self, env: Env) -> napi::Result<Unknown<'static>> {
         let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
         let args = args_array(&env, &[id_unknown])?;
@@ -341,8 +351,13 @@ impl Task {
         task_call(&env, "__taskTerminate", args)
     }
 
-    /// Increment the worker's reference count so it keeps the process alive
-    /// (default). Mirrors C++ `Task::Ref`.
+    /// Increment the worker's reference count.
+    #[napi(js_name = "ref")]
+    pub fn ref_(&self, env: Env) -> napi::Result<()> {
+        self.reference(env)
+    }
+
+    /// Increment the worker's reference count so it keeps the process alive.
     #[napi]
     pub fn reference(&self, env: Env) -> napi::Result<()> {
         let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
@@ -351,8 +366,13 @@ impl Task {
         Ok(())
     }
 
-    /// Decrement the worker's reference count so the process may exit even while
-    /// the worker is running. Mirrors C++ `Task::Unref`.
+    /// Decrement the worker's reference count.
+    #[napi(js_name = "unref")]
+    pub fn unref_(&self, env: Env) -> napi::Result<()> {
+        self.unreference(env)
+    }
+
+    /// Decrement the worker's reference count so the process may exit while worker is running.
     #[napi]
     pub fn unreference(&self, env: Env) -> napi::Result<()> {
         let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
@@ -361,32 +381,32 @@ impl Task {
         Ok(())
     }
 
-    #[napi(getter)]
+    #[napi(getter, js_name = "onmessage")]
     pub fn get_onmessage(&self, env: Env) -> napi::Result<Option<Function<'static>>> {
         task_get_handler(&env, self.id, "message")
     }
 
-    #[napi(setter)]
+    #[napi(setter, js_name = "onmessage")]
     pub fn set_onmessage(&self, env: Env, handler: Option<Function<'static>>) -> napi::Result<()> {
         task_set_handler(&env, self.id, "message", handler)
     }
 
-    #[napi(getter)]
+    #[napi(getter, js_name = "onerror")]
     pub fn get_onerror(&self, env: Env) -> napi::Result<Option<Function<'static>>> {
         task_get_handler(&env, self.id, "error")
     }
 
-    #[napi(setter)]
+    #[napi(setter, js_name = "onerror")]
     pub fn set_onerror(&self, env: Env, handler: Option<Function<'static>>) -> napi::Result<()> {
         task_set_handler(&env, self.id, "error", handler)
     }
 
-    #[napi(getter)]
+    #[napi(getter, js_name = "onmessageerror")]
     pub fn get_onmessageerror(&self, env: Env) -> napi::Result<Option<Function<'static>>> {
         task_get_handler(&env, self.id, "messageerror")
     }
 
-    #[napi(setter)]
+    #[napi(setter, js_name = "onmessageerror")]
     pub fn set_onmessageerror(
         &self,
         env: Env,
@@ -396,7 +416,7 @@ impl Task {
     }
 
     /// Register an event listener (mirrors `EventTarget.addEventListener`).
-    #[napi]
+    #[napi(js_name = "addEventListener")]
     pub fn add_event_listener(
         &self,
         env: Env,
@@ -412,7 +432,7 @@ impl Task {
     }
 
     /// Remove a previously registered event listener.
-    #[napi]
+    #[napi(js_name = "removeEventListener")]
     pub fn remove_event_listener(
         &self,
         env: Env,
@@ -428,12 +448,14 @@ impl Task {
     }
 
     /// Dispatch an event to this task's listeners (mirrors `EventTarget.dispatchEvent`).
-    #[napi]
-    pub fn dispatch_event(&self, env: Env, evt: Unknown<'static>) -> napi::Result<()> {
+    #[napi(js_name = "dispatchEvent")]
+    pub fn dispatch_event(&self, env: Env, evt: Unknown<'static>) -> napi::Result<bool> {
         let id_unknown = to_unknown(&env, env.create_uint32(self.id)?)?;
         let args = args_array(&env, &[id_unknown, evt])?;
-        task_call(&env, "__taskDispatch", args)?;
-        Ok(())
+        let res = task_call(&env, "__taskDispatch", args)?;
+        let raw = unsafe { ToNapiValue::to_napi_value(env.raw(), res)? };
+        let b = unsafe { bool::from_napi_value(env.raw(), raw)? };
+        Ok(b)
     }
 
     /// Capture a heap snapshot of the worker, returned as a Node `Readable`
