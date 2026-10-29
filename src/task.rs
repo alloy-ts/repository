@@ -1,8 +1,9 @@
+use std::cell::Cell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use napi::{Env, JsFunction, JsValue, Unknown};
-use napi::bindgen_prelude::Buffer;
+use napi::Env;
+use napi::bindgen_prelude::{Buffer, Function, JsObjectValue, ToNapiValue, Unknown};
 use napi_derive::napi;
 
 use crate::error::{err, parse_oid, thread_local};
@@ -49,66 +50,99 @@ static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Bootstrap JavaScript installed once per process. It defines global helpers
 /// that create/own the `Worker` instances and forward their `message` / `error`
-/// / `messageerror` events to per-task handlers. The Rust side only ever talks
-/// to these helpers (so arbitrary JS message values never have to cross the
-/// napi boundary as `Send` data — they stay on the JS side, structured-cloned
-/// by `node:worker_threads` itself).
-///
-/// It relies on `globalThis.__require` (a `require` made available by the JS
-/// wrapper, e.g. `globalThis.__require = require` in `index.ts`, since `require`
-/// is not a global inside `run_script`).
+/// / `messageerror` events to per-task handlers.
 const TASK_BOOTSTRAP: &str = r#"
 (function () {
   if (typeof globalThis.__taskInit === 'function') return;
-  const wt = globalThis.__require('node:worker_threads');
+  const getWt = () => {
+    if (typeof process.getBuiltinModule === 'function') {
+      try { return process.getBuiltinModule('node:worker_threads'); } catch (e) {}
+    }
+    if (typeof globalThis.__require === 'function') {
+      try { return globalThis.__require('node:worker_threads'); } catch (e) {}
+    }
+    try { return eval('process.mainModule.require')('node:worker_threads'); } catch (e) {}
+    try { return eval('require')('node:worker_threads'); } catch (e) {}
+    return null;
+  };
+  const wt = getWt();
   const workers = (globalThis.__taskWorkers = {});
   const handlers = (globalThis.__taskHandlers = {});
-  globalThis.__taskInit = function (id, path, name) {
+  globalThis.__taskInit = function (a, b, c) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const path = Array.isArray(a) ? a[1] : b;
+    const name = Array.isArray(a) ? a[2] : c;
     const w = new wt.Worker(path, name ? { name: name } : undefined);
     workers[id] = w;
     const fire = (type, makeEvent) => {
       const h = handlers[id] || {};
       const evt = makeEvent();
-      if (typeof h[type] === 'function') { try { h[type](evt); } catch (e) {} }
+      if (typeof h['on' + type] === 'function') { try { h['on' + type](evt); } catch (e) {} }
       const list = (h.listeners && h.listeners[type]) || [];
       for (const l of list) { try { l(evt); } catch (e) {} }
     };
-    w.on('message', (d) => fire('message', () => ({ data: d })));
-    w.on('error', (e) => fire('error', () => ({ error: e, message: e && e.message })));
-    w.on('messageerror', (e) => fire('messageerror', () => ({ error: e })));
+    w.on('message', (d) => fire('message', () => ({ type: 'message', data: d })));
+    w.on('error', (e) => fire('error', () => ({ type: 'error', error: e, message: e && e.message })));
+    w.on('messageerror', (e) => fire('messageerror', () => ({ type: 'messageerror', error: e })));
     return w.threadId;
   };
-  globalThis.__taskPost = function (id, msg, transfer) {
+  globalThis.__taskPost = function (a, b, c) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const msg = Array.isArray(a) ? a[1] : b;
+    const transfer = Array.isArray(a) ? a[2] : c;
     const w = workers[id]; if (!w) return;
     w.postMessage(msg, transfer === undefined ? undefined : (Array.isArray(transfer) ? transfer : [transfer]));
   };
-  globalThis.__taskTerminate = function (id) {
+  globalThis.__taskTerminate = function (a) {
+    const id = Array.isArray(a) ? a[0] : a;
     const w = workers[id]; if (!w) return Promise.resolve();
+    delete workers[id];
+    delete handlers[id];
     return w.terminate();
   };
-  globalThis.__taskRef = function (id) { const w = workers[id]; if (w && w.ref) w.ref(); };
-  globalThis.__taskUnref = function (id) { const w = workers[id]; if (w && w.unref) w.unref(); };
-  globalThis.__taskSetHandler = function (id, type, fn) {
+  globalThis.__taskRef = function (a) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const w = workers[id]; if (w && w.ref) w.ref();
+  };
+  globalThis.__taskUnref = function (a) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const w = workers[id]; if (w && w.unref) w.unref();
+  };
+  globalThis.__taskSetHandler = function (a, b, c) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const type = Array.isArray(a) ? a[1] : b;
+    const fn = Array.isArray(a) ? a[2] : c;
     const h = handlers[id] || (handlers[id] = { listeners: {} });
-    h[type] = fn;
+    h['on' + type] = fn;
   };
-  globalThis.__taskGetHandler = function (id, type) {
-    const h = handlers[id]; return h ? h[type] : undefined;
+  globalThis.__taskGetHandler = function (a, b) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const type = Array.isArray(a) ? a[1] : b;
+    const h = handlers[id]; return h ? (h['on' + type] || null) : null;
   };
-  globalThis.__taskAddListener = function (id, type, fn) {
+  globalThis.__taskAddListener = function (a, b, c) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const type = Array.isArray(a) ? a[1] : b;
+    const fn = Array.isArray(a) ? a[2] : c;
     const h = handlers[id] || (handlers[id] = { listeners: {} });
     (h.listeners[type] || (h.listeners[type] = [])).push(fn);
   };
-  globalThis.__taskRemoveListener = function (id, type, fn) {
+  globalThis.__taskRemoveListener = function (a, b, c) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const type = Array.isArray(a) ? a[1] : b;
+    const fn = Array.isArray(a) ? a[2] : c;
     const h = handlers[id]; if (!h || !h.listeners || !h.listeners[type]) return;
     h.listeners[type] = h.listeners[type].filter((l) => l !== fn);
   };
-  globalThis.__taskDispatch = function (id, evt) {
+  globalThis.__taskDispatch = function (a, b) {
+    const id = Array.isArray(a) ? a[0] : a;
+    const evt = Array.isArray(a) ? a[1] : b;
     const h = handlers[id] || {};
-    const t = evt && evt.type; if (!t) return;
-    if (typeof h[t] === 'function') { try { h[t](evt); } catch (e) {} }
+    const t = evt && evt.type; if (!t) return false;
+    if (typeof h['on' + t] === 'function') { try { h['on' + t](evt); } catch (e) {} }
     const list = (h.listeners && h.listeners[t]) || [];
     for (const l of list) { try { l(evt); } catch (e) {} }
+    return true;
   };
 })();
 "#;
@@ -118,312 +152,180 @@ fn task_ensure_bootstrap(env: &Env) -> napi::Result<()> {
     Ok(())
 }
 
-fn task_global_fn(env: &Env, name: &str) -> napi::Result<JsFunction> {
-    env.run_script::<_, JsFunction>(format!("globalThis.{name}"))
-}
-
-fn task_undefined(env: &Env) -> napi::Result<Unknown> {
-    env.run_script::<_, Unknown>("undefined")
+fn task_undefined<'a>(env: &'a Env) -> napi::Result<Unknown<'a>> {
+    env.run_script::<_, Unknown<'a>>("undefined")
 }
 
 #[napi]
 impl Task {
-    /// Create a task from either:
-    /// - a JavaScript `Promise` (mandatory work), or
-    /// - a script path `string` (e.g. `"build.ts"`) that is executed via the
-    ///   appropriate runtime (`tsx` for TypeScript, `node` for JavaScript)
-    ///   when the task runs.
-    ///
-    /// `options` is optional and currently carries the desired thread count /
-    /// name.
+    /// Constructs a new threaded [`Task`] that executes the named JavaScript or
+    /// TypeScript file in a separate background worker thread.
     #[napi(constructor)]
-    pub fn new(work: Either<String, Promise<()>>, options: Option<TaskOptions>) -> Self {
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        let (work_promise, script) = match work {
-            Either::A(script) => (None, Some(script)),
-            Either::B(promise) => (Some(promise), None),
+    pub fn new(env: Env, script: String, options: Option<TaskOptions>) -> napi::Result<Self> {
+        task_ensure_bootstrap(&env)?;
+        let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
+        let global = env.get_global()?;
+        let init_fn: Function<(u32, String, Unknown), u32> = global.get_named_property("__taskInit")?;
+        let js_name = match &options.as_ref().and_then(|o| o.name.clone()) {
+            Some(name) => env.create_string(name)?.into_unknown(&env)?,
+            None => task_undefined(&env)?,
         };
-        Task {
-            work: work_promise,
+        let thread_id = init_fn.call((id, script.clone(), js_name))?;
+
+        Ok(Task {
+            id,
             script,
-            options: options.unwrap_or(TaskOptions {
-                threads: None,
-                name: None,
-            }),
-            on_finally: None,
-            state: TaskState::Pending,
-            cancel_tx: Some(cancel_tx),
-            cancel_rx: Some(cancel_rx),
-            native_work: None,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-        }
+            thread_id,
+            terminated: Cell::new(false),
+        })
     }
 
-    /// Execute the task: drive the wrapped promise to completion and resolve
-    /// once it settles. Returns a `Promise<void>` mirroring the work's outcome
-    /// (rejecting if the underlying promise rejected).
-    ///
-    /// If [`cancel`](Self::cancel) is requested while running, `start` detaches
-    /// from the in-flight work and resolves with the task marked `Cancelled`.
-    #[napi(ts_return_type = "Promise<void>")]
-    pub async fn start(&mut self) -> napi::Result<()> {
-        if self.state == TaskState::Cancelled {
-            return Ok(());
-        }
-        // Materialize the work future: a wrapped JS promise, or a script path to
-        // execute (`node <script>`) on the async runtime's blocking pool.
-        let work: std::pin::Pin<Box<dyn std::future::Future<Output = napi::Result<()>> + Send>> =
-            if let Some(work) = self.work.take() {
-                Box::pin(work)
-            } else if let Some(script) = self.script.take() {
-                Box::pin(async move {
-                    let inner = tokio::task::spawn_blocking(move || run_script_blocking(&script))
-                        .await
-                        .map_err(|e| {
-                            napi::Error::new(
-                                napi::Status::GenericFailure,
-                                format!("script task join error: {e}"),
-                            )
-                        })?;
-                    inner
-                })
-            } else {
-                return Ok(());
-            };
-        self.state = TaskState::Running;
-        let cancel_rx = self.cancel_rx.take();
-        let cancel_fut = async {
-            match cancel_rx {
-                Some(rx) => {
-                    let _ = rx.await;
-                }
-                None => std::future::pending::<()>().await,
-            }
-        };
-        tokio::pin!(cancel_fut);
-        tokio::select! {
-            res = work => {
-                self.state = match res {
-                    Ok(()) => TaskState::Resolved,
-                    Err(_) => TaskState::Rejected,
-                };
-            }
-            _ = &mut cancel_fut => {
-                self.state = TaskState::Cancelled;
-            }
-        }
-        if let Some(cb) = &self.on_finally {
-            let _ = cb.call(
-                (),
-                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        }
+    /// The script path this task executes.
+    #[napi(getter)]
+    pub fn script(&self) -> String {
+        self.script.clone()
+    }
+
+    /// The integer thread ID assigned to the background worker thread.
+    #[napi(getter, js_name = "threadId")]
+    pub fn thread_id(&self) -> u32 {
+        self.thread_id
+    }
+
+    /// `onerror` event handler getter.
+    #[napi(getter, js_name = "onerror")]
+    pub fn get_onerror<'a>(&self, env: &'a Env) -> napi::Result<Unknown<'a>> {
+        self.get_handler(env, "error")
+    }
+
+    /// `onerror` event handler setter.
+    #[napi(setter, js_name = "onerror")]
+    pub fn set_onerror(&self, env: Env, handler: Unknown) -> napi::Result<()> {
+        self.set_handler(&env, "error", handler)
+    }
+
+    /// `onmessage` event handler getter.
+    #[napi(getter, js_name = "onmessage")]
+    pub fn get_onmessage<'a>(&self, env: &'a Env) -> napi::Result<Unknown<'a>> {
+        self.get_handler(env, "message")
+    }
+
+    /// `onmessage` event handler setter.
+    #[napi(setter, js_name = "onmessage")]
+    pub fn set_onmessage(&self, env: Env, handler: Unknown) -> napi::Result<()> {
+        self.set_handler(&env, "message", handler)
+    }
+
+    /// `onmessageerror` event handler getter.
+    #[napi(getter, js_name = "onmessageerror")]
+    pub fn get_onmessageerror<'a>(&self, env: &'a Env) -> napi::Result<Unknown<'a>> {
+        self.get_handler(env, "messageerror")
+    }
+
+    /// `onmessageerror` event handler setter.
+    #[napi(setter, js_name = "onmessageerror")]
+    pub fn set_onmessageerror(&self, env: Env, handler: Unknown) -> napi::Result<()> {
+        self.set_handler(&env, "messageerror", handler)
+    }
+
+    /// Appends an event listener for events whose type attribute value is `type`.
+    #[napi(js_name = "addEventListener")]
+    pub fn add_event_listener(
+        &self,
+        env: Env,
+        event_type: String,
+        listener: Unknown,
+        _options: Option<Unknown>,
+    ) -> napi::Result<()> {
+        let global = env.get_global()?;
+        let add_fn: Function<(u32, String, Unknown), ()> = global.get_named_property("__taskAddListener")?;
+        add_fn.call((self.id, event_type, listener))?;
         Ok(())
     }
 
-    /// Request cancellation of a `Pending` or `Running` task.
-    ///
-    /// Returns `true` if the task transitioned to `Cancelled`. Note that an
-    /// arbitrary JavaScript `Promise` (e.g. `cli.build()`) cannot be force-
-    /// aborted from Rust: this detaches `start` from awaiting it and marks the
-    /// task `Cancelled`, but the underlying work (a child process, etc.) may
-    /// keep running until it finishes on its own.
-    #[napi]
-    pub fn cancel(&mut self) -> napi::Result<bool> {
-        if self.state == TaskState::Pending || self.state == TaskState::Running {
-            self.state = TaskState::Cancelled;
-            self.cancel_flag.store(true, Ordering::SeqCst);
-            if let Some(tx) = self.cancel_tx.take() {
-                let _ = tx.send(());
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Current lifecycle [`TaskState`] of the task.
-    #[napi]
-    pub fn status(&self) -> TaskState {
-        self.state
-    }
-
-    /// The blocking/CPU entry point, mirroring `napi::Task::compute`. For a
-    /// promise-based task this simply drives the work to completion; heavy
-    /// synchronous work should instead be offloaded to the libuv thread pool.
-    #[napi(ts_return_type = "Promise<void>")]
-    pub async fn compute(&mut self) -> napi::Result<()> {
-        self.start().await
-    }
-
-    /// Resolve with `value` — the `Promise.resolve` equivalent.
-    #[napi(ts_return_type = "Promise<unknown>")]
-    pub async fn resolve(_env: Env, value: serde_json::Value) -> napi::Result<serde_json::Value> {
-        Ok(value)
-    }
-
-    /// Reject with `reason` — the `Promise.reject` equivalent.
-    #[napi(ts_return_type = "Promise<unknown>")]
-    pub async fn reject(reason: serde_json::Value) -> napi::Result<serde_json::Value> {
-        Err(napi::Error::new(
-            napi::Status::GenericFailure,
-            serde_json::to_string(&reason).unwrap_or_else(|_| "task rejected".to_string()),
-        ))
-    }
-
-    /// Register `callback` to run once the task settles, like `Promise.finally`.
-    ///
-    /// The callback is invoked through a threadsafe function so it is safe to
-    /// fire from the task's completion context. Returns the task for chaining.
-    pub fn finally(
-        &mut self,
+    /// Removes an event listener.
+    #[napi(js_name = "removeEventListener")]
+    pub fn remove_event_listener(
+        &self,
         env: Env,
-        callback: napi::bindgen_prelude::FunctionRef<(), ()>,
+        event_type: String,
+        listener: Unknown,
+        _options: Option<Unknown>,
     ) -> napi::Result<()> {
-        let f = callback.borrow_back(&env)?;
-        let tsfn = f
-            .build_threadsafe_function::<()>()?
-            .build()?;
-        self.on_finally = Some(tsfn);
+        let global = env.get_global()?;
+        let rm_fn: Function<(u32, String, Unknown), ()> = global.get_named_property("__taskRemoveListener")?;
+        rm_fn.call((self.id, event_type, listener))?;
+        Ok(())
+    }
+
+    /// Dispatches a synthetic event `event` to target.
+    #[napi(js_name = "dispatchEvent")]
+    pub fn dispatch_event(&self, env: Env, event: Unknown) -> napi::Result<bool> {
+        let global = env.get_global()?;
+        let disp_fn: Function<(u32, Unknown), bool> = global.get_named_property("__taskDispatch")?;
+        disp_fn.call((self.id, event))
+    }
+
+    /// Clones `message` and transmits it to the task thread.
+    #[napi(js_name = "postMessage")]
+    pub fn post_message(
+        &self,
+        env: Env,
+        message: Unknown,
+        transfer: Option<Unknown>,
+    ) -> napi::Result<()> {
+        let global = env.get_global()?;
+        let post_fn: Function<(u32, Unknown, Unknown), ()> = global.get_named_property("__taskPost")?;
+        let js_transfer = match transfer {
+            Some(t) => t,
+            None => task_undefined(&env)?,
+        };
+        post_fn.call((self.id, message, js_transfer))?;
+        Ok(())
+    }
+
+    /// Ref the task worker thread handle.
+    #[napi(js_name = "ref")]
+    pub fn ref_thread(&self, env: Env) -> napi::Result<()> {
+        let global = env.get_global()?;
+        let ref_fn: Function<u32, ()> = global.get_named_property("__taskRef")?;
+        ref_fn.call(self.id)?;
+        Ok(())
+    }
+
+    /// Unref the task worker thread handle.
+    #[napi(js_name = "unref")]
+    pub fn unref_thread(&self, env: Env) -> napi::Result<()> {
+        let global = env.get_global()?;
+        let unref_fn: Function<u32, ()> = global.get_named_property("__taskUnref")?;
+        unref_fn.call(self.id)?;
+        Ok(())
+    }
+
+    /// Terminate the task worker thread.
+    #[napi(js_name = "terminate")]
+    pub fn terminate(&self, env: Env) -> napi::Result<()> {
+        self.terminated.set(true);
+        let global = env.get_global()?;
+        let term_fn: Function<u32, ()> = global.get_named_property("__taskTerminate")?;
+        term_fn.call(self.id)?;
         Ok(())
     }
 }
 
 impl Task {
-    /// Build a task whose work runs on the libuv thread pool (not the JS event
-    /// loop). `work` is synchronous Rust code executed in `compute()` on a
-    /// worker thread — this is the "threads instead of processes" path. JS
-    /// cannot supply Rust compute, so threaded tasks are constructed in Rust.
-    pub fn with_compute<F>(work: F) -> Self
-    where
-        F: FnOnce() -> napi::Result<()> + Send + 'static,
-    {
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        Task {
-            work: None,
-            script: None,
-            options: TaskOptions {
-                threads: None,
-                name: None,
-            },
-            on_finally: None,
-            state: TaskState::Pending,
-            cancel_tx: Some(cancel_tx),
-            cancel_rx: Some(cancel_rx),
-            native_work: Some(Box::new(work)),
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl napi::Task for Task {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> napi::Result<()> {
-        self.state = TaskState::Running;
-        if self.cancel_flag.load(Ordering::SeqCst) {
-            self.state = TaskState::Cancelled;
-            return Ok(());
-        }
-        if let Some(work) = self.native_work.take() {
-            work()?;
-        } else if let Some(script) = self.script.take() {
-            run_script_blocking(&script)?;
-        }
+    fn set_handler(&self, env: &Env, event_type: &str, handler: Unknown) -> napi::Result<()> {
+        let global = env.get_global()?;
+        let set_fn: Function<(u32, String, Unknown), ()> = global.get_named_property("__taskSetHandler")?;
+        set_fn.call((self.id, event_type.to_string(), handler))?;
         Ok(())
     }
 
-    fn resolve(&mut self, _env: Env, _output: ()) -> napi::Result<()> {
-        self.state = TaskState::Resolved;
-        Ok(())
+    fn get_handler<'a>(&self, env: &'a Env, event_type: &str) -> napi::Result<Unknown<'a>> {
+        let global = env.get_global()?;
+        let get_fn: Function<(u32, String), Unknown<'a>> = global.get_named_property("__taskGetHandler")?;
+        get_fn.call((self.id, event_type.to_string()))
     }
-
-    fn reject(&mut self, _env: Env, err: napi::Error) -> napi::Result<()> {
-        self.state = TaskState::Rejected;
-        Err(err)
-    }
-
-    fn finally(&mut self, _env: Env) -> napi::Result<()> {
-        if let Some(cb) = &self.on_finally {
-            let _ = cb.call(
-                (),
-                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        }
-        Ok(())
-    }
-}
-
-/// Dispatch a [`Task`] (built with native compute via [`Task::with_compute`]) to
-/// the libuv thread pool. Returns a promise that resolves once `compute()`
-/// finishes on a worker thread. Use this instead of [`Task::start`] when the
-/// work is Rust-native and should run on threads rather than as a subprocess.
-#[napi]
-pub fn run_task_on_pool(task: Task) -> napi::Result<AsyncTask<Task>> {
-    Ok(AsyncTask::new(task))
-}
-
-/// Returns `true` for TypeScript-style script extensions.
-fn is_typescript(script: &str) -> bool {
-    let lower = script.to_ascii_lowercase();
-    lower.ends_with(".ts")
-        || lower.ends_with(".mts")
-        || lower.ends_with(".cts")
-        || lower.ends_with(".tsx")
-}
-
-/// Run a script file to completion, waiting for it to exit. This blocks the
-/// calling thread, so it is safe to call from a libuv worker thread (`compute`)
-/// or wrapped in `tokio::task::spawn_blocking`.
-///
-/// The runtime is chosen by extension: `.js`/`.mjs`/`.cjs` run via `node`;
-/// `.ts`/`.mts`/`.cts`/`.tsx` run via `tsx`, with a fallback to `npx tsx` if
-/// `tsx` is not on `PATH`.
-fn run_script_blocking(script: &str) -> napi::Result<()> {
-    let runners: &[&[&str]] = if is_typescript(script) {
-        &[&["tsx"], &["npx", "tsx"]]
-    } else {
-        &[&["node"]]
-    };
-
-    for runner in runners {
-        let (program, rest) = runner.split_first().unwrap();
-        let mut cmd = std::process::Command::new(program);
-        cmd.args(rest).arg(script);
-        match cmd.status() {
-            Ok(status) => {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(napi::Error::new(
-                        napi::Status::GenericFailure,
-                        format!("script `{script}` exited with status {status}"),
-                    ))
-                };
-            }
-            // `tsx` not on PATH → try the next candidate (`npx tsx`).
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                return Err(napi::Error::new(
-                    napi::Status::GenericFailure,
-                    format!("failed to run `{} {script}`: {e}", runner.join(" ")),
-                ));
-            }
-        }
-    }
-
-    Err(napi::Error::new(
-        napi::Status::GenericFailure,
-        format!(
-            "could not find a runner for `{script}` (tried: {})",
-            runners
-                .iter()
-                .map(|r| r.join(" "))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    ))
 }
 
 /// Worktree materialisation task running on the libuv thread pool.
