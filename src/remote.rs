@@ -149,7 +149,7 @@ impl Remote {
     /// Cancel any in-flight fetch started from this remote instance.
     ///
     /// This sets a shared flag that the running fetch checks between network
-    /// operations; it does not forcibly kill the worker thread.
+    /// operations; it does not forcibly kill the task thread.
     #[napi]
     pub fn stop(&self) {
         self.interrupt.store(true, Ordering::Relaxed);
@@ -162,7 +162,7 @@ impl Remote {
     /// `refs` field will be `null` (use a ref-map operation to obtain them). `direction` defaults
     /// to [`Fetch`](RemoteDirection::Fetch) when omitted.
     ///
-    /// Async: the (blocking) network transfer runs on a libuv worker thread.
+    /// Async: the (blocking) network transfer runs on a libuv task thread.
     #[napi(ts_return_type = "Promise<Handshake>")]
     pub fn handshake(
         &self,
@@ -186,7 +186,7 @@ impl Remote {
     /// regardless of the protocol version. `direction` defaults to
     /// [`Fetch`](RemoteDirection::Fetch) when omitted.
     ///
-    /// Async: the (blocking) network transfer runs on a libuv worker thread.
+    /// Async: the (blocking) network transfer runs on a libuv task thread.
     #[napi(ts_return_type = "Promise<RefMap>")]
     pub fn ref_map(
         &self,
@@ -219,7 +219,7 @@ impl Remote {
     /// Unlike [`ref_map`](Self::ref_map), this returns only the flat list of advertised refs
     /// (each a [`HandshakeRef`]) and performs no local tracking-branch mapping.
     ///
-    /// Async: the (blocking) network transfer runs on a libuv worker thread.
+    /// Async: the (blocking) network transfer runs on a libuv task thread.
     #[napi(ts_return_type = "Promise<HandshakeRef[]>")]
     pub fn ls_refs(
         &self,
@@ -244,7 +244,7 @@ impl Remote {
     /// Connects and performs a ref-map so the default branch is discovered regardless
     /// of the protocol version. Returns `null` if the server advertises no `HEAD`.
     ///
-    /// Async: the (blocking) network transfer runs on a libuv worker thread.
+    /// Async: the (blocking) network transfer runs on a libuv task thread.
     #[napi(ts_return_type = "Promise<string | null>")]
     pub fn default_branch(
         &self,
