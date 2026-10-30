@@ -57,6 +57,7 @@ pub(crate) mod remote;
 mod replace;
 mod repository;
 mod req;
+pub mod request;
 mod reset;
 mod revert;
 mod revision;

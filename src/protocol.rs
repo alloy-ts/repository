@@ -21,6 +21,7 @@
 
 use std::collections::HashSet;
 
+use napi::bindgen_prelude::Buffer;
 use crate::error::RepositoryResult as Result;
 use napi_derive::napi;
 
@@ -243,6 +244,91 @@ pub fn capability_value(text: String, name: String) -> napi::Result<Option<Strin
         .capability(name.as_str())
         .and_then(|c| c.value())
         .map(|v| v.to_string()))
+}
+
+/// Fetch git smart HTTP reference advertisement (`GET <url>/info/refs?service=<service>`)
+/// using reqwest HTTP client.
+#[napi]
+pub async fn http_get_info_refs(
+    url: String,
+    service: String,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> napi::Result<Buffer> {
+    let endpoint = format!("{}/info/refs?service={}", url.trim_end_matches('/'), service);
+    let client = reqwest::Client::new();
+    let mut req = client
+        .get(&endpoint)
+        .header("Accept", format!("application/x-{service}-advertisement"))
+        .header("Git-Protocol", "version=2");
+
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            req = req.header(&k, &v);
+        }
+    }
+
+    let res = req
+        .send()
+        .await
+        .map_err(|e| err("http_get_info_refs.send", e))?;
+
+    if !res.status().is_success() {
+        return Err(err_str(
+            "http_get_info_refs",
+            format!("HTTP request failed with status {}", res.status()),
+        ));
+    }
+
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| err("http_get_info_refs.bytes", e))?;
+
+    Ok(Buffer::from(bytes.to_vec()))
+}
+
+/// Execute git smart HTTP service request (`POST <url>/<service>`, e.g., `git-upload-pack` or `git-receive-pack`)
+/// using reqwest HTTP client.
+#[napi]
+pub async fn http_post_service(
+    url: String,
+    service: String,
+    payload: Buffer,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> napi::Result<Buffer> {
+    let endpoint = format!("{}/{}", url.trim_end_matches('/'), service);
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(&endpoint)
+        .header("Content-Type", format!("application/x-{service}-request"))
+        .header("Accept", format!("application/x-{service}-result"))
+        .header("Git-Protocol", "version=2")
+        .body(payload.to_vec());
+
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            req = req.header(&k, &v);
+        }
+    }
+
+    let res = req
+        .send()
+        .await
+        .map_err(|e| err("http_post_service.send", e))?;
+
+    if !res.status().is_success() {
+        return Err(err_str(
+            "http_post_service",
+            format!("HTTP POST request failed with status {}", res.status()),
+        ));
+    }
+
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| err("http_post_service.bytes", e))?;
+
+    Ok(Buffer::from(bytes.to_vec()))
 }
 
 /// Parse one V2 `ls-refs` line into a `gix_protocol::handshake::Ref`, replicating gitoxide's
