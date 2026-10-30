@@ -70,6 +70,14 @@ impl Thread {
     pub fn park_timeout(millis: f64) {
         std_thread::park_timeout(Duration::from_secs_f64(millis / 1000.0));
     }
+
+    /// Returns the number of hardware threads available to the program.
+    #[napi]
+    pub fn available_parallelism() -> Result<u32> {
+        std_thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("failed to query parallelism: {e}")))
+    }
 }
 
 /// Thread factory, mirroring [`std::thread::Builder`].
@@ -107,6 +115,18 @@ impl Builder {
             self.stack_size = Some(size as usize);
         }
         self.clone()
+    }
+
+    /// Returns the configured thread name, if any.
+    #[napi(getter)]
+    pub fn get_name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    /// Returns the configured stack size in bytes, if any.
+    #[napi(getter)]
+    pub fn get_stack_size(&self) -> Option<i64> {
+        self.stack_size.map(|s| s as i64)
     }
 
     /// Spawns a new thread that invokes the JS `task` callback.
@@ -167,6 +187,12 @@ impl JoinHandle {
         Thread {
             inner: self.thread.clone(),
         }
+    }
+
+    /// Checks if the associated thread has finished running.
+    #[napi]
+    pub fn is_finished(&self) -> bool {
+        self.inner.as_ref().map_or(true, |h| h.is_finished())
     }
 
     /// Blocks the calling thread until the spawned thread exits.
@@ -336,5 +362,25 @@ impl ThreadPool {
             let _ = wake.close();
         };
         self.queue_task(work_cb, after_cb).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_thread_available_parallelism() {
+        let p = Thread::available_parallelism().unwrap();
+        assert!(p >= 1);
+    }
+
+    #[test]
+    fn test_builder_getters() {
+        let mut builder = Builder::new();
+        builder.name("my-thread".to_string());
+        builder.stack_size(1024 * 1024);
+        assert_eq!(builder.get_name(), Some("my-thread".to_string()));
+        assert_eq!(builder.get_stack_size(), Some(1024 * 1024));
     }
 }

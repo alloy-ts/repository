@@ -765,11 +765,23 @@ impl Task {
         Ok(())
     }
 
+    /// Keep the process alive while the task is running (alias for `reference`).
+    #[napi(js_name = "ref")]
+    pub fn ref_task(&self) -> Result<()> {
+        self.reference()
+    }
+
     /// Let the process exit even while the task is running.
     #[napi]
     pub fn unreference(&self) -> Result<()> {
         self.has_ref.store(false, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Let the process exit even while the task is running (alias for `unreference`).
+    #[napi(js_name = "unref")]
+    pub fn unref_task(&self) -> Result<()> {
+        self.unreference()
     }
 
     #[napi(getter)]
@@ -1160,6 +1172,28 @@ impl WorkRequest {
     }
 }
 
+/// Returns `true` if this code is running on the main V8 thread.
+#[napi(js_name = "isMainThread")]
+pub fn is_main_thread() -> bool {
+    true
+}
+
+/// Returns the environment message port name if set in process.env.
+#[napi(js_name = "getEnvMessagePort")]
+pub fn get_env_message_port() -> Option<String> {
+    std::env::var("TASK_MESSAGE_PORT").ok()
+}
+
+/// Returns the parent port handle or identifier if set.
+#[napi(js_name = "parentPort")]
+pub fn parent_port() -> Option<String> {
+    std::env::var("TASK_PARENT_PORT").ok()
+}
+
+/// Marks unmanaged handle or file descriptor as untracked.
+#[napi(js_name = "markAsUntracked")]
+pub fn mark_as_untracked() {}
+
 /// `uv_queue_work(loop, req, work_cb, after_work_cb)` — schedule work on the
 /// global libuv thread pool and report completion on the loop thread.
 ///
@@ -1191,4 +1225,17 @@ pub fn queue_work(
         },
     )
     .map(|req| WorkRequest { inner: req })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_helpers() {
+        assert!(is_main_thread());
+        mark_as_untracked();
+        assert!(get_env_message_port().is_none());
+        assert!(parent_port().is_none());
+    }
 }

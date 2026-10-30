@@ -54,6 +54,62 @@ pub fn promise_callback(env: Env, promise: PromiseRaw<'static, u32>) -> Result<U
     Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), raw) })
 }
 
+/// Asynchronously delay execution for `millis` milliseconds and resolve with `value`.
+#[napi]
+pub async fn async_delay(millis: f64, value: u32) -> Result<u32> {
+    tokio::time::sleep(std::time::Duration::from_secs_f64(millis / 1000.0)).await;
+    Ok(value)
+}
+
+/// Await multiple `Promise<u32>` concurrently and return a vector of resolved values.
+#[napi]
+pub async fn async_all(promises: Vec<Promise<u32>>) -> Result<Vec<u32>> {
+    let mut results = Vec::with_capacity(promises.len());
+    for p in promises {
+        results.push(p.await?);
+    }
+    Ok(results)
+}
+
+/// Await multiple `Promise<u32>` and return the result of the first to resolve.
+#[napi]
+pub async fn async_race(promises: Vec<Promise<u32>>) -> Result<u32> {
+    if promises.is_empty() {
+        return Err(Error::new(Status::InvalidArg, "promises array cannot be empty"));
+    }
+    let futures = promises.into_iter().map(|p| Box::pin(async move { p.await }));
+    let (result, _, _) = futures::future::select_all(futures).await;
+    result
+}
+
+/// Await a promise with a timeout in milliseconds. Rejects if timeout expires.
+#[napi]
+pub async fn async_timeout(p: Promise<u32>, timeout_ms: f64) -> Result<u32> {
+    let duration = std::time::Duration::from_secs_f64(timeout_ms / 1000.0);
+    tokio::select! {
+        res = p => res,
+        _ = tokio::time::sleep(duration) => Err(Error::new(Status::GenericFailure, "Operation timed out")),
+    }
+}
+
+/// Synchronously create a resolved JS promise with `value`.
+#[napi(ts_return_type = "Promise<number>")]
+pub fn promise_resolve(env: Env, value: u32) -> Result<Unknown<'static>> {
+    let (deferred, js_promise) = env.create_deferred::<u32, DeferredU32>().map_err(uv_err)?;
+    deferred.resolve(Box::new(move |_env: Env| Ok(value)));
+    let raw = unsafe { ToNapiValue::to_napi_value(env.raw(), js_promise)? };
+    Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), raw) })
+}
+
+/// Synchronously create a rejected JS promise with `reason`.
+#[napi(ts_return_type = "Promise<number>")]
+pub fn promise_reject(env: Env, reason: String) -> Result<Unknown<'static>> {
+    let (deferred, js_promise) = env.create_deferred::<u32, DeferredU32>().map_err(uv_err)?;
+    deferred.reject(Error::new(Status::GenericFailure, reason));
+    let raw = unsafe { ToNapiValue::to_napi_value(env.raw(), js_promise)? };
+    Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), raw) })
+}
+
 /// **AsyncBlock** (return a JS `Promise` built from a Rust future).
 ///
 /// Unlike `Promise<T>` (receive-only), `AsyncBlock<T>` is a manually built future
