@@ -17,6 +17,7 @@ use gix::zlib::Compression;
 use crate::error::{err, err_str, parse_oid};
 use crate::object::{kind_to_string, string_to_kind};
 
+pub mod arrow;
 pub mod base;
 pub mod loose;
 pub mod memory;
@@ -159,6 +160,7 @@ enum WriterTarget {
     Loose(Mutex<gix::odb::loose::Store>),
     Handle(Mutex<HandleStore>),
     Memory(Arc<crate::object_store::memory::InMemoryStore>),
+    Arrow(Arc<crate::object_store::arrow::ArrowOdbStore>),
 }
 
 /// A streaming reader over an object's raw, decompressed content.
@@ -262,6 +264,7 @@ impl ObjectStoreWriter {
                     .map_err(|e| err("finalize", e))?
             }
             WriterTarget::Memory(store) => store.write_object(self.kind, &self.buf)?,
+            WriterTarget::Arrow(store) => store.write_object(self.kind, &self.buf)?,
         };
         Ok(id.to_string())
     }
