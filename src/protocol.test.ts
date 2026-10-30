@@ -2,10 +2,13 @@ import { describe, expect, test } from "vite-plus/test";
 
 import {
   capabilitiesSupports,
+  HttpTransport,
   parseCapabilities,
+  parseRemoteProgress,
   RefPrefixes,
   refPrefixesFromSpecs,
   RefSpecOperation,
+  Service,
 } from "./main.ts";
 
 describe("RefPrefixes (src/protocol.rs)", () => {
@@ -98,5 +101,29 @@ describe("Capabilities (src/protocol.rs)", () => {
     expect(capabilitiesSupports(line, "fetch")).toBe(true);
     expect(capabilitiesSupports(line, "unborn")).toBe(false);
     expect(capabilitiesSupports(line, "ref-in-want")).toBeNull();
+  });
+});
+
+describe("HttpTransport & RemoteProgress (src/protocol.rs)", () => {
+  test("HttpTransport can be constructed", () => {
+    const transport = new HttpTransport();
+    expect(transport).toBeDefined();
+  });
+
+  test("parseRemoteProgress parses progress line", () => {
+    const parsed = parseRemoteProgress("Counting objects: 50% (10/20)");
+    expect(parsed).toEqual({
+      action: "Counting objects",
+      percent: 50,
+      step: 10,
+      max: 20,
+    });
+  });
+
+  test("Service enum values exist", () => {
+    expect(Service.UploadPackLs).toBeDefined();
+    expect(Service.UploadPack).toBeDefined();
+    expect(Service.ReceivePackLs).toBeDefined();
+    expect(Service.ReceivePack).toBeDefined();
   });
 });

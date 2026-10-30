@@ -26,7 +26,7 @@ pub(crate) struct InMemoryStore {
 }
 
 impl InMemoryStore {
-    fn new(kind: gix::hash::Kind) -> Self {
+    pub(crate) fn new(kind: gix::hash::Kind) -> Self {
         Self {
             objects: Mutex::new(HashMap::new()),
             kind,

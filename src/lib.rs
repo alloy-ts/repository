@@ -32,6 +32,7 @@ mod log;
 mod mailmap;
 mod merge;
 mod metrics;
+pub(crate) mod negotiate;
 mod namespace;
 mod note;
 mod object;

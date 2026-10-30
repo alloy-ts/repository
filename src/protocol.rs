@@ -5,21 +5,8 @@
 //! `gix_protocol::ls_refs::RefPrefixes`, which computes the `ref-prefix` arguments sent to a V2
 //! server during the `ls-refs` command. On top of that it exposes helpers for parsing the raw
 //! capability advertisement a server sends during the handshake.
-//!
-//! Note on scope: `gix_protocol` re-exports a deliberately small surface. The `ls-refs`
-//! `LsRefsCommand` struct is public, but its `peel`/`symrefs`/`ref-in-want` command arguments are
-//! private, and `gix::remote`'s `ref_map` does not forward them — so there is no public way to
-//! request peeled/symbolic-ref ref lists from JS without re-implementing gitoxide's
-//! handshake→ls-refs→parse pipeline. Invoking `ls-refs` (with the options gitoxide *does* support,
-//! e.g. `unborn` when the server advertises it) is therefore done through the higher-level
-//! [`Remote::ls_refs`](crate::remote::Remote::ls_refs); this module provides the building blocks
-//! (prefix computation, capability parsing) around it.
-//!
-//! `gix_protocol::ls_refs::RefPrefixes` keeps its `prefixes` field and `into_args` method private,
-//! so we mirror the computed prefixes locally to serialize them (the wire form prepends
-//! `ref-prefix `).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
 use crate::error::RepositoryResult as Result;
 use napi_derive::napi;
@@ -28,6 +15,298 @@ use crate::error::{err, err_str};
 use crate::refspec::{RefSpecOperation, to_refspec_operation};
 use crate::remote::HandshakeRef;
 use gix::bstr::ByteVec;
+
+/// Actions that a smart transport can ask a subtransport to perform.
+#[napi]
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum Service {
+    UploadPackLs,
+    UploadPack,
+    ReceivePackLs,
+    ReceivePack,
+}
+
+/// HTTP Response returned by [`HttpTransport`].
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct HttpResponse {
+    pub status_code: u16,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+/// A transport using reqwest for HTTP network communication with Git remotes.
+#[napi]
+pub struct HttpTransport {
+    client: reqwest::Client,
+}
+
+#[napi]
+impl HttpTransport {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .user_agent("git/gix-repository")
+                .build()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Perform a smart service request over HTTP(S).
+    #[napi]
+    pub async fn request_smart_service(
+        &self,
+        url: String,
+        service: Service,
+        headers: Option<HashMap<String, String>>,
+        body: Option<Vec<u8>>,
+    ) -> napi::Result<HttpResponse> {
+        let (method, endpoint, accept, content_type) = match service {
+            Service::UploadPackLs => (
+                reqwest::Method::GET,
+                "/info/refs?service=git-upload-pack",
+                "application/x-git-upload-pack-advertisement",
+                None,
+            ),
+            Service::UploadPack => (
+                reqwest::Method::POST,
+                "/git-upload-pack",
+                "application/x-git-upload-pack-result",
+                Some("application/x-git-upload-pack-request"),
+            ),
+            Service::ReceivePackLs => (
+                reqwest::Method::GET,
+                "/info/refs?service=git-receive-pack",
+                "application/x-git-receive-pack-advertisement",
+                None,
+            ),
+            Service::ReceivePack => (
+                reqwest::Method::POST,
+                "/git-receive-pack",
+                "application/x-git-receive-pack-result",
+                Some("application/x-git-receive-pack-request"),
+            ),
+        };
+
+        let base_url = url.trim_end_matches('/');
+        let (path_part, query_part) = match endpoint.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (endpoint, None),
+        };
+
+        let full_url = if base_url.ends_with(path_part) {
+            if let Some(q) = query_part {
+                if base_url.contains('?') {
+                    format!("{base_url}&{q}")
+                } else {
+                    format!("{base_url}?{q}")
+                }
+            } else {
+                base_url.to_string()
+            }
+        } else {
+            format!("{base_url}{endpoint}")
+        };
+
+        let mut req = self.client.request(method, &full_url);
+        req = req.header("Accept", accept);
+
+        if let Some(ct) = content_type {
+            req = req.header("Content-Type", ct);
+        }
+
+        if let Some(hdrs) = headers {
+            for (k, v) in hdrs {
+                req = req.header(&k, &v);
+            }
+        }
+
+        if let Some(b) = body {
+            req = req.body(b);
+        }
+
+        let resp = req.send().await.map_err(|e| err("http_transport.send", e))?;
+        let status_code = resp.status().as_u16();
+
+        let mut res_headers = HashMap::new();
+        for (k, v) in resp.headers() {
+            if let Ok(val) = v.to_str() {
+                res_headers.insert(k.as_str().to_string(), val.to_string());
+            }
+        }
+
+        let resp_body = resp.bytes().await.map_err(|e| err("http_transport.bytes", e))?.to_vec();
+
+        Ok(HttpResponse {
+            status_code,
+            headers: res_headers,
+            body: resp_body,
+        })
+    }
+}
+
+/// SSH Response returned by [`SshTransport`].
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct SshResponse {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// A transport for executing Git commands over SSH.
+#[napi]
+pub struct SshTransport {
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<String>,
+}
+
+#[napi]
+impl SshTransport {
+    #[napi(constructor)]
+    pub fn new(user: Option<String>, port: Option<u16>, identity_file: Option<String>) -> Self {
+        Self {
+            user,
+            port,
+            identity_file,
+        }
+    }
+
+    /// Execute a remote git command via SSH.
+    #[napi]
+    pub async fn exec_command(
+        &self,
+        host: String,
+        command: String,
+        stdin: Option<Vec<u8>>,
+    ) -> napi::Result<SshResponse> {
+        let mut cmd = std::process::Command::new("ssh");
+        if let Some(port) = self.port {
+            cmd.arg("-p").arg(port.to_string());
+        }
+        if let Some(ref id) = self.identity_file {
+            cmd.arg("-i").arg(id);
+        }
+        let destination = if let Some(ref user) = self.user {
+            format!("{user}@{host}")
+        } else {
+            host
+        };
+        cmd.arg(destination).arg(command);
+
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| err("ssh_transport.spawn", e))?;
+
+        if let Some(input) = stdin {
+            if let Some(mut stdin_pipe) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin_pipe.write_all(&input);
+            }
+        }
+
+        let output = child.wait_with_output().map_err(|e| err("ssh_transport.wait", e))?;
+
+        Ok(SshResponse {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+}
+
+/// Information parsed from remote progress messages sent by a git server.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ParsedRemoteProgress {
+    pub action: String,
+    pub percent: Option<u32>,
+    pub step: Option<u32>,
+    pub max: Option<u32>,
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub struct RemoteProgress<'a> {
+    pub action: &'a gix::bstr::BStr,
+    pub percent: Option<u32>,
+    pub step: Option<usize>,
+    pub max: Option<usize>,
+}
+
+fn parse_number(i: &mut &[u8]) -> Option<usize> {
+    let len = i.iter().take_while(|b| b.is_ascii_digit()).count();
+    if len == 0 {
+        return None;
+    }
+    let (number, rest) = i.split_at(len);
+    *i = rest;
+    std::str::from_utf8(number).ok()?.parse::<usize>().ok()
+}
+
+fn skip_until_digit_or_to_end(i: &mut &[u8]) {
+    let pos = i.iter().position(u8::is_ascii_digit).unwrap_or(i.len());
+    *i = &i[pos..];
+}
+
+fn next_optional_percentage(i: &mut &[u8]) -> Option<u32> {
+    let before = *i;
+    skip_until_digit_or_to_end(i);
+    let number = parse_number(i)?;
+    if let Some(rest) = i.strip_prefix(b"%") {
+        *i = rest;
+        u32::try_from(number).ok()
+    } else {
+        *i = before;
+        None
+    }
+}
+
+fn next_optional_number(i: &mut &[u8]) -> Option<usize> {
+    skip_until_digit_or_to_end(i);
+    parse_number(i)
+}
+
+fn parse_progress<'i>(line: &mut &'i [u8]) -> std::result::Result<RemoteProgress<'i>, ()> {
+    let action_end = line.iter().position(|b| *b == b':').ok_or(())?;
+    if action_end == 0 {
+        return Err(());
+    }
+    let action = &line[..action_end];
+    *line = &line[action_end..];
+    let percent = next_optional_percentage(line);
+    let step = next_optional_number(line);
+    let max = next_optional_number(line);
+    Ok(RemoteProgress {
+        action: gix::bstr::BStr::new(action),
+        percent,
+        step,
+        max,
+    })
+}
+
+impl RemoteProgress<'_> {
+    pub fn from_bytes(mut line: &[u8]) -> Option<RemoteProgress<'_>> {
+        parse_progress(&mut line)
+            .ok()
+            .filter(|&r| !(r.percent.is_none() && r.step.is_none() && r.max.is_none()))
+    }
+}
+
+/// Parse a remote progress line sent by a git server during fetch/clone/push.
+#[napi]
+pub fn parse_remote_progress(line: String) -> Option<ParsedRemoteProgress> {
+    let rp = RemoteProgress::from_bytes(line.as_bytes())?;
+    Some(ParsedRemoteProgress {
+        action: rp.action.to_string(),
+        percent: rp.percent,
+        step: rp.step.map(|s| s as u32),
+        max: rp.max.map(|m| m as u32),
+    })
+}
 
 /// `ref-prefix` arguments sent to a V2 server during `ls-refs`.
 ///

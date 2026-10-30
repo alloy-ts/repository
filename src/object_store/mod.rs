@@ -19,8 +19,11 @@ use crate::object::{kind_to_string, string_to_kind};
 
 pub mod arrow;
 pub mod base;
+pub mod client;
+pub mod fjall;
 pub mod loose;
 pub mod memory;
+pub mod stream;
 
 /// Lower-cased string form of a hash kind (`"sha1"` / `"sha256"`). `gix::hash::Kind` is
 /// `#[non_exhaustive]`, so any future kind is reported as `sha256`.
