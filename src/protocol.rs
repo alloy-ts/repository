@@ -334,3 +334,76 @@ fn parse_single_ref_line(line: &str) -> napi::Result<gix_protocol::handshake::Re
         _ => Err(err_str("ref.parse", "ref line must be '<oid> <path>'")),
     }
 }
+
+/// Perform a Git Smart HTTP `info/refs` GET request using reqwest.
+///
+/// `service` defaults to `"git-upload-pack"`.
+/// `git_protocol` defaults to `"version=2"`.
+#[napi]
+pub async fn git_http_info_refs(
+    url: String,
+    service: Option<String>,
+    git_protocol: Option<String>,
+) -> napi::Result<crate::request::HttpResponse> {
+    let service = service.unwrap_or_else(|| "git-upload-pack".to_string());
+    let proto = git_protocol.unwrap_or_else(|| "version=2".to_string());
+
+    let target_url = format!(
+        "{}/info/refs?service={}",
+        url.trim_end_matches('/'),
+        service
+    );
+
+    let client = crate::request::HttpClient::new(None)?;
+    let mut req = crate::request::HttpRequest::new(target_url, Some("GET".to_string()));
+    req.set_header("Git-Protocol".to_string(), proto);
+    req.set_header("User-Agent".to_string(), "git/2.40.0".to_string());
+    req.set_header("Accept".to_string(), format!("application/x-{service}-advertisement, */*"));
+
+    client.fetch(&req).await
+}
+
+/// Perform a Git Smart HTTP RPC POST request (e.g. `git-upload-pack` or `git-receive-pack`) using reqwest.
+#[napi]
+pub async fn git_http_rpc(
+    url: String,
+    service: String,
+    body: napi::bindgen_prelude::Buffer,
+    git_protocol: Option<String>,
+) -> napi::Result<crate::request::HttpResponse> {
+    let proto = git_protocol.unwrap_or_else(|| "version=2".to_string());
+    let target_url = format!("{}/{}", url.trim_end_matches('/'), service);
+
+    let client = crate::request::HttpClient::new(None)?;
+    let mut req = crate::request::HttpRequest::new(target_url, Some("POST".to_string()));
+    req.set_header("Git-Protocol".to_string(), proto);
+    req.set_header("User-Agent".to_string(), "git/2.40.0".to_string());
+    req.set_header(
+        "Content-Type".to_string(),
+        format!("application/x-{service}-request"),
+    );
+    req.set_header(
+        "Accept".to_string(),
+        format!("application/x-{service}-result"),
+    );
+    req.set_body(body);
+
+    client.fetch(&req).await
+}
+
+/// Fetch and parse Smart HTTP ref advertisements for a remote repository URL.
+#[napi]
+pub async fn git_http_ls_refs(
+    url: String,
+    service: Option<String>,
+) -> napi::Result<Vec<HandshakeRef>> {
+    let res = git_http_info_refs(url, service, Some("version=2".to_string())).await?;
+    if res.status() != 200 {
+        return Err(err_str(
+            "git_http_ls_refs",
+            format!("HTTP {} {}", res.status(), res.status_text()),
+        ));
+    }
+    let text = res.text()?;
+    parse_ref_advertisement(text)
+}

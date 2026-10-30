@@ -71,7 +71,15 @@ hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
 pgp = "0.21.0"
-object_store = "0.14.2"
+ring = "0.17.14"
+reqwest = { version = "0.13.5", features = ["json", "stream"] }
+object_store = { version = "0.14.2", default-features = false, features = [
+  "fs",
+  "http",
+  "reqwest",
+  "cloud-base",
+  "ring",
+] }
 bytes = "1"
 
 [build-dependencies]
