@@ -12,7 +12,8 @@ use object_store::ObjectStore as ArrowStore;
 use object_store::ObjectStoreExt;
 
 use gix::object::Kind;
-use gix::zlib::stream::{deflate, inflate};
+use gix::zlib::stream::deflate;
+use flate2::read::ZlibDecoder;
 use gix::zlib::Compression;
 use gix::ObjectId;
 
@@ -146,7 +147,7 @@ impl ObjectStore for ArrowObjectStore {
                     .map_err(|e| err("find", e))?;
 
                 let mut decompressed = Vec::new();
-                let mut decoder = inflate::BufRead::new(bytes.as_ref());
+                let mut decoder = ZlibDecoder::new(bytes.as_ref());
                 decoder.read_to_end(&mut decompressed).map_err(|e| err("decompress", e))?;
 
                 let null_pos = decompressed.iter().position(|&b| b == 0)

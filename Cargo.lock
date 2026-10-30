@@ -4973,6 +4973,7 @@ dependencies = [
  "chrono",
  "filetime",
  "fjall",
+ "flate2",
  "futures",
  "gix",
  "gix-chunk",
