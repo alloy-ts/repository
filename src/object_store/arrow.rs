@@ -123,6 +123,30 @@ fn zlib_inflate(compressed: &[u8]) -> napi::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Metadata returned by listing objects in an [`ArrowObjectStore`].
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ObjectStoreListMeta {
+    /// Object location or path in the store.
+    pub location: String,
+    /// Encoded object size in bytes.
+    pub size: f64,
+    /// Last modified timestamp in milliseconds since epoch.
+    pub last_modified_ms: f64,
+    /// Entity tag (ETag) if present.
+    pub e_tag: Option<String>,
+}
+
+/// Result returned by `listWithDelimiter` in an [`ArrowObjectStore`].
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ObjectStoreListResult {
+    /// Common prefixes (directories) identified by delimiter.
+    pub common_prefixes: Vec<String>,
+    /// Object metadata entries in the current prefix.
+    pub objects: Vec<ObjectStoreListMeta>,
+}
+
 /// The storage backend: an `Arc<dyn object_store::ObjectStore>` plus the metadata we need to bridge
 /// back to git (hash kind, a human-readable root, and — for local filesystems — the on-disk prefix so
 /// we can resolve `object_path`).
@@ -199,6 +223,53 @@ impl ArrowStore {
             }
         }
         Ok(out)
+    }
+
+    /// List metadata of objects matching optional prefix.
+    fn list_meta(&self, prefix: Option<&str>) -> napi::Result<Vec<ObjectStoreListMeta>> {
+        let path_prefix = prefix.and_then(|p| object_store::path::Path::parse(p).ok());
+        let mut stream = self.store.list(path_prefix.as_ref());
+        let mut out = Vec::new();
+        loop {
+            match runtime().block_on(StreamExt::next(&mut stream)) {
+                Some(Ok(meta)) => {
+                    out.push(ObjectStoreListMeta {
+                        location: meta.location.to_string(),
+                        size: meta.size as f64,
+                        last_modified_ms: meta.last_modified.timestamp_millis() as f64,
+                        e_tag: meta.e_tag,
+                    });
+                }
+                Some(Err(e)) => return Err(err("arrow_list", e)),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// List objects with delimiter grouping for prefix traversal.
+    fn list_with_delimiter(&self, prefix: Option<&str>) -> napi::Result<ObjectStoreListResult> {
+        let path_prefix = prefix.and_then(|p| object_store::path::Path::parse(p).ok());
+        let res = runtime()
+            .block_on(self.store.list_with_delimiter(path_prefix.as_ref()))
+            .map_err(|e| err("arrow_list_with_delimiter", e))?;
+
+        let common_prefixes = res.common_prefixes.into_iter().map(|p| p.to_string()).collect();
+        let objects = res
+            .objects
+            .into_iter()
+            .map(|meta| ObjectStoreListMeta {
+                location: meta.location.to_string(),
+                size: meta.size as f64,
+                last_modified_ms: meta.last_modified.timestamp_millis() as f64,
+                e_tag: meta.e_tag,
+            })
+            .collect();
+
+        Ok(ObjectStoreListResult {
+            common_prefixes,
+            objects,
+        })
     }
 
     /// Write a fresh object, hashing its content to derive the id.
@@ -503,5 +574,17 @@ impl ArrowObjectStore {
     #[napi]
     pub fn size(&self) -> napi::Result<f64> {
         Ok(self.inner.list_ids()?.len() as f64)
+    }
+
+    /// List object metadata entries with an optional path prefix.
+    #[napi]
+    pub fn list(&self, prefix: Option<String>) -> napi::Result<Vec<ObjectStoreListMeta>> {
+        self.inner.list_meta(prefix.as_deref())
+    }
+
+    /// List objects under prefix, grouping child directories by delimiter into `common_prefixes`.
+    #[napi]
+    pub fn list_with_delimiter(&self, prefix: Option<String>) -> napi::Result<ObjectStoreListResult> {
+        self.inner.list_with_delimiter(prefix.as_deref())
     }
 }

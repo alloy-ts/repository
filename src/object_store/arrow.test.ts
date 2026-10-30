@@ -165,7 +165,22 @@ describe("ArrowObjectStore (src/object_store/arrow.rs)", () => {
     expect(Buffer.from(store.tryFind(id)!.data).equals(blob)).toBe(true);
     expect(store.tryHeader(id)!.size).toBe(blob.length);
 
-    // And a real `git` must be able to read it when placed under `.git/objects`.
+  test("list() and listWithDelimiter() enumerate stored objects", () => {
+    const store = new ArrowObjectStore("memory", "sha1");
+    const id1 = store.writeObject("blob", Buffer.from("list-item-1\n"));
+    const id2 = store.writeObject("blob", Buffer.from("list-item-2\n"));
+
+    const items = store.list();
+    expect(items.length).toBe(2);
+    expect(items.map((i) => i.location)).toContain(id1);
+    expect(items.map((i) => i.location)).toContain(id2);
+
+    const res = store.listWithDelimiter();
+    expect(res.objects.length).toBe(2);
+    expect(res.commonPrefixes).toEqual([]);
+  });
+
+  // And a real `git` must be able to read it when placed under `.git/objects`.
     let gitReads = false;
     try {
       execSync("git --version");

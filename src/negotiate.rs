@@ -97,8 +97,9 @@ pub fn negotiation_window_size(stateless: bool, previous: Option<u32>) -> u32 {
 ///
 /// Async: the (blocking) network transfer and object traversal run on a libuv
 /// task thread.
-#[napi(ts_return_type = "Promise<NegotiateAction>")]
+#[napi]
 impl Remote {
+    #[napi(ts_return_type = "Promise<NegotiateAction>")]
     pub fn prepare_negotiation(
         &self,
         depth: Option<u32>,
@@ -159,7 +160,7 @@ impl Task for PrepareNegotiationTask {
         let action = negotiate::mark_complete_and_common_ref(
             &r.objects,
             &r.refs,
-            || Ok(Vec::<(RefStore, OdbHandle)>::new()),
+            || Ok(Vec::<(RefStore, OdbHandle)>::new().into_iter()),
             negotiator.as_mut(),
             &mut graph,
             &ref_map,

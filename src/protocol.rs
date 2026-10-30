@@ -195,6 +195,7 @@ fn with_nul(input: String) -> Vec<u8> {
 /// V2 protocol commands — the gitoxide analog of git2-curl's `Service`
 /// (UploadPackLs / UploadPack / ReceivePackLs / ReceivePack). gix exposes the read side
 /// (`ls-refs`, `fetch`, `object-info`); push has no V2 command binding, so it is omitted.
+#[derive(Clone, Copy)]
 #[napi]
 pub enum ProtocolCommand {
     /// `ls-refs` — advertise refs (git-upload-pack advertisement).
@@ -230,6 +231,75 @@ pub fn parse_ref_advertisement(text: String) -> napi::Result<Vec<HandshakeRef>> 
         out.push(crate::remote::convert_ref(r));
     }
     Ok(out)
+}
+
+/// Helper to construct Git Smart HTTP URL for a given command/service.
+#[napi]
+pub fn git_service_url(base_url: String, command: ProtocolCommand) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    match command {
+        ProtocolCommand::LsRefs => format!("{trimmed}/info/refs?service=git-upload-pack"),
+        ProtocolCommand::Fetch | ProtocolCommand::ObjectInfo => format!("{trimmed}/git-upload-pack"),
+    }
+}
+
+/// Execute a Git V2 protocol request over Smart HTTP asynchronously using reqwest.
+#[napi]
+pub async fn execute_git_protocol_request(
+    url: String,
+    command: ProtocolCommand,
+    body: Option<napi::bindgen_prelude::Buffer>,
+    extra_headers: Option<std::collections::HashMap<String, String>>,
+) -> napi::Result<napi::bindgen_prelude::Buffer> {
+    let target_url = git_service_url(url, command);
+
+    let client = reqwest::ClientBuilder::new()
+        .user_agent("repository-git-protocol/0.1.0")
+        .build()
+        .map_err(|e| err_str("execute_git_protocol_request", format!("Failed to build reqwest client: {e:?}")))?;
+
+    let mut request = match command {
+        ProtocolCommand::LsRefs if body.is_none() => client.get(&target_url),
+        _ => client.post(&target_url),
+    };
+
+    request = request
+        .header("Git-Protocol", "version=2")
+        .header("Accept", "application/x-git-upload-pack-result");
+
+    if body.is_some() {
+        request = request.header("Content-Type", "application/x-git-upload-pack-request");
+    }
+
+    if let Some(headers) = extra_headers {
+        for (k, v) in headers {
+            request = request.header(k, v);
+        }
+    }
+
+    if let Some(payload) = body {
+        request = request.body(payload.to_vec());
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| err_str("execute_git_protocol_request", format!("HTTP request failed: {e:?}")))?;
+
+    if !response.status().is_success() {
+        return Err(err_str(
+            "execute_git_protocol_request",
+            format!("HTTP request failed with status code {}", response.status()),
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| err_str("execute_git_protocol_request", format!("Failed to read response body: {e:?}")))?
+        .to_vec();
+
+    Ok(napi::bindgen_prelude::Buffer::from(bytes))
 }
 
 /// Value of a server capability, given the same capability string as [`parse_capabilities`].
