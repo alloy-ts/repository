@@ -18,12 +18,14 @@ use crate::object::{kind_to_string, string_to_kind};
 
 pub mod arrow;
 pub mod base;
+pub mod client;
 pub mod fjall;
 pub mod loose;
 pub mod memory;
 pub mod stream;
 
 pub use arrow::ArrowObjectStore;
+pub use client::{ObjectStoreClient, TransportType};
 pub use fjall::FjallObjectStore;
 pub use loose::LooseObjectStore;
 pub use memory::MemoryObjectStore;

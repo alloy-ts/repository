@@ -18,6 +18,7 @@ let arrowCount = 0;
 beforeAll(() => {
   base = mkdtempSync(join(tmpdir(), "object-store-base-"));
 });
+
 afterAll(() => {
   rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 });

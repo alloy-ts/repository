@@ -33,11 +33,11 @@ fn object_location(id: &str) -> ArrowPath {
 
 /// Helper to execute async `object_store` futures synchronously within NAPI methods.
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(future))
-    } else {
-        futures::executor::block_on(future)
-    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create tokio runtime");
+    rt.block_on(future)
 }
 
 /// Parse a raw git object payload (`"<kind> <len>\0<data>"`) or separate header/data into `(Kind, Vec<u8>)`.
