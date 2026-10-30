@@ -17,11 +17,13 @@ use gix::zlib::Compression;
 use crate::error::{err, err_str, parse_oid};
 use crate::object::{kind_to_string, string_to_kind};
 
+pub mod arrow;
 pub mod base;
 pub mod loose;
 pub mod memory;
 pub mod stream;
 
+pub use arrow::ArrowObjectStore;
 pub use base::{PutPayload, PutPayloadMut};
 pub use stream::StreamObjectStore;
 
