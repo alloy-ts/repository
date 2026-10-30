@@ -73,6 +73,7 @@ sha2 = "0.10"
 pgp = "0.21.0"
 object_store = "0.14.2"
 bytes = "1.12.1"
+reqwest = "0.12"
 flate2 = "1.1.10"
 
 [build-dependencies]

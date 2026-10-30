@@ -19,12 +19,16 @@ use crate::object::{kind_to_string, string_to_kind};
 
 pub mod arrow;
 pub mod base;
+pub mod client;
 pub mod loose;
 pub mod memory;
 pub mod stream;
 
 pub use arrow::ArrowObjectStore;
 pub use base::{PutPayload, PutPayloadMut};
+pub use client::{ObjectStoreClient, ObjectStoreClientOptions};
+pub use loose::LooseObjectStore;
+pub use memory::MemoryObjectStore;
 pub use stream::StreamObjectStore;
 
 /// Lower-cased string form of a hash kind (`"sha1"` / `"sha256"`). `gix::hash::Kind` is
