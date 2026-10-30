@@ -30,6 +30,20 @@ use crate::object_store::{
     ObjectStoreOptions, ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget,
     object_kind_from_option,
 };
+
+/// Metadata for an object returned during Arrow object store listing.
+#[napi(object)]
+pub struct ArrowObjectMeta {
+    pub location: String,
+    pub size: f64,
+}
+
+/// Result of a delimiter-based listing call.
+#[napi(object)]
+pub struct ArrowListResult {
+    pub objects: Vec<ArrowObjectMeta>,
+    pub common_prefixes: Vec<String>,
+}
 use object_store::{ObjectStore as _, ObjectStoreExt};
 
 /// A dedicated tokio runtime used to bridge the `object_store` crate's async API to the
@@ -456,5 +470,53 @@ impl ArrowObjectStore {
     #[napi]
     pub fn size(&self) -> napi::Result<f64> {
         Ok(self.inner.list_ids()?.len() as f64)
+    }
+
+    /// List all objects with the given prefix.
+    #[napi]
+    pub fn list(&self, prefix: Option<String>) -> napi::Result<Vec<ArrowObjectMeta>> {
+        let p = prefix.as_deref().map(object_store::path::Path::parse).transpose().map_err(|e| err("arrow_list", e))?;
+        let mut stream = self.inner.store.list(p.as_ref());
+        let mut out = Vec::new();
+        loop {
+            match runtime().block_on(StreamExt::next(&mut stream)) {
+                Some(Ok(meta)) => out.push(ArrowObjectMeta {
+                    location: meta.location.to_string(),
+                    size: meta.size as f64,
+                }),
+                Some(Err(e)) => return Err(err("arrow_list", e)),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// List objects with the given prefix and delimiter.
+    #[napi]
+    pub fn list_with_delimiter(&self, prefix: Option<String>) -> napi::Result<ArrowListResult> {
+        let p = prefix.as_deref().map(object_store::path::Path::parse).transpose().map_err(|e| err("arrow_list", e))?;
+        let res = runtime()
+            .block_on(self.inner.store.list_with_delimiter(p.as_ref()))
+            .map_err(|e| err("arrow_list_delimiter", e))?;
+
+        let objects = res
+            .objects
+            .into_iter()
+            .map(|meta| ArrowObjectMeta {
+                location: meta.location.to_string(),
+                size: meta.size as f64,
+            })
+            .collect();
+
+        let common_prefixes = res
+            .common_prefixes
+            .into_iter()
+            .map(|p| p.to_string())
+            .collect();
+
+        Ok(ArrowListResult {
+            objects,
+            common_prefixes,
+        })
     }
 }

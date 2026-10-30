@@ -144,4 +144,21 @@ describe("ArrowObjectStore (src/object_store/arrow.rs)", () => {
     expect(dst.contains(id)).toBe(true);
     expect(Buffer.from(dst.tryFind(id)!.data).equals(blob)).toBe(true);
   });
+
+  test("list() and listWithDelimiter() enumerate objects with metadata and common prefixes", () => {
+    const store = new ArrowObjectStore("memory", "sha1");
+    const blob1 = Buffer.from("arrow-list-1\n");
+    const blob2 = Buffer.from("arrow-list-2\n");
+    store.writeObject("blob", blob1);
+    store.writeObject("blob", blob2);
+
+    const listRes = store.list();
+    expect(listRes.length).toBe(2);
+    expect(typeof listRes[0].location).toBe("string");
+    expect(typeof listRes[0].size).toBe("number");
+
+    const delimRes = store.listWithDelimiter();
+    expect(delimRes.objects).toBeDefined();
+    expect(delimRes.commonPrefixes).toBeDefined();
+  });
 });
