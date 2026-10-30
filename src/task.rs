@@ -874,6 +874,15 @@ impl Task {
         let type_: String = evt_obj.get_named_property("type")?;
         dispatch(&env, &self.handlers, &type_, &evt)
     }
+
+    /// Schedule work on libuv's thread pool (`uv_queue_work`).
+    #[napi]
+    pub fn queue_work(
+        work: Function<'static, (), ()>,
+        after: Function<'static, i32, ()>,
+    ) -> Result<WorkRequest> {
+        queue_work(work, after)
+    }
 }
 
 /// Look up a single `on*` handler for `type_`.
@@ -1140,6 +1149,8 @@ impl TaskSignal {
 #[napi]
 pub struct WorkRequest {
     inner: WorkReq,
+    canceled: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
 }
 
 #[napi]
@@ -1150,7 +1161,24 @@ impl WorkRequest {
     #[napi]
     pub fn cancel(&self) -> Result<bool> {
         let mut r: libuv::Req = libuv::Req::from(self.inner);
-        r.cancel().map(|_| true).or_else(|_| Ok(false))
+        let ok = r.cancel().is_ok();
+        if ok {
+            self.canceled.store(true, Ordering::Relaxed);
+            self.active.store(false, Ordering::Relaxed);
+        }
+        Ok(ok)
+    }
+
+    /// Whether the work request was successfully cancelled before execution.
+    #[napi(getter)]
+    pub fn get_is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Relaxed)
+    }
+
+    /// Whether the work request is currently active (queued or running).
+    #[napi(getter)]
+    pub fn get_is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
     }
 
     /// The libuv request type name (`"WORK"` for a `uv_work_t`).
@@ -1164,31 +1192,53 @@ impl WorkRequest {
 /// global libuv thread pool and report completion on the loop thread.
 ///
 /// JavaScript cannot execute on a thread-pool thread, so both callbacks are
-/// delivered through `ThreadsafeFunction`s: `work` is notified from the pool
-/// thread when the request is picked up (it actually runs on the loop thread),
-/// and `after` runs on the loop thread once the work completes. The returned
-/// [`WorkRequest`] supports `uv_cancel` before the work starts.
+/// delivered through `ThreadsafeFunction`s: `work` runs on the JS thread via a
+/// blocking completion channel so the thread pool worker waits for `work` to finish
+/// before `after` runs on the loop thread (receiving the libuv status code, e.g. 0 or `UV_ECANCELED`).
+/// The returned [`WorkRequest`] supports `uv_cancel` before the work starts.
 #[napi]
 pub fn queue_work(
     work: Function<'static, (), ()>,
-    after: Function<'static, (), ()>,
+    after: Function<'static, i32, ()>,
 ) -> Result<WorkRequest> {
     let work_tsfn = work
         .build_threadsafe_function::<()>()
         .build()
         .map_err(|e| Error::new(Status::GenericFailure, format!("tsfn: {e}")))?;
     let after_tsfn = after
-        .build_threadsafe_function::<()>()
+        .build_threadsafe_function::<i32>()
         .build()
         .map_err(|e| Error::new(Status::GenericFailure, format!("tsfn: {e}")))?;
     let pool = ThreadPool::new()?;
+    let canceled = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(AtomicBool::new(true));
+
+    let active_f = Arc::clone(&active);
     pool.queue_task(
         move |_req: WorkReq| {
-            let _ = work_tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let _ = work_tsfn.call_with_return_value(
+                (),
+                ThreadsafeFunctionCallMode::Blocking,
+                move |_ctx, _env| {
+                    let _ = tx.send(());
+                    Ok(())
+                },
+            );
+            let _ = rx.recv();
         },
-        move |_req: WorkReq, _status| {
-            let _ = after_tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
+        move |_req: WorkReq, status: std::result::Result<u32, libuv::Error>| {
+            active_f.store(false, Ordering::Relaxed);
+            let code = match status {
+                Ok(_) => 0,
+                Err(_) => -1,
+            };
+            let _ = after_tsfn.call(code, ThreadsafeFunctionCallMode::NonBlocking);
         },
     )
-    .map(|req| WorkRequest { inner: req })
+    .map(|req| WorkRequest {
+        inner: req,
+        canceled,
+        active,
+    })
 }

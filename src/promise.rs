@@ -2,10 +2,23 @@ use std::sync::{Arc, Mutex};
 
 use napi::JsDeferred;
 use napi::bindgen_prelude::{
-    AsyncBlock, AsyncBlockBuilder, Buffer, Error, Promise, PromiseRaw, Status, ToNapiValue, Unknown,
+    AsyncBlock, AsyncBlockBuilder, Buffer, Error, JsValue, Promise, PromiseRaw, Status, ToNapiValue,
+    Unknown,
 };
 use napi::{Env, Result};
 use napi_derive::napi;
+
+pub use futures::channel;
+pub use futures::executor;
+pub use futures::future::{self, Future, FutureExt, TryFuture, TryFutureExt};
+pub use futures::io::{
+    self, AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt,
+    AsyncWrite, AsyncWriteExt,
+};
+pub use futures::sink::{self, Sink, SinkExt};
+pub use futures::stream::{self, Stream, StreamExt, TryStream, TryStreamExt};
+pub use futures::task;
+pub use futures::{join, never, pending, pin_mut, poll, ready, select, select_biased, try_join};
 
 use crate::thread::ThreadPool;
 
@@ -49,6 +62,43 @@ pub fn promise_callback(env: Env, promise: PromiseRaw<'static, u32>) -> Result<U
         }
         Ok(())
     })?;
+
+    let raw = unsafe { ToNapiValue::to_napi_value(env.raw(), js_promise)? };
+    Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), raw) })
+}
+
+/// Create a promise that resolves after `millis` milliseconds.
+#[napi(ts_return_type = "Promise<void>")]
+pub fn delay_promise(env: Env, millis: f64) -> Result<Unknown<'static>> {
+    type DeferredVoid = Box<dyn FnOnce(Env) -> Result<()> + Send>;
+    let (deferred, js_promise) = env
+        .create_deferred::<(), DeferredVoid>()
+        .map_err(uv_err)?;
+    let slot: Arc<Mutex<Option<JsDeferred<(), DeferredVoid>>>> =
+        Arc::new(Mutex::new(Some(deferred)));
+
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs_f64(millis / 1000.0));
+        if let Some(d) = slot.lock().unwrap().take() {
+            d.resolve(Box::new(|_env: Env| Ok(())));
+        }
+    });
+
+    let raw = unsafe { ToNapiValue::to_napi_value(env.raw(), js_promise)? };
+    Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), raw) })
+}
+
+/// Resolve a JS value immediately into a Promise using a `JsDeferred`.
+#[napi(ts_return_type = "Promise<unknown>")]
+pub fn resolve_value(env: Env, value: Unknown<'static>) -> Result<Unknown<'static>> {
+    let (deferred, js_promise) = env
+        .create_deferred::<Unknown<'static>, Box<dyn FnOnce(Env) -> Result<Unknown<'static>> + Send>>()
+        .map_err(uv_err)?;
+
+    let val_raw = value.raw() as usize;
+    deferred.resolve(Box::new(move |env: Env| {
+        Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), val_raw as napi::sys::napi_value) })
+    }));
 
     let raw = unsafe { ToNapiValue::to_napi_value(env.raw(), js_promise)? };
     Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), raw) })

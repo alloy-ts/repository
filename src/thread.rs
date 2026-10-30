@@ -303,6 +303,16 @@ impl ThreadPool {
             .map_err(|e| Error::new(Status::GenericFailure, format!("queue_work failed: {e:?}")))
     }
 
+    /// Schedule work onto this `ThreadPool` handle from JS via `uv_queue_work`.
+    #[napi]
+    pub fn queue_work(
+        &self,
+        work: Function<'static, (), ()>,
+        after: Function<'static, i32, ()>,
+    ) -> Result<crate::task::WorkRequest> {
+        crate::task::queue_work(work, after)
+    }
+
     /// Run `work` on a libuv worker thread, then wake the loop via a
     /// `uv_async_t` (the `Task` wakeup) and invoke `on_loop(result)` on the
     /// loop thread. `on_loop` receives no `Env` — settle a `JsDeferred` there
