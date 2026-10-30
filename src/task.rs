@@ -27,7 +27,8 @@ use napi::bindgen_prelude::{
     ClassInstance, FromNapiValue, Function, FunctionRef, JsObjectValue, JsValue, Object,
     ToNapiValue, Unknown,
 };
-use napi::{Env, Error, JsDeferred, Result, Status};
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 
 use libuv::WorkReq;
@@ -85,17 +86,17 @@ pub struct TaskResourceLimits {
 #[derive(Default)]
 #[napi(object)]
 pub struct TaskOptions {
-    /// The programme the task runs. It may be:
+    /// The task tree or runnable entry the task runs. It may be:
     ///
+    ///   * a task name (defined in `tasks.json` or `package.json`),
     ///   * inline code text,
-    ///   * a git object id naming a blob in the object database (the blob's
-    ///     contents are used),
+    ///   * a git object id naming a blob/tree in the object database,
     ///   * a filesystem path or `file://` URL to a script,
     ///   * a filesystem path or `file://` URL to a native `.node` addon, a
     ///     `.wasm` module, or another executable module format,
     ///   * an `http(s)` URL, which is fetched first (see `allowNetwork`).
     #[napi]
-    pub programme: String,
+    pub task_tree: String,
     /// Worktree id (a directory name under `.git/worktrees/`) or a filesystem
     /// path to an existing worktree — either the main working tree or a linked
     /// worktree. Ignored when no worktree matches, falling back to `repository`
@@ -137,20 +138,35 @@ pub struct TaskOptions {
     /// Forward unmanaged file descriptors into the task.
     #[napi]
     pub track_unmanaged_fds: Option<bool>,
-    /// Permit fetching `programme` from a remote `http(s)` URL. Off by default:
+    /// Permit fetching `taskTree` from a remote `http(s)` URL. Off by default:
     /// network access is never implicit. Local paths and `file://` URLs need no
     /// permission.
     #[napi]
     pub allow_network: Option<bool>,
-    /// Repository used to resolve `programme` when it is a git blob OID. If
-    /// `programme` parses as an object id and exists as a blob in this
-    /// repository, its contents are read and executed as code; otherwise
-    /// `programme` is treated as inline code text. When omitted, the repository
-    /// is resolved from the environment (`GIT_DIR` / `REPO_DIR`, else discovery
-    /// from the current directory); if none can be resolved, `programme` is
-    /// treated as inline code.
+    /// List of custom executable/runnable programme entries built into a task tree
+    /// committed as an orphan commit and overlayed under `./tasks`.
+    #[napi]
+    pub task_entries: Option<Vec<TaskEntryOptions>>,
+    /// Repository used to resolve `taskTree` when it is a git blob OID or task definition.
+    /// When omitted, the repository is resolved from the environment (`GIT_DIR` / `REPO_DIR`,
+    /// else discovery from the current directory).
     #[napi]
     pub repository: Option<ClassInstance<'static, Repository>>,
+}
+
+/// A custom task entry used to build a executable task tree.
+#[derive(Clone, Default)]
+#[napi(object)]
+pub struct TaskEntryOptions {
+    /// File path within the `./tasks` tree (e.g. `build.js` or `scripts/deploy.sh`).
+    #[napi]
+    pub path: String,
+    /// File content (string or buffer code).
+    #[napi]
+    pub content: String,
+    /// File mode (e.g., `"100755"` for executable or `"100644"` for default blob).
+    #[napi]
+    pub mode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,12 +185,6 @@ enum Programme {
     /// wrapper, so `postMessage` / `onMessage` / `taskData` are lexically in
     /// scope inside the module — no globals are published.
     Module { path: String, source: String },
-}
-
-impl Programme {
-    fn is_code(&self) -> bool {
-        matches!(self, Programme::Code(_))
-    }
 }
 
 /// Whether `spec` names the current working directory (the real filesystem the
@@ -256,6 +266,194 @@ fn fetch_to_temp(url: &str, dir: Option<&Path>) -> Result<String> {
     Ok(dest.to_string_lossy().into_owned())
 }
 
+/// Struct representing a dependency entry in task definitions.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum TaskDependency {
+    Simple(String),
+    Detailed {
+        task: String,
+        from: Option<String>,
+    },
+}
+
+/// Struct representing a task configuration entry in `tasks.json` or `package.json`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum TaskDef {
+    Simple(String),
+    Detailed {
+        command: String,
+        #[serde(default, rename = "dependsOn")]
+        depends_on: Vec<TaskDependency>,
+        cache: Option<serde_json::Value>,
+    },
+}
+
+/// Helper to read and resolve task definitions from `tasks.json` or `package.json`.
+fn load_task_command(dir: &Path, task_name: &str) -> Option<String> {
+    let tasks_json = dir.join("tasks.json");
+    let package_json = dir.join("package.json");
+
+    let mut tasks_map: HashMap<String, TaskDef> = HashMap::new();
+
+    if tasks_json.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&tasks_json) {
+            if let Ok(parsed) = serde_json::from_str::<HashMap<String, TaskDef>>(&content) {
+                tasks_map.extend(parsed);
+            }
+        }
+    }
+
+    if package_json.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&package_json) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(tasks_obj) = v.get("tasks") {
+                    if let Ok(parsed) = serde_json::from_value::<HashMap<String, TaskDef>>(tasks_obj.clone()) {
+                        tasks_map.extend(parsed);
+                    }
+                }
+                if let Some(scripts_obj) = v.get("scripts") {
+                    if let Ok(parsed) = serde_json::from_value::<HashMap<String, TaskDef>>(scripts_obj.clone()) {
+                        for (k, v) in parsed {
+                            tasks_map.entry(k).or_insert(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if tasks_map.is_empty() {
+        return None;
+    }
+
+    let mut visited = std::collections::HashSet::new();
+    let mut execution_list = Vec::new();
+
+    fn resolve_deps(
+        name: &str,
+        map: &HashMap<String, TaskDef>,
+        visited: &mut std::collections::HashSet<String>,
+        list: &mut Vec<String>,
+    ) {
+        if visited.contains(name) {
+            return;
+        }
+        visited.insert(name.to_string());
+
+        if let Some(def) = map.get(name) {
+            if let TaskDef::Detailed { depends_on, .. } = def {
+                for dep in depends_on {
+                    let dep_task = match dep {
+                        TaskDependency::Simple(s) => s.split('#').last().unwrap_or(s).to_string(),
+                        TaskDependency::Detailed { task, .. } => task.clone(),
+                    };
+                    resolve_deps(&dep_task, map, visited, list);
+                }
+            }
+            let cmd = match def {
+                TaskDef::Simple(c) => c.clone(),
+                TaskDef::Detailed { command, .. } => command.clone(),
+            };
+            list.push(cmd);
+        }
+    }
+
+    if tasks_map.contains_key(task_name) {
+        resolve_deps(task_name, &tasks_map, &mut visited, &mut execution_list);
+        if !execution_list.is_empty() {
+            return Some(execution_list.join("; "));
+        }
+    }
+
+    None
+}
+
+/// Create an orphan commit containing a list of `task_entries` built into a separate tree,
+/// and overlay/extract them to `./tasks` path under `target_dir`.
+fn create_task_tree_orphan_commit_and_overlay(
+    repo: &gix::Repository,
+    entries: &[TaskEntryOptions],
+    target_dir: &Path,
+) -> Result<String> {
+    let mut tree_entries = Vec::new();
+    let tasks_dir = target_dir.join("tasks");
+    std::fs::create_dir_all(&tasks_dir).map_err(|e| {
+        Error::new(
+            Status::GenericFailure,
+            format!("failed to create tasks directory: {e}"),
+        )
+    })?;
+
+    for entry in entries {
+        let entry_path = Path::new(&entry.path);
+        let dest = tasks_dir.join(entry_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("failed to create parent dir: {e}"),
+                )
+            })?;
+        }
+        std::fs::write(&dest, &entry.content).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("failed to write task file {}: {e}", dest.display()),
+            )
+        })?;
+
+        let oid = repo
+            .write_blob(entry.content.as_bytes())
+            .map_err(|e| Error::new(Status::GenericFailure, format!("write_blob: {e}")))?
+            .detach();
+
+        let mode = match entry.mode.as_deref() {
+            Some("100755") => gix::object::tree::EntryKind::BlobExecutable,
+            _ => gix::object::tree::EntryKind::Blob,
+        }
+        .into();
+
+        tree_entries.push(gix::objs::tree::Entry {
+            mode,
+            filename: entry.path.as_bytes().into(),
+            oid,
+        });
+    }
+
+    let tree = gix::objs::Tree {
+        entries: tree_entries,
+    };
+    let tree_oid = repo
+        .write_object(&tree)
+        .map_err(|e| Error::new(Status::GenericFailure, format!("write_tree: {e}")))?
+        .detach();
+
+    let sig = gix::actor::Signature {
+        name: "Task System".into(),
+        email: "task@system.local".into(),
+        time: gix::date::Time::now_local_or_utc(),
+    };
+
+    let commit = gix::objs::Commit {
+        tree: tree_oid,
+        parents: Vec::new().into(),
+        author: sig.clone(),
+        committer: sig,
+        encoding: None,
+        message: "Task tree executable entries".into(),
+        extra_headers: Vec::new(),
+    };
+
+    let commit_oid = repo
+        .write_object(&commit)
+        .map_err(|e| Error::new(Status::GenericFailure, format!("write_commit: {e}")))?
+        .detach();
+
+    Ok(commit_oid.to_string())
+}
+
 /// If `programme` names a module file, return the local path to load. Handles
 /// `file://` URLs, remote `http(s)` URLs (only when permitted) and plain
 /// filesystem paths. Returns `None` when it is not a module reference.
@@ -290,22 +488,42 @@ fn module_file(
     }
 }
 
-/// Resolve `programme` into something the runtime can start, in order:
+/// Resolve `task_tree` into something the runtime can start, in order:
 ///
-/// 1. a git blob OID present in the object database → its contents as code text,
-/// 2. a `file://` / `http(s)` URL or filesystem path to a module → that local
+/// 1. a task name defined in `tasks.json` or `package.json` (`tasks` or `scripts`) → resolved command string,
+/// 2. a git blob/tree OID present in the object database → its contents as code text,
+/// 3. a `file://` / `http(s)` URL or filesystem path to a module → that local
 ///    path (`.wasm` is instantiated and `_start`ed from generated code),
-/// 3. anything else → inline code text.
+/// 4. anything else → inline code text.
 ///
 /// Runs on a libuv worker thread: it only touches the filesystem, the object
 /// database and (optionally) the network, never V8.
 fn resolve_programme(
-    programme: &str,
+    task_tree: &str,
     repo: Option<&Arc<gix::ThreadSafeRepository>>,
     sandbox_dir: Option<&Path>,
+    worktree_path: Option<&Path>,
     allow_network: bool,
 ) -> Result<Programme> {
-    if let (Ok(oid), Some(inner)) = (gix::ObjectId::from_hex(programme.as_bytes()), repo) {
+    let base_dir = sandbox_dir
+        .map(PathBuf::from)
+        .or_else(|| worktree_path.map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok());
+
+    let mut spec = task_tree;
+    let mut resolved_command = None;
+
+    if let Some(ref dir) = base_dir {
+        if let Some(cmd) = load_task_command(dir, task_tree) {
+            resolved_command = Some(cmd);
+        }
+    }
+
+    if let Some(ref cmd) = resolved_command {
+        spec = cmd.as_str();
+    }
+
+    if let (Ok(oid), Some(inner)) = (gix::ObjectId::from_hex(spec.as_bytes()), repo) {
         let r = thread_local(inner);
         let mut buf = Vec::new();
         if let Some(d) = Find::try_find(&r.objects, &oid, &mut buf)
@@ -315,26 +533,26 @@ fn resolve_programme(
                 let code = String::from_utf8(d.data.to_vec()).map_err(|e| {
                     Error::new(
                         Status::GenericFailure,
-                        format!("programme blob {oid} is not valid UTF-8: {e}"),
+                        format!("task_tree blob {oid} is not valid UTF-8: {e}"),
                     )
                 })?;
                 return Ok(Programme::Code(code));
             }
         }
     }
-    if let Some(path) = module_file(programme, sandbox_dir, allow_network)? {
+    if let Some(path) = module_file(spec, sandbox_dir, allow_network)? {
         if ext(&path) == Some("wasm".to_string()) {
             return Ok(Programme::Code(wasm_start(&path)));
         }
         let source = std::fs::read_to_string(&path).map_err(|e| {
             Error::new(
                 Status::GenericFailure,
-                format!("failed to read programme {path}: {e}"),
+                format!("failed to read task_tree {path}: {e}"),
             )
         })?;
         return Ok(Programme::Module { path, source });
     }
-    Ok(Programme::Code(programme.to_string()))
+    Ok(Programme::Code(spec.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -453,21 +671,36 @@ type SharedHandler = Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>;
 /// listeners, keyed by event type.
 type HandlerMap = Arc<Mutex<HashMap<String, Vec<SharedHandler>>>>;
 
-/// Resolver used to finish a task on the JS thread once the libuv after-work
-/// callback fires.
-type DeferredResolver = Box<dyn FnOnce(Env) -> Result<()> + Send>;
+/// Buffered event to replay when a listener is registered after the event fired.
+#[derive(Clone)]
+enum BufferedEventData {
+    Data(serde_json::Value),
+    Code(u32),
+}
+
+#[derive(Clone)]
+struct BufferedEvent {
+    type_: String,
+    data: BufferedEventData,
+}
+
+type BufferMap = Arc<Mutex<Vec<BufferedEvent>>>;
 
 /// Invoke every handler registered for `type_` with `event`.
 fn dispatch(env: &Env, handlers: &HandlerMap, type_: &str, event: &Unknown<'static>) -> Result<()> {
     for h in handlers.lock().unwrap().get(type_).into_iter().flatten() {
         let f: Function<Unknown<'static>, Unknown<'static>> = h.borrow_back(env)?;
-        let _ = f.call(event.clone())?;
+        let _ = f.call(event.clone());
     }
     Ok(())
 }
 
 /// Emit a terminal event (`{ type, code }`).
-fn emit_code(env: &Env, handlers: &HandlerMap, type_: &str, code: u32) -> Result<()> {
+fn emit_code(env: &Env, handlers: &HandlerMap, buffered: &BufferMap, type_: &str, code: u32) -> Result<()> {
+    buffered.lock().unwrap().push(BufferedEvent {
+        type_: type_.to_string(),
+        data: BufferedEventData::Code(code),
+    });
     let mut o = Object::new(env)?;
     o.set_named_property("type", type_)?;
     o.set_named_property("code", code)?;
@@ -476,7 +709,12 @@ fn emit_code(env: &Env, handlers: &HandlerMap, type_: &str, code: u32) -> Result
 }
 
 /// Emit a payload event (`{ type, data }`).
-fn emit_data(env: &Env, handlers: &HandlerMap, type_: &str, data: Unknown<'static>) -> Result<()> {
+fn emit_data(env: &Env, handlers: &HandlerMap, buffered: &BufferMap, type_: &str, data: Unknown<'static>) -> Result<()> {
+    let json_val: serde_json::Value = env.from_js_value(data.clone()).unwrap_or(serde_json::Value::Null);
+    buffered.lock().unwrap().push(BufferedEvent {
+        type_: type_.to_string(),
+        data: BufferedEventData::Data(json_val),
+    });
     let mut o = Object::new(env)?;
     o.set_named_property("type", type_)?;
     o.set_named_property("data", data.raw())?;
@@ -515,21 +753,31 @@ pub struct Task {
     terminated: Arc<AtomicBool>,
     /// JS event handlers and listeners, held natively.
     handlers: HandlerMap,
+    /// Buffered events emitted before event listeners were attached.
+    buffered_events: BufferMap,
     /// `taskData`, exposed to the programme.
     task_data: Option<serde_json::Value>,
+    /// Keep threadsafe function alive on struct handle.
+    _tsfn: Arc<dyn std::any::Any + Send + Sync>,
 }
 
 #[napi]
 impl Task {
-    /// Construct a new task that runs `options.programme`.
-    ///
-    /// The programme is resolved and the task is queued onto libuv's thread pool
-    /// immediately, mirroring how `node:worker_threads` starts a worker on
-    /// construction. Blocking setup (sandbox worktree creation, object-database
-    /// reads, network fetches) runs on a pool thread; the programme itself is
-    /// evaluated on the JS thread in the after-work callback.
+    /// Construct a new task that runs `options.task_tree`.
     #[napi(constructor)]
     pub fn new(env: Env, options: TaskOptions) -> Result<Self> {
+        if (options.task_tree.starts_with("http://") || options.task_tree.starts_with("https://"))
+            && !options.allow_network.unwrap_or(false)
+        {
+            return Err(Error::new(
+                Status::GenericFailure,
+                format!(
+                    "fetching `taskTree` over the network requires allowNetwork: true ({})",
+                    options.task_tree
+                ),
+            ));
+        }
+
         let id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
         let thread_id = id;
         let name = options.name.clone().unwrap_or_default();
@@ -540,30 +788,49 @@ impl Task {
         let allow_network = options.allow_network.unwrap_or(false);
 
         let handlers: HandlerMap = Arc::new(Mutex::new(HashMap::new()));
+        let buffered_events: BufferMap = Arc::new(Mutex::new(Vec::new()));
         let terminated = Arc::new(AtomicBool::new(false));
         let has_ref = Arc::new(AtomicBool::new(true));
 
-        let (deferred, _promise) = env
-            .create_deferred::<(), DeferredResolver>()
-            .map_err(|e| Error::new(Status::GenericFailure, format!("create_deferred: {e}")))?;
-        let deferred_slot: Arc<Mutex<Option<JsDeferred<(), DeferredResolver>>>> =
-            Arc::new(Mutex::new(Some(deferred)));
-
         let pool = ThreadPool::new()?;
+
+        let result_slot: Arc<Mutex<Option<std::result::Result<Programme, String>>>> =
+            Arc::new(Mutex::new(None));
+
+        let tsfn_handlers = Arc::clone(&handlers);
+        let tsfn_buffered = Arc::clone(&buffered_events);
+        let tsfn_terminated = Arc::clone(&terminated);
+        let tsfn_data = task_data.clone();
+        let tsfn_result_slot = Arc::clone(&result_slot);
+        let js_runner = env.create_function_from_closure("task_runner", move |ctx| {
+            let resolved = tsfn_result_slot.lock().unwrap().take();
+            run_resolved(
+                &ctx.env,
+                &tsfn_handlers,
+                &tsfn_buffered,
+                &tsfn_terminated,
+                resolved,
+                tsfn_data.clone(),
+            )?;
+            Ok(())
+        })?;
+        let tsfn = Arc::new(js_runner.build_threadsafe_function::<()>().build()?);
 
         // Work callback: a libuv thread-pool thread. No V8 access, so this is
         // limited to filesystem, object-database and network work.
         let work_terminated = Arc::clone(&terminated);
         let work_dir = dir.clone();
         let work_options_repo = options.repository.as_ref().map(|r| Arc::clone(&r.inner));
-        let work_programme = options.programme.clone();
+        let work_task_tree = options.task_tree.clone();
         let work_worktree = options.worktree_path.clone();
         let work_sandbox = options.sandbox;
+        let work_task_entries = options.task_entries.clone();
+        let work_result_slot = Arc::clone(&result_slot);
         let work_cb = move |_req: WorkReq| {
             // Resolving the sandbox worktree needs the same priority order as
             // `resolve_repo`, so reconstruct just enough of the options.
             let probe = TaskOptions {
-                programme: String::new(),
+                task_tree: String::new(),
                 worktree_path: work_worktree.clone(),
                 sandbox: work_sandbox,
                 repository: None,
@@ -576,41 +843,43 @@ impl Task {
             } else {
                 resolve_repo(&probe, None).or_else(|| work_options_repo.as_ref().map(Arc::clone))
             };
+
+            let target_dir_path = work_dir
+                .as_deref()
+                .or_else(|| work_worktree.as_deref().map(Path::new))
+                .unwrap_or_else(|| Path::new("."));
+
+            if let Some(entries) = &work_task_entries {
+                if let Some(repo_ts) = &repo {
+                    let r = thread_local(repo_ts);
+                    let _ = create_task_tree_orphan_commit_and_overlay(&r, entries, target_dir_path);
+                } else {
+                    let tasks_dir = target_dir_path.join("tasks");
+                    let _ = std::fs::create_dir_all(&tasks_dir);
+                    for entry in entries {
+                        let dest = tasks_dir.join(&entry.path);
+                        if let Some(parent) = dest.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&dest, &entry.content);
+                    }
+                }
+            }
+
             let resolved = resolve_programme(
-                &work_programme,
+                &work_task_tree,
                 repo.as_ref(),
                 work_dir.as_deref(),
+                work_worktree.as_deref().map(Path::new),
                 allow_network,
             );
             let _ = work_terminated.load(Ordering::Relaxed);
-            WORK_RESULT.with(|slot| {
-                *slot.borrow_mut() = Some(resolved.map_err(|e| e.reason));
-            });
+            *work_result_slot.lock().unwrap() = Some(resolved.map_err(|e| e.reason));
         };
 
-        // After-work callback: runs on the JS thread. Settling the deferred runs
-        // its resolver with an `Env`, which is where the programme is evaluated
-        // and events are dispatched.
-        let after_handlers = Arc::clone(&handlers);
-        let after_deferred = Arc::clone(&deferred_slot);
-        let after_terminated = Arc::clone(&terminated);
-        let after_task_data = task_data.clone();
+        let after_tsfn = Arc::clone(&tsfn);
         let after_cb = move |_req: WorkReq, _status| {
-            let resolved = WORK_RESULT.with(|slot| slot.borrow_mut().take());
-            if let Some(d) = after_deferred.lock().unwrap().take() {
-                let handlers = Arc::clone(&after_handlers);
-                let terminated = Arc::clone(&after_terminated);
-                let task_data = after_task_data.clone();
-                d.resolve(Box::new(move |env: Env| {
-                    run_resolved(
-                        &env,
-                        &handlers,
-                        &terminated,
-                        resolved,
-                        task_data,
-                    )
-                }));
-            }
+            let _ = after_tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
         };
 
         pool.queue_task(work_cb, after_cb)
@@ -624,7 +893,9 @@ impl Task {
             resource_limits,
             terminated,
             handlers,
+            buffered_events,
             task_data,
+            _tsfn: tsfn as Arc<dyn std::any::Any + Send + Sync>,
         })
     }
 
@@ -721,10 +992,10 @@ impl Task {
     #[napi(setter)]
     pub fn set_onmessage(
         &self,
-        _env: Env,
+        env: Env,
         handler: Option<Function<'static, Unknown<'static>, Unknown<'static>>>,
     ) -> Result<()> {
-        set_handler(&self.handlers, "message", handler)
+        set_handler(&env, &self.handlers, &self.buffered_events, "message", handler)
     }
 
     #[napi(getter)]
@@ -738,10 +1009,10 @@ impl Task {
     #[napi(setter)]
     pub fn set_onerror(
         &self,
-        _env: Env,
+        env: Env,
         handler: Option<Function<'static, Unknown<'static>, Unknown<'static>>>,
     ) -> Result<()> {
-        set_handler(&self.handlers, "error", handler)
+        set_handler(&env, &self.handlers, &self.buffered_events, "error", handler)
     }
 
     #[napi(getter)]
@@ -755,17 +1026,17 @@ impl Task {
     #[napi(setter)]
     pub fn set_onmessageerror(
         &self,
-        _env: Env,
+        env: Env,
         handler: Option<Function<'static, Unknown<'static>, Unknown<'static>>>,
     ) -> Result<()> {
-        set_handler(&self.handlers, "messageerror", handler)
+        set_handler(&env, &self.handlers, &self.buffered_events, "messageerror", handler)
     }
 
     /// Register an event listener (mirrors `EventTarget.addEventListener`).
     #[napi]
     pub fn add_event_listener(
         &self,
-        _env: Env,
+        env: Env,
         type_: String,
         listener: Function<'static, Unknown<'static>, Unknown<'static>>,
     ) -> Result<()> {
@@ -773,9 +1044,11 @@ impl Task {
         self.handlers
             .lock()
             .unwrap()
-            .entry(type_)
+            .entry(type_.clone())
             .or_default()
             .push(Arc::new(r));
+
+        replay_buffered(&env, &self.buffered_events, &type_, &listener)?;
         Ok(())
     }
 
@@ -833,7 +1106,9 @@ fn handler_for(
 
 /// Install or clear the `on*` handler for `type_`.
 fn set_handler(
+    env: &Env,
     handlers: &HandlerMap,
+    buffered: &BufferMap,
     type_: &str,
     handler: Option<Function<'static, Unknown<'static>, Unknown<'static>>>,
 ) -> Result<()> {
@@ -842,9 +1117,37 @@ fn set_handler(
         Some(f) => {
             let r = f.create_ref()?;
             map.insert(type_.to_string(), vec![Arc::new(r)]);
+            replay_buffered(env, buffered, type_, &f)?;
         }
         None => {
             map.remove(type_);
+        }
+    }
+    Ok(())
+}
+
+fn replay_buffered(
+    env: &Env,
+    buffered: &BufferMap,
+    type_: &str,
+    listener: &Function<'static, Unknown<'static>, Unknown<'static>>,
+) -> Result<()> {
+    let list = buffered.lock().unwrap().clone();
+    for item in list {
+        if item.type_ == type_ {
+            let mut o = Object::new(env)?;
+            o.set_named_property("type", type_)?;
+            match item.data {
+                BufferedEventData::Data(v) => {
+                    let val = to_unknown(env, v)?;
+                    o.set_named_property("data", val.raw())?;
+                }
+                BufferedEventData::Code(c) => {
+                    o.set_named_property("code", c)?;
+                }
+            }
+            let evt = unsafe { Unknown::from_raw_unchecked(env.raw(), o.raw()) };
+            let _ = listener.call(evt);
         }
     }
     Ok(())
@@ -854,18 +1157,11 @@ fn set_handler(
 // Running the resolved programme (JS thread)
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// Slot used to hand the resolved programme from the libuv work callback to
-    /// the after-work callback. `uv_queue_work` gives the work callback no way
-    /// to return a value, so it is parked here for the duration of the request.
-    static WORK_RESULT: std::cell::RefCell<Option<std::result::Result<Programme, String>>> =
-        std::cell::RefCell::new(None);
-}
-
 /// Evaluate the resolved programme on the JS thread and emit `exit`.
 fn run_resolved(
     env: &Env,
     handlers: &HandlerMap,
+    buffered: &BufferMap,
     terminated: &Arc<AtomicBool>,
     resolved: Option<std::result::Result<Programme, String>>,
     task_data: Option<serde_json::Value>,
@@ -874,14 +1170,14 @@ fn run_resolved(
     let programme = match resolved {
         Ok(p) => p,
         Err(reason) => {
-            emit_data(env, handlers, "error", to_unknown(env, reason)?)?;
-            emit_code(env, handlers, "exit", 1)?;
+            emit_data(env, handlers, buffered, "error", to_unknown(env, reason)?)?;
+            emit_code(env, handlers, buffered, "exit", 1)?;
             return Ok(());
         }
     };
 
     if terminated.load(Ordering::Relaxed) {
-        emit_code(env, handlers, "exit", 1)?;
+        emit_code(env, handlers, buffered, "exit", 1)?;
         return Ok(());
     }
 
@@ -890,10 +1186,11 @@ fn run_resolved(
     // `postMessage` / `onMessage` are JS functions backed by Rust, so the
     // programme gets a worker-like messaging surface without a worker.
     let out_handlers = Arc::clone(handlers);
+    let out_buffered = Arc::clone(buffered);
     let post: Function<Unknown<'static>, ()> =
         env.create_function_from_closure("postMessage", move |ctx| {
             let value: Unknown<'static> = ctx.get(0)?;
-            emit_data(&ctx.env, &out_handlers, "message", value)?;
+            emit_data(&ctx.env, &out_handlers, &out_buffered, "message", value)?;
             Ok(())
         })?;
     let in_handlers = Arc::clone(handlers);
@@ -916,10 +1213,10 @@ fn run_resolved(
     > = env.run_script(&script)?;
 
     match runner.call(argv) {
-        Ok(_) => emit_code(env, handlers, "exit", 0)?,
+        Ok(_) => emit_code(env, handlers, buffered, "exit", 0)?,
         Err(e) => {
-            emit_data(env, handlers, "error", to_unknown(env, e.reason)?)?;
-            emit_code(env, handlers, "exit", 1)?;
+            emit_data(env, handlers, buffered, "error", to_unknown(env, e.reason)?)?;
+            emit_code(env, handlers, buffered, "exit", 1)?;
         }
     }
     Ok(())
@@ -958,5 +1255,57 @@ fn runner_script(programme: &Programme) -> String {
                  }})"
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_task_command_simple() {
+        let temp = tempfile::tempdir().unwrap();
+        let tasks_file = temp.path().join("tasks.json");
+        std::fs::write(
+            &tasks_file,
+            r#"{ "lint": "echo lint", "build": { "command": "echo build", "dependsOn": ["lint"] } }"#,
+        )
+        .unwrap();
+
+        let cmd = load_task_command(temp.path(), "build");
+        assert_eq!(cmd, Some("echo lint; echo build".to_string()));
+    }
+
+    #[test]
+    fn test_load_task_command_detailed_deps() {
+        let temp = tempfile::tempdir().unwrap();
+        let pkg_file = temp.path().join("package.json");
+        std::fs::write(
+            &pkg_file,
+            r#"{ "tasks": { "test": { "command": "vp test", "dependsOn": [{ "task": "build", "from": "dependencies" }] }, "build": "vp build" } }"#,
+        )
+        .unwrap();
+
+        let cmd = load_task_command(temp.path(), "test");
+        assert_eq!(cmd, Some("vp build; vp test".to_string()));
+    }
+
+    #[test]
+    fn test_orphan_commit_overlay() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_dir = temp.path().join("repo");
+        let repo = gix::init(&repo_dir).unwrap();
+
+        let entries = vec![
+            TaskEntryOptions {
+                path: "run.js".to_string(),
+                content: "console.log('task')".to_string(),
+                mode: Some("100755".to_string()),
+            },
+        ];
+
+        let commit_oid = create_task_tree_orphan_commit_and_overlay(&repo, &entries, &repo_dir).unwrap();
+        assert!(!commit_oid.is_empty());
+        assert!(repo_dir.join("tasks/run.js").is_file());
     }
 }

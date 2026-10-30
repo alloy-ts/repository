@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
@@ -12,17 +12,14 @@ import { Repository, Task, TaskExecutor } from "./main.ts";
 //
 // JavaScript cannot execute on a libuv thread-pool thread, so the work is split:
 // blocking setup (sandbox worktree creation, object-database reads, network
-// fetches) runs on the pool, and the `programme` itself is evaluated on the JS
+// fetches) runs on the pool, and the `taskTree` itself is evaluated on the JS
 // thread in the after-work callback.
 //
 // There is no `globalThis` bootstrap to install: the public napi `Task` class
 // holds its own state, and JS event handlers are kept alive natively.
 //
-// A programme is wrapped in `(function (postMessage, onMessage, taskData) {...})`,
+// A taskTree is wrapped in `(function (postMessage, onMessage, taskData) {...})`,
 // so it gets a worker-like messaging surface without a worker.
-//
-// NOTE: the native module under `dist/` must be rebuilt (`napi build`) after the
-// `Task` Rust bindings were added for these tests to run.
 
 /// Resolve with the task's exit code the first time it exits.
 function onceExit(task: Task): Promise<number> {
@@ -47,31 +44,31 @@ function scriptFile(source: string): string {
 }
 
 describe("Task construction", () => {
-  test("constructs from an inline programme and reports a thread id", async () => {
-    const task = new Task({ programme: "console.log(64+3.13333333)" });
+  test("constructs from an inline taskTree and reports a thread id", async () => {
+    const task = new Task({ taskTree: "console.log(64+3.13333333)" });
     expect(typeof task.threadId).toBe("number");
     expect(task.threadId).toBeGreaterThan(0);
     expect(await onceExit(task)).toBe(0);
   });
 
-  test("evaluates an inline programme and posts its value back", async () => {
-    const task = new Task({ programme: "postMessage(64+3.13333333)" });
+  test("evaluates an inline taskTree and posts its value back", async () => {
+    const task = new Task({ taskTree: "postMessage(64+3.13333333)" });
     expect(await onceMessage(task)).toBeCloseTo(67.13333333, 8);
     expect(await onceExit(task)).toBe(0);
   });
 
-  test("runs a programme given by file path", async () => {
-    const task = new Task({ programme: scriptFile("postMessage('from-file');") });
+  test("runs a taskTree given by file path", async () => {
+    const task = new Task({ taskTree: scriptFile("postMessage('from-file');") });
     expect(await onceMessage(task)).toBe("from-file");
     expect(await onceExit(task)).toBe(0);
   });
 
-  test("runs a programme stored as a git blob, addressed by object id", async () => {
+  test("runs a taskTree stored as a git blob, addressed by object id", async () => {
     const repo = new Repository();
     const id = repo.writeBlob(Buffer.from("postMessage('from-blob');"));
     expect(id).toMatch(/^[0-9a-f]{40}$/);
 
-    const task = new Task({ programme: id });
+    const task = new Task({ taskTree: id });
     expect(await onceMessage(task)).toBe("from-blob");
     expect(await onceExit(task)).toBe(0);
   });
@@ -80,24 +77,65 @@ describe("Task construction", () => {
     // 40 hex chars, so it parses as an object id, but nothing is stored there.
     const missing = "0".repeat(40);
     // Evaluated as code this is the number 0, which is a valid (no-op) programme.
-    const task = new Task({ programme: missing });
+    const task = new Task({ taskTree: missing });
     expect(await onceExit(task)).toBe(0);
   });
 
-  test("a programme that throws surfaces an error event", async () => {
-    const task = new Task({ programme: "throw new Error('boom');" });
+  test("a taskTree that throws surfaces an error event", async () => {
+    const task = new Task({ taskTree: "throw new Error('boom');" });
     const errors: unknown[] = [];
     task.addEventListener("error", (event: unknown) => errors.push(event));
     expect(await onceExit(task)).toBe(1);
     expect(errors).toHaveLength(1);
   });
 
-  // Drafted but skipped: `build.ts` is TypeScript, and it cannot be loaded
-  // without type-stripping support. Running it would also trigger a real
-  // `napi build` as a side effect. Enable once the runtime supports it.
-  test.skip("runs a programme given by path (build.ts)", async () => {
-    const task = new Task({ programme: "build.ts" });
+  test.skip("runs a taskTree given by path (build.ts)", async () => {
+    const task = new Task({ taskTree: "build.ts" });
     expect(await onceExit(task)).toBe(0);
+  });
+});
+
+describe("Task definitions & Task entries overlay", () => {
+  test("resolves task name and dependsOn from tasks.json / package.json", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "task-def-"));
+    writeFileSync(
+      join(dir, "tasks.json"),
+      JSON.stringify({
+        lint: { command: "postMessage('lint-done')" },
+        build: { command: "postMessage('build-done')", dependsOn: [{ task: "lint", from: "dependencies" }] },
+      })
+    );
+
+    const task = new Task({
+      taskTree: "build",
+      worktreePath: dir,
+    });
+    expect(await onceMessage(task)).toBe("lint-done");
+    expect(await onceExit(task)).toBe(0);
+  });
+
+  test("builds task entries into orphan commit and overlays to ./tasks", async () => {
+    const repo = new Repository();
+    const task = new Task({
+      taskTree: "const fs = require('fs'); postMessage(fs.existsSync('./tasks/custom.js') ? 'exists' : 'missing');",
+      worktreePath: ".",
+      repository: repo,
+      taskEntries: [
+        {
+          path: "custom.js",
+          content: "module.exports = 'hello';",
+          mode: "100644",
+        },
+      ],
+    });
+    expect(await onceMessage(task)).toBe("exists");
+    expect(await onceExit(task)).toBe(0);
+
+    try {
+      rmSync("./tasks/custom.js", { force: true });
+    } catch {
+      // ignore cleanup
+    }
   });
 });
 
@@ -106,7 +144,7 @@ describe("Task options", () => {
     const repo = new Repository();
     const before = repo.worktrees().map((w) => w.id);
 
-    const task = new Task({ programme: "postMessage('sandboxed');", sandbox: true });
+    const task = new Task({ taskTree: "postMessage('sandboxed');", sandbox: true });
     expect(await onceMessage(task)).toBe("sandboxed");
     expect(await onceExit(task)).toBe(0);
 
@@ -120,8 +158,8 @@ describe("Task options", () => {
     const repo = new Repository();
     const before = repo.worktrees().map((w) => w.id);
 
-    const a = new Task({ programme: "postMessage('a');", sandbox: true });
-    const b = new Task({ programme: "postMessage('b');", sandbox: true });
+    const a = new Task({ taskTree: "postMessage('a');", sandbox: true });
+    const b = new Task({ taskTree: "postMessage('b');", sandbox: true });
     await onceExit(a);
     await onceExit(b);
 
@@ -134,7 +172,7 @@ describe("Task options", () => {
     const repo = new Repository();
     const before = repo.worktrees().length;
 
-    const task = new Task({ programme: "postMessage(process.cwd());", worktreePath: "." });
+    const task = new Task({ taskTree: "postMessage(process.cwd());", worktreePath: "." });
     expect(await onceMessage(task)).toBe(process.cwd());
     expect(await onceExit(task)).toBe(0);
 
@@ -147,7 +185,7 @@ describe("Task options", () => {
     const before = repo.worktrees().length;
 
     const task = new Task({
-      programme: "postMessage(process.cwd());",
+      taskTree: "postMessage(process.cwd());",
       sandbox: true,
       worktreePath: ".",
     });
@@ -157,14 +195,14 @@ describe("Task options", () => {
   });
 
   test("a network programme is refused without allowNetwork", () => {
-    expect(() => new Task({ programme: "https://example.invalid/probe.js" })).toThrow(
+    expect(() => new Task({ taskTree: "https://example.invalid/probe.js" })).toThrow(
       /allowNetwork/,
     );
   });
 
   test("name and resource limits are surfaced through getters", async () => {
     const task = new Task({
-      programme: "console.log('getters')",
+      taskTree: "console.log('getters')",
       name: "probe",
       resourceLimits: { maxOldGenerationSizeMb: 64 },
     });
@@ -178,14 +216,14 @@ describe("Task options", () => {
 
 describe("Task lifecycle", () => {
   test("postMessage round-trips to the task and back", async () => {
-    const task = new Task({ programme: "onMessage((m) => postMessage(m * 2));" });
+    const task = new Task({ taskTree: "onMessage((m) => postMessage(m * 2));" });
     await onceExit(task);
     task.postMessage(21);
     expect(await onceMessage(task)).toBe(42);
   });
 
   test("onmessage receives what the task posts", async () => {
-    const task = new Task({ programme: "postMessage('hello');" });
+    const task = new Task({ taskTree: "postMessage('hello');" });
     const seen: unknown[] = [];
     task.onmessage = (event: { data?: unknown }) => {
       seen.push(event.data);
@@ -195,7 +233,7 @@ describe("Task lifecycle", () => {
   });
 
   test("terminate() marks the task terminated", async () => {
-    const task = new Task({ programme: "console.log('done');" });
+    const task = new Task({ taskTree: "console.log('done');" });
     await onceExit(task);
     const code = await task.terminate();
     expect(task.terminated).toBe(true);
@@ -203,7 +241,7 @@ describe("Task lifecycle", () => {
   });
 
   test("unreference() and reference() flip hasRef", async () => {
-    const task = new Task({ programme: "console.log('ref')" });
+    const task = new Task({ taskTree: "console.log('ref')" });
     task.unreference();
     expect(task.hasRef).toBe(false);
     task.reference();
