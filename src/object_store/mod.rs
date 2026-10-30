@@ -19,6 +19,7 @@ use crate::object::{kind_to_string, string_to_kind};
 
 pub mod arrow;
 pub mod base;
+pub mod connect;
 pub mod loose;
 pub mod memory;
 
