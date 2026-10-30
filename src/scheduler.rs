@@ -153,17 +153,17 @@ impl LocalDriver {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_f = Arc::clone(&stop);
 
-        let driver = thread::run(move || {
+        let driver = std::thread::spawn(move || {
             let mut pool = FuturesLocalPool::new();
-            let scheduler = pool.scheduler();
+            let spawner = pool.spawner();
             loop {
                 while let Ok(task) = rx.try_recv() {
-                    task(&scheduler);
+                    task(&spawner);
                 }
                 pool.run_until_stalled();
                 if stop_f.load(Ordering::Relaxed) {
                     while let Ok(task) = rx.try_recv() {
-                        task(&scheduler);
+                        task(&spawner);
                     }
                     pool.run_until_stalled();
                     break;
@@ -261,8 +261,8 @@ impl LocalDriver {
         };
 
         self.spawn_tx
-            .send(Box::new(move |scheduler| {
-                let _ = scheduler.spawn_local(async move { fut.await });
+            .send(Box::new(move |spawner| {
+                let _ = spawner.spawn_local(async move { fut.await });
             }))
             .map_err(|e| {
                 napi::Error::new(
@@ -287,8 +287,8 @@ impl LocalDriver {
             .build()
             .map_err(uv_err)?;
         self.spawn_tx
-            .send(Box::new(move |scheduler| {
-                let _ = scheduler.spawn_local(async move {
+            .send(Box::new(move |spawner| {
+                let _ = spawner.spawn_local(async move {
                     let _ = tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
                 });
             }))
@@ -427,8 +427,7 @@ impl Scheduler {
     ///
     /// The callback is dispatched to the event-loop thread via a
     /// `ThreadSafeFunction`; the task thread only triggers the call.
-    #[napi]
-    pub fn run(&self, task: Function<'static, (), ()>) -> Result<()> {
+    pub fn run_callback(&self, task: Function<'static, (), ()>) -> Result<()> {
         match &self.backend {
             Backend::Libuv => Self::spawn_libuv(task),
             Backend::Futures => {
