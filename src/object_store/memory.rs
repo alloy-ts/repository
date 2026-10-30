@@ -11,7 +11,10 @@ use gix::object::Kind;
 use crate::error::{err, err_str};
 use crate::object::kind_to_string;
 use crate::object_store::base::ObjectStore;
-use crate::object_store::{object_kind_from_option, ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget};
+use crate::object_store::{
+    object_kind_from_option, parse_hash_or_options, ObjectStoreOptions, ObjectStoreReader,
+    ObjectStoreWriter, PrefixLookup, WriterTarget,
+};
 
 /// An in-memory object store, mirroring libgit2's `git_mempack`.
 ///
@@ -187,8 +190,11 @@ impl ObjectStore for MemoryObjectStore {
 impl MemoryObjectStore {
     /// Create a new in-memory object store. `object_hash` is `"sha1"` (default) or `"sha256"`.
     #[napi(constructor)]
-    pub fn new(object_hash: Option<String>) -> napi::Result<Self> {
-        let kind = object_kind_from_option(object_hash.as_deref())?;
+    pub fn new(
+        object_hash: Option<napi::bindgen_prelude::Either<String, ObjectStoreOptions>>,
+    ) -> napi::Result<Self> {
+        let (hash_str, _) = parse_hash_or_options(object_hash);
+        let kind = object_kind_from_option(hash_str.as_deref())?;
         Ok(MemoryObjectStore {
             inner: Arc::new(InMemoryStore::new(kind)),
         })

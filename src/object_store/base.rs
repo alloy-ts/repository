@@ -192,3 +192,215 @@ fn resolve_pack_base(
 ) -> std::result::Result<Option<gix_pack::data::decode::entry::ResolvedBase>, gix::Error> {
     Ok(None)
 }
+
+use std::sync::Arc;
+
+/// A cheaply cloneable, ordered collection of object store payload bytes.
+#[derive(Debug, Clone)]
+pub struct PutPayload(Arc<[Vec<u8>]>);
+
+impl Default for PutPayload {
+    fn default() -> Self {
+        Self(Arc::new([]))
+    }
+}
+
+impl PutPayload {
+    /// Create a new empty [`PutPayload`]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a [`PutPayload`] from a static slice
+    pub fn from_static(s: &'static [u8]) -> Self {
+        s.to_vec().into()
+    }
+
+    /// Returns the total length of the payload in bytes
+    pub fn content_length(&self) -> usize {
+        self.0.iter().map(|b| b.len()).sum()
+    }
+
+    /// Returns an iterator over byte slices in this payload
+    pub fn iter(&self) -> PutPayloadIter<'_> {
+        PutPayloadIter(self.0.iter())
+    }
+}
+
+impl AsRef<[Vec<u8>]> for PutPayload {
+    fn as_ref(&self) -> &[Vec<u8>] {
+        self.0.as_ref()
+    }
+}
+
+impl<'a> IntoIterator for &'a PutPayload {
+    type Item = &'a Vec<u8>;
+    type IntoIter = PutPayloadIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// An iterator over [`PutPayload`]
+#[derive(Debug)]
+pub struct PutPayloadIter<'a>(std::slice::Iter<'a, Vec<u8>>);
+
+impl<'a> Iterator for PutPayloadIter<'a> {
+    type Item = &'a Vec<u8>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl From<Vec<u8>> for PutPayload {
+    fn from(value: Vec<u8>) -> Self {
+        Self(Arc::new([value]))
+    }
+}
+
+impl From<&'static str> for PutPayload {
+    fn from(value: &'static str) -> Self {
+        value.as_bytes().to_vec().into()
+    }
+}
+
+impl From<&'static [u8]> for PutPayload {
+    fn from(value: &'static [u8]) -> Self {
+        value.to_vec().into()
+    }
+}
+
+impl From<String> for PutPayload {
+    fn from(value: String) -> Self {
+        value.into_bytes().into()
+    }
+}
+
+impl From<PutPayload> for Vec<u8> {
+    fn from(value: PutPayload) -> Self {
+        match value.0.len() {
+            0 => Vec::new(),
+            1 => value.0[0].clone(),
+            _ => {
+                let mut buf = Vec::with_capacity(value.content_length());
+                value.iter().for_each(|x| buf.extend_from_slice(x));
+                buf
+            }
+        }
+    }
+}
+
+/// A builder for [`PutPayload`] that avoids reallocating memory.
+#[derive(Debug)]
+pub struct PutPayloadMut {
+    len: usize,
+    completed: Vec<Vec<u8>>,
+    in_progress: Vec<u8>,
+    block_size: usize,
+}
+
+impl Default for PutPayloadMut {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            completed: vec![],
+            in_progress: vec![],
+            block_size: 8 * 1024,
+        }
+    }
+}
+
+impl PutPayloadMut {
+    /// Create a new [`PutPayloadMut`]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configures the minimum allocation size
+    pub fn with_block_size(self, block_size: usize) -> Self {
+        Self { block_size, ..self }
+    }
+
+    /// Write bytes into this [`PutPayloadMut`]
+    pub fn extend_from_slice(&mut self, slice: &[u8]) {
+        let remaining = self.in_progress.capacity() - self.in_progress.len();
+        let to_copy = remaining.min(slice.len());
+
+        self.in_progress.extend_from_slice(&slice[..to_copy]);
+        if self.in_progress.capacity() == self.in_progress.len() {
+            let new_cap = self.block_size.max(slice.len() - to_copy);
+            let completed = std::mem::replace(&mut self.in_progress, Vec::with_capacity(new_cap));
+            if !completed.is_empty() {
+                self.completed.push(completed)
+            }
+            self.in_progress.extend_from_slice(&slice[to_copy..])
+        }
+        self.len += slice.len();
+    }
+
+    /// Append byte vector to this [`PutPayloadMut`] without copying
+    pub fn push(&mut self, bytes: Vec<u8>) {
+        if !self.in_progress.is_empty() {
+            let completed = std::mem::take(&mut self.in_progress);
+            self.completed.push(completed)
+        }
+        self.len += bytes.len();
+        self.completed.push(bytes);
+    }
+
+    /// Returns `true` if this [`PutPayloadMut`] contains no bytes
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the total length in bytes
+    #[inline]
+    pub fn content_length(&self) -> usize {
+        self.len
+    }
+
+    /// Convert into [`PutPayload`]
+    pub fn freeze(mut self) -> PutPayload {
+        if !self.in_progress.is_empty() {
+            let completed = std::mem::take(&mut self.in_progress);
+            self.completed.push(completed);
+        }
+        PutPayload(self.completed.into())
+    }
+}
+
+impl From<PutPayloadMut> for PutPayload {
+    fn from(value: PutPayloadMut) -> Self {
+        value.freeze()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_put_payload_and_mut() {
+        let mut builder = PutPayloadMut::new().with_block_size(16);
+        builder.extend_from_slice(b"hello ");
+        builder.extend_from_slice(b"world!");
+        assert_eq!(builder.content_length(), 12);
+        assert!(!builder.is_empty());
+
+        builder.push(b" zero copy".to_vec());
+        assert_eq!(builder.content_length(), 22);
+
+        let payload: PutPayload = builder.freeze();
+        assert_eq!(payload.content_length(), 22);
+
+        let vec: Vec<u8> = payload.into();
+        assert_eq!(vec, b"hello world! zero copy");
+    }
+}

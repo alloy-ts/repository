@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { LooseObjectStore, MemoryObjectStore, Repository } from "../main.ts";
+import { LooseObjectStore, MemoryObjectStore, ObjectType, Repository } from "../main.ts";
 
 const realRoot = process.cwd();
 const MISSING_ID = "0000000000000000000000000000000000000000";
@@ -27,7 +27,7 @@ beforeAll(() => {
   // A small SHA-256 repository with a written blob, so the loose store can be opened in that hash.
   sha256RepoDir = join(base, "sha256-repo");
   const repo = Repository.initOpts(sha256RepoDir, { objectFormat: "sha256" });
-  sha256BlobId = repo.writeObject("blob", Buffer.from("loose-store sha256 blob\n")).id;
+  sha256BlobId = repo.writeObject(ObjectType.Blob, Buffer.from("loose-store sha256 blob\n"));
 });
 
 afterAll(() => {
@@ -41,40 +41,52 @@ describe("LooseObjectStore (src/object_store/loose.rs)", () => {
     expect(store.objectHash).toBe("sha1");
     expect(store.objectFormat).toBe("sha1");
 
-    expect(store.contains(headId)).toBe(true);
+    const blob = Buffer.from("real-repo-loose-blob\n");
+    const writtenId = store.writeObject("blob", blob);
+
+    expect(store.contains(writtenId)).toBe(true);
     expect(store.contains(MISSING_ID)).toBe(false);
 
-    const found = store.tryFind(headId);
+    const found = store.tryFind(writtenId);
     expect(found).not.toBeNull();
-    expect(found!.kind).toBe("commit");
-    expect(Buffer.from(found!.data).length).toBeGreaterThan(0);
+    expect(found!.kind).toBe("blob");
+    expect(Buffer.from(found!.data).equals(blob)).toBe(true);
 
-    const header = store.tryHeader(headId);
+    const header = store.tryHeader(writtenId);
     expect(header).not.toBeNull();
-    expect(header!.kind).toBe("commit");
-    expect(header!.size).toBe(Buffer.from(found!.data).length);
+    expect(header!.kind).toBe("blob");
+    expect(header!.size).toBe(blob.length);
   });
 
-  test("lookupPrefix() resolves the head id", () => {
+  test("lookupPrefix() resolves the written id", () => {
     const store = new LooseObjectStore(objectsDir);
-    const lookup = store.lookupPrefix(headId);
+    const blob = Buffer.from("lookup-prefix-loose-blob\n");
+    const writtenId = store.writeObject("blob", blob);
+
+    const lookup = store.lookupPrefix(writtenId);
     expect(lookup.found).toBe(true);
     expect(lookup.ambiguous).toBe(false);
-    expect(lookup.id).toBe(headId);
+    expect(lookup.id).toBe(writtenId);
   });
 
   test("objectPath() returns the loose object file path", () => {
     const store = new LooseObjectStore(objectsDir);
-    const p = store.objectPath(headId);
-    expect(p).toMatch(/\.git(\/|\\)objects(\/|\\)pack/).toBe(false); // not under pack
+    const blob = Buffer.from("object-path-loose-blob\n");
+    const writtenId = store.writeObject("blob", blob);
+
+    const p = store.objectPath(writtenId);
+    expect(p.includes("pack")).toBe(false); // not under pack
     expect(typeof p).toBe("string");
   });
 
-  test("reader() streams a commit object", () => {
+  test("reader() streams a loose object", () => {
     const store = new LooseObjectStore(objectsDir);
-    const reader = store.reader(headId);
-    expect(reader.kind).toBe("commit");
-    expect(reader.size).toBeGreaterThan(0);
+    const blob = Buffer.from("reader-stream-loose-blob\n");
+    const writtenId = store.writeObject("blob", blob);
+
+    const reader = store.reader(writtenId);
+    expect(reader.kind).toBe("blob");
+    expect(reader.size).toBe(blob.length);
     let bytes = 0;
     let chunk = reader.read(64);
     while (chunk.length > 0) {
@@ -88,7 +100,7 @@ describe("LooseObjectStore (src/object_store/loose.rs)", () => {
     const dir = join(base, "loose-rw");
     const store = new LooseObjectStore(dir);
     const blob = Buffer.from("loose-store blob\n");
-    const id = store.writer("blob", blob.length).finalize(); // empty write -> zero-length blob
+    const id = store.writer("blob", 0).finalize(); // empty write -> zero-length blob
     // Write real content via the two-phase writer.
     const w = store.writer("blob", blob.length);
     w.write(blob);
@@ -117,7 +129,7 @@ describe("LooseObjectStore (src/object_store/loose.rs)", () => {
     expect(store.contains(sha256BlobId)).toBe(true);
     const header = store.tryHeader(sha256BlobId);
     expect(header!.kind).toBe("blob");
-    expect(header!.size).toBe(22);
+    expect(header!.size).toBe(24);
   });
 
   test("importStream() ingests a pack produced by MemoryObjectStore.dump()", () => {

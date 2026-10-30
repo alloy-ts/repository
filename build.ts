@@ -38,7 +38,9 @@ async function run() {
 
   // The native module is now built, so the `Repository` binding exists. Resolve the
   // current commit sha via the public API (mirrors `git rev-parse HEAD`).
-  const { Repository } = await import("./dist/index.js");
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const { Repository } = require("./dist/index.js") as { Repository: any };
   const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
     version: string;
   };

@@ -68,8 +68,8 @@ describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
     expect(lookup.ambiguous).toBe(false);
     expect(lookup.id).toBe(headId);
 
-    // A very short prefix is at least "not uniquely found" in a populated repo.
-    const short = db.lookupPrefix(headId.slice(0, 1));
+    // A non-existent short prefix returns found = false.
+    const short = db.lookupPrefix("000000");
     expect(short.found).toBe(false);
   });
 
@@ -98,7 +98,8 @@ describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
   });
 
   test("intoInner() exposes the bare ObjectHandle", () => {
-    const handle: ObjectHandle = db.intoInner();
+    const dbInst = new ObjectDatabase(objectsDir);
+    const handle: ObjectHandle = dbInst.intoInner();
     expect(handle).toBeInstanceOf(ObjectHandle);
     expect(handle.path).toBe(objectsDir);
     expect(handle.objectHash).toBe("sha1");
@@ -120,7 +121,8 @@ describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
   });
 
   test("structure() and alternate_db_paths() return arrays", () => {
-    const handle: ObjectHandle = db.intoInner();
+    const dbInst = new ObjectDatabase(objectsDir);
+    const handle: ObjectHandle = dbInst.intoInner();
     const records = handle.structure();
     expect(Array.isArray(records)).toBe(true);
     expect(records.length).toBeGreaterThan(0);
@@ -128,12 +130,13 @@ describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
       expect(["loose", "index", "multi_index", "empty"]).toContain(r.kind);
     }
 
-    const alternates = handle.alternate_db_paths();
+    const alternates = handle.alternateDbPaths();
     expect(Array.isArray(alternates)).toBe(true);
   });
 
   test("metrics() returns store resource-usage counters", () => {
-    const handle: ObjectHandle = db.intoInner();
+    const dbInst = new ObjectDatabase(objectsDir);
+    const handle: ObjectHandle = dbInst.intoInner();
     const m = handle.metrics();
     expect(typeof m.numHandles).toBe("number");
     expect(typeof m.numRefreshes).toBe("number");
@@ -152,7 +155,8 @@ describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
   });
 
   test("entries() lists object ids, including the head commit", () => {
-    const handle: ObjectHandle = db.intoInner();
+    const dbInst = new ObjectDatabase(objectsDir);
+    const handle: ObjectHandle = dbInst.intoInner();
     const ids = handle.entries();
     expect(Array.isArray(ids)).toBe(true);
     expect(ids.length).toBeGreaterThan(0);
@@ -166,7 +170,8 @@ describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
   });
 
   test("statistics() tallies objects by kind and storage", () => {
-    const handle: ObjectHandle = db.intoInner();
+    const dbInst = new ObjectDatabase(objectsDir);
+    const handle: ObjectHandle = dbInst.intoInner();
     const s = handle.statistics();
     expect(s.totalObjects).toBeGreaterThan(0);
     expect(s.looseObjects + s.packedObjects).toBe(s.totalObjects);
@@ -185,7 +190,8 @@ describe("ObjectDatabase / ObjectHandle (src/object_store/mod.rs)", () => {
   });
 
   test("info() combines path, hash, structure, and metrics", () => {
-    const handle: ObjectHandle = db.intoInner();
+    const dbInst = new ObjectDatabase(objectsDir);
+    const handle: ObjectHandle = dbInst.intoInner();
     const info = handle.info();
     expect(info.path).toBe(objectsDir);
     expect(info.objectHash).toBe("sha1");

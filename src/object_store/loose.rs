@@ -3,15 +3,15 @@ use std::sync::Mutex;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
-use gix::objs::{Exists, Write};
+use gix::objs::Write;
 use gix::zlib::Compression;
 
 use crate::error::{err, parse_oid};
 use crate::object::kind_to_string;
 use crate::object_store::base::ObjectStore;
 use crate::object_store::{
-    object_kind_from_option, ObjectStoreOptions, ObjectStoreReader, ObjectStoreWriter, PrefixLookup,
-    WriterTarget,
+    object_kind_from_option, parse_hash_or_options, ObjectStoreOptions, ObjectStoreReader,
+    ObjectStoreWriter, PrefixLookup, WriterTarget,
 };
 
 /// A database for reading and writing loose git objects on disk, one file per object.
@@ -158,14 +158,17 @@ impl LooseObjectStore {
     #[napi(constructor)]
     pub fn new(
         objects_directory: String,
-        object_hash: Option<String>,
+        object_hash: Option<napi::bindgen_prelude::Either<String, ObjectStoreOptions>>,
         options: Option<ObjectStoreOptions>,
     ) -> napi::Result<Self> {
-        let kind = object_kind_from_option(object_hash.as_deref())?;
-        let options = options.unwrap_or(ObjectStoreOptions {
+        let (hash_str, hash_opts) = parse_hash_or_options(object_hash);
+        let kind = object_kind_from_option(hash_str.as_deref())?;
+        let options = options.or(hash_opts).unwrap_or(ObjectStoreOptions {
+            object_hash: None,
             alloc_limit_bytes: None,
             compression_level: None,
         });
+        std::fs::create_dir_all(&objects_directory).map_err(|e| err("LooseObjectStore::new", e))?;
         let compression = match options.compression_level {
             Some(level) => Compression::new(level as i32).unwrap_or(Compression::BEST_SPEED),
             None => Compression::BEST_SPEED,

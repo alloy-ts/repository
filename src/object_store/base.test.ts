@@ -1,10 +1,20 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { LooseObjectStore, MemoryObjectStore } from "../main.ts";
+import {
+  ArrowObjectStore,
+  FjallObjectStore,
+  LooseObjectStore,
+  MemoryObjectStore,
+  StreamObjectStore,
+} from "../main.ts";
 
 let base: string;
+let looseCount = 0;
+let fjallCount = 0;
+let arrowCount = 0;
+
 beforeAll(() => {
   base = mkdtempSync(join(tmpdir(), "object-store-base-"));
 });
@@ -14,17 +24,41 @@ afterAll(() => {
 
 const blob = Buffer.from("object-store-base blob\n");
 
-// Every lower-level store implements the shared `ObjectStore` base contract. Exercise both
-// variants through the identical napi surface to prove the base is faithfully implemented.
+// Every lower-level store implements the shared `ObjectStore` base contract. Exercise all
+// 6 store variants through the identical napi surface to prove the base is faithfully implemented.
 const variants = [
   {
     name: "LooseObjectStore",
-    make: () => new LooseObjectStore(join(base, "loose")),
+    make: () => {
+      const dir = join(base, `loose-${++looseCount}`);
+      mkdirSync(dir, { recursive: true });
+      return new LooseObjectStore(dir);
+    },
     hasObjectPath: true,
   },
   {
     name: "MemoryObjectStore",
     make: () => new MemoryObjectStore(),
+    hasObjectPath: false,
+  },
+  {
+    name: "FjallObjectStore",
+    make: () => new FjallObjectStore(join(base, `fjall-${++fjallCount}`)),
+    hasObjectPath: false,
+  },
+  {
+    name: "ArrowObjectStore (LocalFileSystem)",
+    make: () => new ArrowObjectStore(join(base, `arrow-${++arrowCount}`)),
+    hasObjectPath: false,
+  },
+  {
+    name: "ArrowObjectStore (InMemory)",
+    make: () => ArrowObjectStore.createInMemory(),
+    hasObjectPath: false,
+  },
+  {
+    name: "StreamObjectStore",
+    make: () => new StreamObjectStore(),
     hasObjectPath: false,
   },
 ];
@@ -128,7 +162,7 @@ describe.each(variants)("ObjectStore shared base contract: $name", (v) => {
       expect(p.length).toBeGreaterThan(0);
     });
   } else {
-    test("objectPath() errors for in-memory stores", () => {
+    test("objectPath() errors for in-memory / non-loose stores", () => {
       const store = v.make();
       expect(() => store.objectPath("abc")).toThrow();
     });

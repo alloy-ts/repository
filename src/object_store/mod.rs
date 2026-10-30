@@ -4,7 +4,6 @@
 //! shared [`ObjectStore`](crate::object_store::base::ObjectStore) base trait (in `base.rs`), which
 //! factors out their common napi surface.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::Buffer;
@@ -17,9 +16,18 @@ use gix::zlib::Compression;
 use crate::error::{err, err_str, parse_oid};
 use crate::object::{kind_to_string, string_to_kind};
 
+pub mod arrow;
 pub mod base;
+pub mod fjall;
 pub mod loose;
 pub mod memory;
+pub mod stream;
+
+pub use arrow::ArrowObjectStore;
+pub use fjall::FjallObjectStore;
+pub use loose::LooseObjectStore;
+pub use memory::MemoryObjectStore;
+pub use stream::StreamObjectStore;
 
 /// Lower-cased string form of a hash kind (`"sha1"` / `"sha256"`). `gix::hash::Kind` is
 /// `#[non_exhaustive]`, so any future kind is reported as `sha256`.
@@ -135,12 +143,26 @@ fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
 
 /// Options for constructing a loose or memory [`ObjectStore`](crate::object_store::base::ObjectStore) variant.
 #[napi(object)]
+#[derive(Clone, Default)]
 pub struct ObjectStoreOptions {
+    /// Object hash kind: `"sha1"` (default) or `"sha256"`.
+    pub object_hash: Option<String>,
     /// Maximum size (in bytes) of a single allocation caused by a loose object read/write.
     /// `null` means no additional limit.
     pub alloc_limit_bytes: Option<u32>,
     /// zlib compression level (0–9). `null` falls back to the git default (`BEST_SPEED`, level 1).
     pub compression_level: Option<u32>,
+}
+
+/// Helper to extract object_hash string and options struct from NAPI constructors.
+pub(crate) fn parse_hash_or_options(
+    opt: Option<napi::bindgen_prelude::Either<String, ObjectStoreOptions>>,
+) -> (Option<String>, Option<ObjectStoreOptions>) {
+    match opt {
+        Some(napi::bindgen_prelude::Either::A(hash)) => (Some(hash), None),
+        Some(napi::bindgen_prelude::Either::B(opts)) => (opts.object_hash.clone(), Some(opts)),
+        None => (None, None),
+    }
 }
 
 /// The result of resolving a short object id prefix.
@@ -155,10 +177,11 @@ pub struct PrefixLookup {
 }
 
 /// The target a [`ObjectStoreWriter`] flushes its buffered object into.
-enum WriterTarget {
+pub enum WriterTarget {
     Loose(Mutex<gix::odb::loose::Store>),
     Handle(Mutex<HandleStore>),
     Memory(Arc<crate::object_store::memory::InMemoryStore>),
+    Custom(Arc<dyn Fn(gix::object::Kind, &[u8]) -> napi::Result<gix::ObjectId> + Send + Sync>),
 }
 
 /// A streaming reader over an object's raw, decompressed content.
@@ -262,6 +285,7 @@ impl ObjectStoreWriter {
                     .map_err(|e| err("finalize", e))?
             }
             WriterTarget::Memory(store) => store.write_object(self.kind, &self.buf)?,
+            WriterTarget::Custom(f) => f(self.kind, &self.buf)?,
         };
         Ok(id.to_string())
     }
@@ -338,6 +362,7 @@ impl ObjectDatabase {
             object_cache: None,
             current_dir: None,
         });
+        std::fs::create_dir_all(&objects_directory).map_err(|e| err("ObjectDatabase::new", e))?;
         let object_hash = match options.object_hash.as_deref() {
             None | Some("sha1") => gix::hash::Kind::Sha1,
             Some(other) => match crate::object::parse_hash_kind_ci(other) {
