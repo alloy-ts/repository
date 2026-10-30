@@ -245,6 +245,122 @@ pub fn capability_value(text: String, name: String) -> napi::Result<Option<Strin
         .map(|v| v.to_string()))
 }
 
+/// Transport channel for protocol communications.
+#[napi]
+pub enum TransportChannel {
+    Http,
+    Ssh,
+    Local,
+}
+
+/// Transport configuration options for network operations.
+#[napi(object)]
+pub struct TransportConfig {
+    pub channel: TransportChannel,
+    pub url: String,
+    pub user_agent: Option<String>,
+}
+
+/// Response returned from a protocol execution request over HTTP or SSH.
+#[napi(object)]
+pub struct ProtocolResponse {
+    pub status: u32,
+    pub headers: std::collections::HashMap<String, String>,
+    pub body: napi::bindgen_prelude::Buffer,
+}
+
+/// Execute an HTTP request over network using reqwest for git protocol commands.
+#[napi]
+pub async fn execute_protocol_http_request(
+    url: String,
+    method: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+    body: Option<napi::bindgen_prelude::Buffer>,
+) -> napi::Result<ProtocolResponse> {
+    let client = reqwest::Client::new();
+    let method = method.unwrap_or_else(|| "GET".to_string());
+    let req_method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|e| err("invalid_http_method", e))?;
+
+    let mut req_builder = client.request(req_method, &url);
+    if let Some(hdrs) = headers {
+        for (k, v) in hdrs {
+            req_builder = req_builder.header(k, v);
+        }
+    }
+    if let Some(b) = body {
+        req_builder = req_builder.body(b.to_vec());
+    }
+
+    match req_builder.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16() as u32;
+            let mut res_headers = std::collections::HashMap::new();
+            for (k, v) in resp.headers() {
+                if let Ok(val) = v.to_str() {
+                    res_headers.insert(k.as_str().to_string(), val.to_string());
+                }
+            }
+            let bytes = resp.bytes().await.map_err(|e| err("http_body", e))?;
+            Ok(ProtocolResponse {
+                status,
+                headers: res_headers,
+                body: napi::bindgen_prelude::Buffer::from(bytes.to_vec()),
+            })
+        }
+        Err(e) => {
+            let status = e.status().map(|s| s.as_u16() as u32).unwrap_or(0);
+            Ok(ProtocolResponse {
+                status,
+                headers: std::collections::HashMap::new(),
+                body: napi::bindgen_prelude::Buffer::from(e.to_string().into_bytes()),
+            })
+        }
+    }
+}
+
+/// Execute an SSH command over network using system ssh.
+#[napi]
+pub async fn execute_protocol_ssh_command(
+    host: String,
+    command: String,
+    user: Option<String>,
+) -> napi::Result<ProtocolResponse> {
+    let destination = match user {
+        Some(u) => format!("{u}@{host}"),
+        None => host,
+    };
+
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg(&destination)
+        .arg(&command);
+
+    match cmd.output().await {
+        Ok(output) => {
+            let status = output.status.code().unwrap_or(1) as u32;
+            let body = if output.status.success() {
+                output.stdout
+            } else {
+                output.stderr
+            };
+            Ok(ProtocolResponse {
+                status,
+                headers: std::collections::HashMap::new(),
+                body: napi::bindgen_prelude::Buffer::from(body),
+            })
+        }
+        Err(e) => Ok(ProtocolResponse {
+            status: 255,
+            headers: std::collections::HashMap::new(),
+            body: napi::bindgen_prelude::Buffer::from(e.to_string().into_bytes()),
+        }),
+    }
+}
+
 /// Parse one V2 `ls-refs` line into a `gix_protocol::handshake::Ref`, replicating gitoxide's
 /// (private) `Ref::from_v2_refs` parser so JS can parse raw protocol data without a live connection.
 fn parse_single_ref_line(line: &str) -> napi::Result<gix_protocol::handshake::Ref> {

@@ -188,3 +188,116 @@ fn resolve_pack_base(
 ) -> std::result::Result<Option<gix_pack::data::decode::entry::ResolvedBase>, gix::Error> {
     Ok(None)
 }
+
+use std::sync::Arc;
+
+/// A cheaply cloneable, ordered collection of byte buffers.
+#[derive(Debug, Clone, Default)]
+pub struct PutPayload(Arc<[Vec<u8>]>);
+
+impl PutPayload {
+    /// Create a new empty [`PutPayload`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a [`PutPayload`] from a static slice.
+    pub fn from_static(s: &'static [u8]) -> Self {
+        s.into()
+    }
+
+    /// Returns the total length of the bytes in this payload.
+    pub fn content_length(&self) -> usize {
+        self.0.iter().map(|b| b.len()).sum()
+    }
+}
+
+impl From<Vec<u8>> for PutPayload {
+    fn from(value: Vec<u8>) -> Self {
+        Self(Arc::new([value]))
+    }
+}
+
+impl From<&'static [u8]> for PutPayload {
+    fn from(value: &'static [u8]) -> Self {
+        value.to_vec().into()
+    }
+}
+
+/// A builder for [`PutPayload`] that avoids reallocating memory.
+#[derive(Debug)]
+pub struct PutPayloadMut {
+    len: usize,
+    completed: Vec<Vec<u8>>,
+    in_progress: Vec<u8>,
+    block_size: usize,
+}
+
+impl Default for PutPayloadMut {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            completed: vec![],
+            in_progress: vec![],
+            block_size: 8 * 1024,
+        }
+    }
+}
+
+impl PutPayloadMut {
+    /// Create a new [`PutPayloadMut`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configures the minimum allocation size.
+    pub fn with_block_size(self, block_size: usize) -> Self {
+        Self { block_size, ..self }
+    }
+
+    /// Write bytes into this [`PutPayloadMut`].
+    pub fn extend_from_slice(&mut self, slice: &[u8]) {
+        let remaining = self.in_progress.capacity() - self.in_progress.len();
+        let to_copy = remaining.min(slice.len());
+
+        self.in_progress.extend_from_slice(&slice[..to_copy]);
+        if self.in_progress.capacity() == self.in_progress.len() {
+            let new_cap = self.block_size.max(slice.len() - to_copy);
+            let completed = std::mem::replace(&mut self.in_progress, Vec::with_capacity(new_cap));
+            if !completed.is_empty() {
+                self.completed.push(completed);
+            }
+            self.in_progress.extend_from_slice(&slice[to_copy..]);
+        }
+        self.len += slice.len();
+    }
+
+    /// Append a byte buffer to this [`PutPayloadMut`] without copying.
+    pub fn push(&mut self, bytes: Vec<u8>) {
+        if !self.in_progress.is_empty() {
+            let completed = std::mem::take(&mut self.in_progress);
+            self.completed.push(completed);
+        }
+        self.len += bytes.len();
+        self.completed.push(bytes);
+    }
+
+    /// Returns `true` if this [`PutPayloadMut`] contains no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the total length of the bytes in this payload.
+    pub fn content_length(&self) -> usize {
+        self.len
+    }
+
+    /// Convert into [`PutPayload`].
+    pub fn freeze(mut self) -> PutPayload {
+        if !self.in_progress.is_empty() {
+            let completed = std::mem::take(&mut self.in_progress);
+            self.completed.push(completed);
+        }
+        PutPayload(self.completed.into())
+    }
+}

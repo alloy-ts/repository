@@ -17,4 +17,17 @@ describe("negotiationWindowSize (src/negotiate.rs)", () => {
     expect(negotiationWindowSize(true, 16)).toBe(32);
     expect(negotiationWindowSize(true, 16384)).toBe(18022);
   });
+
+  test("computeNegotiationRound calculates round stats", async () => {
+    const { computeNegotiationRound } = await import("./main.ts");
+    const round1 = computeNegotiationRound(16, 0, 32, false);
+    expect(round1.havesSent).toBe(16);
+    expect(round1.inVain).toBe(16);
+    expect(round1.havesToSend).toBe(32);
+    expect(round1.previousResponseHadAtLeastOneInCommon).toBe(false);
+
+    const round2 = computeNegotiationRound(32, 16, 64, true);
+    expect(round2.inVain).toBe(0);
+    expect(round2.previousResponseHadAtLeastOneInCommon).toBe(true);
+  });
 });

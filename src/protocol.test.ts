@@ -100,3 +100,23 @@ describe("Capabilities (src/protocol.rs)", () => {
     expect(capabilitiesSupports(line, "ref-in-want")).toBeNull();
   });
 });
+
+describe("Transport and Protocol execution (src/protocol.rs)", () => {
+  test("executeProtocolHttpRequest handles HTTP request errors gracefully", async () => {
+    const { executeProtocolHttpRequest } = await import("./main.ts");
+    const res = await executeProtocolHttpRequest("http://127.0.0.1:59998/test", "GET");
+    expect(res).toBeDefined();
+    expect(typeof res.status).toBe("number");
+  });
+
+  test("executeProtocolSshCommand handles SSH command execution", async () => {
+    const { executeProtocolSshCommand } = await import("./main.ts");
+    const res = await executeProtocolSshCommand(
+      "127.0.0.1",
+      "git-upload-pack /repo",
+      "invalid-user",
+    );
+    expect(res).toBeDefined();
+    expect(typeof res.status).toBe("number");
+  });
+});

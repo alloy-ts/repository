@@ -272,11 +272,7 @@ pub struct ListResult {
 /// Convert arrow's `ObjectMeta` into our [`ListedObject`], deriving the hex `id` from the fanout path.
 fn listed_from(meta: &object_store::ObjectMeta) -> ListedObject {
     let id = meta.location.to_string().replace('/', "");
-    let last_modified = meta
-        .last_modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0);
+    let last_modified = meta.last_modified.timestamp_millis() as f64;
     ListedObject {
         id,
         location: meta.location.to_string(),

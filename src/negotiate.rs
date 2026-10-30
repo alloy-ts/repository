@@ -86,6 +86,23 @@ pub fn negotiation_window_size(stateless: bool, previous: Option<u32>) -> u32 {
     gix_negotiate::window_size(stateless, previous.map(|p| p as usize)) as u32
 }
 
+/// Compute round statistics for a pack negotiation step.
+#[napi]
+pub fn compute_negotiation_round(
+    haves_sent: u32,
+    previous_in_vain: u32,
+    haves_to_send: u32,
+    seen_ack: bool,
+) -> NegotiateRound {
+    let in_vain = if seen_ack { 0 } else { previous_in_vain + haves_sent };
+    NegotiateRound {
+        haves_sent,
+        in_vain,
+        haves_to_send,
+        previous_response_had_at_least_one_in_common: seen_ack,
+    }
+}
+
 /// Run the expensive first step of negotiation against a live remote and return the
 /// resulting [`NegotiateAction`].
 ///
@@ -97,8 +114,9 @@ pub fn negotiation_window_size(stateless: bool, previous: Option<u32>) -> u32 {
 ///
 /// Async: the (blocking) network transfer and object traversal run on a libuv
 /// task thread.
-#[napi(ts_return_type = "Promise<NegotiateAction>")]
+#[napi]
 impl Remote {
+    #[napi(ts_return_type = "Promise<NegotiateAction>")]
     pub fn prepare_negotiation(
         &self,
         depth: Option<u32>,
@@ -159,7 +177,7 @@ impl Task for PrepareNegotiationTask {
         let action = negotiate::mark_complete_and_common_ref(
             &r.objects,
             &r.refs,
-            || Ok(Vec::<(RefStore, OdbHandle)>::new()),
+            || Ok(Vec::<(RefStore, OdbHandle)>::new().into_iter()),
             negotiator.as_mut(),
             &mut graph,
             &ref_map,
