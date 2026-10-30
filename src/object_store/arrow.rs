@@ -65,6 +65,22 @@ impl ArrowOdbStore {
         Self { inner, kind, prefix }
     }
 
+    pub(crate) fn new_in_memory() -> napi::Result<Self> {
+        let store: Arc<dyn ArrowObjectStoreTrait> = Arc::new(object_store::memory::InMemory::new());
+        Ok(Self::new(store, gix::hash::Kind::Sha1, None))
+    }
+
+    pub(crate) fn new_local(path: &str) -> napi::Result<Self> {
+        let p = std::path::Path::new(path);
+        if !p.exists() {
+            std::fs::create_dir_all(p).map_err(|e| err("create_dir_all", e))?;
+        }
+        let fs_store = object_store::local::LocalFileSystem::new_with_prefix(p)
+            .map_err(|e| err("LocalFileSystem::new_with_prefix", e))?;
+        let store: Arc<dyn ArrowObjectStoreTrait> = Arc::new(fs_store);
+        Ok(Self::new(store, gix::hash::Kind::Sha1, None))
+    }
+
     fn object_key(&self, id: &str) -> ArrowPath {
         let clean_prefix = self.prefix.trim_matches('/');
         let path_str = if id.len() >= 2 {
