@@ -102,8 +102,11 @@ describe("Task definitions & Task entries overlay", () => {
       join(dir, "tasks.json"),
       JSON.stringify({
         lint: { command: "postMessage('lint-done')" },
-        build: { command: "postMessage('build-done')", dependsOn: [{ task: "lint", from: "dependencies" }] },
-      })
+        build: {
+          command: "postMessage('build-done')",
+          dependsOn: [{ task: "lint", from: "dependencies" }],
+        },
+      }),
     );
 
     const task = new Task({
@@ -117,7 +120,8 @@ describe("Task definitions & Task entries overlay", () => {
   test("builds task entries into orphan commit and overlays to ./tasks", async () => {
     const repo = new Repository();
     const task = new Task({
-      taskTree: "const fs = require('fs'); postMessage(fs.existsSync('./tasks/custom.js') ? 'exists' : 'missing');",
+      taskTree:
+        "const fs = require('fs'); postMessage(fs.existsSync('./tasks/custom.js') ? 'exists' : 'missing');",
       worktreePath: ".",
       repository: repo,
       taskEntries: [
