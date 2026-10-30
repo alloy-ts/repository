@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
-use gix::objs::{Exists, Write};
+use gix::objs::Write;
 use gix::zlib::Compression;
 
 use crate::error::{err, parse_oid};

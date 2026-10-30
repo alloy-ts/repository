@@ -66,7 +66,7 @@ describe("LooseObjectStore (src/object_store/loose.rs)", () => {
   test("objectPath() returns the loose object file path", () => {
     const store = new LooseObjectStore(objectsDir);
     const p = store.objectPath(headId);
-    expect(p).toMatch(/\.git(\/|\\)objects(\/|\\)pack/).toBe(false); // not under pack
+    expect(p).not.toMatch(/\.git(\/|\\)objects(\/|\\)pack/);
     expect(typeof p).toBe("string");
   });
 
@@ -111,7 +111,9 @@ describe("LooseObjectStore (src/object_store/loose.rs)", () => {
   });
 
   test("opens a SHA-256 loose store and reports its format", () => {
-    const store = new LooseObjectStore(join(sha256RepoDir, ".git", "objects"), { objectHash: "sha256" });
+    const store = new LooseObjectStore(join(sha256RepoDir, ".git", "objects"), {
+      objectHash: "sha256",
+    });
     expect(store.objectHash).toBe("sha256");
     expect(store.objectFormat).toBe("sha256");
     expect(store.contains(sha256BlobId)).toBe(true);
