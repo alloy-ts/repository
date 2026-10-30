@@ -64,7 +64,7 @@ tokio = { version = "1", features = [
   "sync",
 ] }
 ring = "0.17.14"
-reqwest = { version = "0.13.5", features = ["http3"] }
+reqwest = { version = "0.13.5" }
 object_store = { version = "0.14.2", default-features = false, features = [
   "fs",
   "http",

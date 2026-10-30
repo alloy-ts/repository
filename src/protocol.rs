@@ -245,6 +245,25 @@ pub fn capability_value(text: String, name: String) -> napi::Result<Option<Strin
         .map(|v| v.to_string()))
 }
 
+/// Supported network and client transport schemes (`"http"`, `"https"`, `"ssh"`, `"git"`, `"file"`).
+#[napi]
+pub fn supported_transports() -> Vec<String> {
+    vec![
+        "http".to_string(),
+        "https".to_string(),
+        "ssh".to_string(),
+        "git".to_string(),
+        "file".to_string(),
+    ]
+}
+
+/// Check whether `scheme` (e.g. `"http"`, `"https"`, `"ssh"`, `"git"`, `"file"`) is a supported transport protocol.
+#[napi]
+pub fn is_transport_supported(scheme: String) -> bool {
+    let s = scheme.to_lowercase();
+    matches!(s.as_str(), "http" | "https" | "ssh" | "git" | "file")
+}
+
 /// Parse one V2 `ls-refs` line into a `gix_protocol::handshake::Ref`, replicating gitoxide's
 /// (private) `Ref::from_v2_refs` parser so JS can parse raw protocol data without a live connection.
 fn parse_single_ref_line(line: &str) -> napi::Result<gix_protocol::handshake::Ref> {
