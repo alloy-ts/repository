@@ -414,4 +414,23 @@ mod tests {
         assert_eq!(header.kind, "blob");
         assert_eq!(header.size, blob.len() as f64);
     }
+
+    #[test]
+    fn test_arrow_object_store_local_fs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().to_string_lossy().to_string();
+        let store = ArrowObjectStore::local(root.clone(), None).unwrap();
+
+        let blob = b"hello arrow local fs object store\n";
+        let id = store.write_object("blob".into(), Buffer::from(blob.to_vec())).unwrap();
+        assert!(store.contains(id.clone()));
+
+        let found = store.try_find(id.clone()).unwrap().unwrap();
+        assert_eq!(found.kind, "blob");
+        assert_eq!(found.data.as_ref(), blob);
+
+        let lookup = store.lookup_prefix(id[..8].to_string()).unwrap();
+        assert!(lookup.found);
+        assert_eq!(lookup.id, Some(id.clone()));
+    }
 }
