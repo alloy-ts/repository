@@ -129,6 +129,7 @@ impl ObjectStore for LooseObjectStore {
                 data: d.data.to_vec(),
                 kind: kind_to_string(d.kind),
                 pos: 0,
+                max_chunk_size: None,
             }),
             None => Err(crate::error::err_str(
                 "reader",

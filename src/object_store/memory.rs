@@ -92,6 +92,7 @@ impl InMemoryStore {
                 data: data.clone(),
                 kind: kind_to_string(*kind),
                 pos: 0,
+                max_chunk_size: None,
             })
             .ok_or_else(|| err_str("reader", format!("object {id} not found")))
     }

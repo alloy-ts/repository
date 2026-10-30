@@ -201,6 +201,7 @@ impl ObjectStore for FjallObjectStore {
             data,
             kind: kind_to_string(kind),
             pos: 0,
+            max_chunk_size: None,
         })
     }
 

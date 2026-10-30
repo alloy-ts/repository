@@ -84,6 +84,16 @@ describe("refPrefixesFromSpecs (src/protocol.rs)", () => {
   });
 });
 
+describe("ReqwestClient & Protocol HTTP Helpers (src/protocol.rs)", () => {
+  test("ReqwestClient constructs with custom settings", () => {
+    const { ReqwestClient } = require("../dist/index.js");
+    const client = new ReqwestClient(5000, "custom-git-client/1.0");
+    expect(client).toBeDefined();
+    expect(typeof client.getInfoRefs).toBe("function");
+    expect(typeof client.postService).toBe("function");
+  });
+});
+
 describe("Capabilities (src/protocol.rs)", () => {
   test("parseCapabilities() splits the advertised capability line", () => {
     const caps = parseCapabilities("agent=git/2.34.1 ls-refs=shallow fetch=wait-for-done");

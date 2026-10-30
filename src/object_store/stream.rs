@@ -70,7 +70,8 @@ impl ObjectStore for StreamObjectStore {
     }
 
     fn read_data_impl(&self, id: &str) -> napi::Result<ObjectStoreReader> {
-        let reader = ObjectStore::read_data_impl(self.inner.as_ref(), id)?;
+        let mut reader = ObjectStore::read_data_impl(self.inner.as_ref(), id)?;
+        reader.max_chunk_size = Some(self.chunk_size);
         Ok(reader)
     }
 

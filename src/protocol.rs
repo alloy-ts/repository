@@ -334,3 +334,99 @@ fn parse_single_ref_line(line: &str) -> napi::Result<gix_protocol::handshake::Re
         _ => Err(err_str("ref.parse", "ref line must be '<oid> <path>'")),
     }
 }
+
+use napi::bindgen_prelude::Buffer;
+
+/// A reqwest-based HTTP client for executing Git wire protocol HTTP/HTTPS requests.
+#[napi]
+pub struct ReqwestClient {
+    client: reqwest::blocking::Client,
+}
+
+#[napi]
+impl ReqwestClient {
+    /// Create a new `ReqwestClient` with optional timeout in milliseconds and user agent string.
+    #[napi(constructor)]
+    pub fn new(timeout_ms: Option<u32>, user_agent: Option<String>) -> napi::Result<Self> {
+        let mut builder = reqwest::blocking::Client::builder();
+        if let Some(ms) = timeout_ms {
+            builder = builder.timeout(std::time::Duration::from_millis(ms as u64));
+        }
+        if let Some(ua) = user_agent {
+            builder = builder.user_agent(ua);
+        } else {
+            builder = builder.user_agent("git/repository-napi-reqwest");
+        }
+        let client = builder.build().map_err(|e| err("ReqwestClient::new", e))?;
+        Ok(ReqwestClient { client })
+    }
+
+    /// Perform a Git smart HTTP GET `/info/refs?service=<service>` advertisement request.
+    #[napi]
+    pub fn get_info_refs(&self, url: String, service: Option<String>) -> napi::Result<Buffer> {
+        let service = service.unwrap_or_else(|| "git-upload-pack".to_string());
+        let info_url = if url.ends_with('/') {
+            format!("{url}info/refs?service={service}")
+        } else {
+            format!("{url}/info/refs?service={service}")
+        };
+        let response = self
+            .client
+            .get(&info_url)
+            .header("Accept", format!("application/x-{service}-advertisement"))
+            .send()
+            .map_err(|e| err("get_info_refs", e))?;
+
+        if !response.status().is_success() {
+            return Err(err_str(
+                "get_info_refs",
+                format!("HTTP error {}: {}", response.status(), info_url),
+            ));
+        }
+
+        let bytes = response.bytes().map_err(|e| err("get_info_refs", e))?;
+        Ok(Buffer::from(bytes.to_vec()))
+    }
+
+    /// Perform a Git smart HTTP POST `/<service>` request (e.g. `git-upload-pack` or `git-receive-pack`).
+    #[napi]
+    pub fn post_service(&self, url: String, service: String, body: Buffer) -> napi::Result<Buffer> {
+        let service_url = if url.ends_with('/') {
+            format!("{url}{service}")
+        } else {
+            format!("{url}/{service}")
+        };
+        let response = self
+            .client
+            .post(&service_url)
+            .header("Content-Type", format!("application/x-{service}-request"))
+            .header("Accept", format!("application/x-{service}-result"))
+            .body(body.to_vec())
+            .send()
+            .map_err(|e| err("post_service", e))?;
+
+        if !response.status().is_success() {
+            return Err(err_str(
+                "post_service",
+                format!("HTTP error {}: {}", response.status(), service_url),
+            ));
+        }
+
+        let bytes = response.bytes().map_err(|e| err("post_service", e))?;
+        Ok(Buffer::from(bytes.to_vec()))
+    }
+}
+
+/// Perform a Git smart HTTP GET `/info/refs?service=<service>` request over HTTP/HTTPS.
+#[napi]
+pub fn http_get_info_refs(url: String, service: Option<String>) -> napi::Result<Buffer> {
+    let client = ReqwestClient::new(None, None)?;
+    client.get_info_refs(url, service)
+}
+
+/// Perform a Git smart HTTP POST `/<service>` request over HTTP/HTTPS.
+#[napi]
+pub fn http_post_git_service(url: String, service: String, body: Buffer) -> napi::Result<Buffer> {
+    let client = ReqwestClient::new(None, None)?;
+    client.post_service(url, service, body)
+}

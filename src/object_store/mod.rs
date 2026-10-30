@@ -191,9 +191,10 @@ pub enum WriterTarget {
 /// hands it back in chunks.
 #[napi]
 pub struct ObjectStoreReader {
-    data: Vec<u8>,
-    kind: String,
-    pos: usize,
+    pub(crate) data: Vec<u8>,
+    pub(crate) kind: String,
+    pub(crate) pos: usize,
+    pub(crate) max_chunk_size: Option<usize>,
 }
 
 #[napi]
@@ -215,7 +216,11 @@ impl ObjectStoreReader {
     #[napi]
     pub fn read(&mut self, max_bytes: f64) -> Buffer {
         let remaining = self.data.len() - self.pos;
-        let n = (max_bytes as usize).min(remaining);
+        let mut limit = max_bytes as usize;
+        if let Some(chunk_cap) = self.max_chunk_size {
+            limit = limit.min(chunk_cap);
+        }
+        let n = limit.min(remaining);
         let end = self.pos + n;
         let out = Buffer::from(self.data[self.pos..end].to_vec());
         self.pos = end;
@@ -853,6 +858,7 @@ impl ObjectHandle {
                 data: d.data.to_vec(),
                 kind: kind_to_string(d.kind),
                 pos: 0,
+                max_chunk_size: None,
             }),
             None => Err(err_str("reader", format!("object {id} not found"))),
         }

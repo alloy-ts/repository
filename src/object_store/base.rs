@@ -147,6 +147,23 @@ pub trait ObjectStore {
         let objects = decode_pack(&pack, self.kind())?;
         self.insert_objects(objects)
     }
+
+    /// Write a payload into the object store, returning its computed id.
+    fn write_payload(&self, kind: Kind, payload: PutPayload) -> napi::Result<ObjectId> {
+        let bytes: Vec<u8> = payload.into();
+        self.write_buf_impl(kind, &bytes)
+    }
+
+    /// Write a payload under a known `id` (hash not recomputed).
+    fn write_payload_with_id(
+        &self,
+        kind: Kind,
+        payload: PutPayload,
+        id: ObjectId,
+    ) -> napi::Result<ObjectId> {
+        let bytes: Vec<u8> = payload.into();
+        self.write_buf_with_id_impl(kind, &bytes, id)
+    }
 }
 
 /// Decode a packfile `Buffer` into its constituent `(id, (kind, data))` objects. Used by both the
