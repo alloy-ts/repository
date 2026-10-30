@@ -153,17 +153,17 @@ impl LocalDriver {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_f = Arc::clone(&stop);
 
-        let driver = thread::run(move || {
+        let driver = thread::spawn(move || {
             let mut pool = FuturesLocalPool::new();
-            let scheduler = pool.scheduler();
+            let spawner = pool.spawner();
             loop {
                 while let Ok(task) = rx.try_recv() {
-                    task(&scheduler);
+                    task(&spawner);
                 }
                 pool.run_until_stalled();
                 if stop_f.load(Ordering::Relaxed) {
                     while let Ok(task) = rx.try_recv() {
-                        task(&scheduler);
+                        task(&spawner);
                     }
                     pool.run_until_stalled();
                     break;
@@ -427,8 +427,8 @@ impl Scheduler {
     ///
     /// The callback is dispatched to the event-loop thread via a
     /// `ThreadSafeFunction`; the task thread only triggers the call.
-    #[napi]
-    pub fn run(&self, task: Function<'static, (), ()>) -> Result<()> {
+    #[napi(js_name = "runCallback")]
+    pub fn run_callback(&self, task: Function<'static, (), ()>) -> Result<()> {
         match &self.backend {
             Backend::Libuv => Self::spawn_libuv(task),
             Backend::Futures => {
