@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 
 use futures::StreamExt;
 
-use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
 
 use gix::ObjectId;
@@ -27,7 +27,8 @@ use crate::error::{err, err_str};
 use crate::object::kind_to_string;
 use crate::object_store::base::ObjectStore;
 use crate::object_store::{
-    ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget, object_kind_from_option,
+    ObjectStoreOptions, ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget,
+    object_kind_from_option,
 };
 use object_store::{ObjectStore as _, ObjectStoreExt};
 
@@ -209,6 +210,13 @@ impl ObjectStore for ArrowObjectStore {
     }
 
     fn lookup_prefix_impl(&self, prefix: &str) -> napi::Result<PrefixLookup> {
+        if prefix.len() < 4 {
+            return Ok(PrefixLookup {
+                found: false,
+                ambiguous: false,
+                id: None,
+            });
+        }
         let p = prefix.to_ascii_lowercase();
         let mut found: Option<String> = None;
         let mut count = 0usize;
@@ -333,8 +341,16 @@ impl ArrowObjectStore {
     ///   prefixed with `file://`) for a local-disk store (backed by `LocalFileSystem`).
     /// - `object_hash` is `"sha1"` (default) or `"sha256"`.
     #[napi(constructor)]
-    pub fn new(uri: String, object_hash: Option<String>) -> napi::Result<Self> {
-        let kind = object_kind_from_option(object_hash.as_deref())?;
+    pub fn new(
+        uri: String,
+        object_hash_or_options: Option<Either<String, ObjectStoreOptions>>,
+    ) -> napi::Result<Self> {
+        let hash_str = match object_hash_or_options {
+            Some(Either::A(hash)) => Some(hash),
+            Some(Either::B(opts)) => opts.object_hash,
+            None => None,
+        };
+        let kind = object_kind_from_option(hash_str.as_deref())?;
         let (store, root, fs_prefix) = build(&uri)?;
         Ok(Self {
             inner: Arc::new(ArrowStore {

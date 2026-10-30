@@ -137,6 +137,8 @@ fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
 /// Options for constructing a loose or memory [`ObjectStore`](crate::object_store::base::ObjectStore) variant.
 #[napi(object)]
 pub struct ObjectStoreOptions {
+    /// Object hash kind (`"sha1"` or `"sha256"`).
+    pub object_hash: Option<String>,
     /// Maximum size (in bytes) of a single allocation caused by a loose object read/write.
     /// `null` means no additional limit.
     pub alloc_limit_bytes: Option<u32>,
@@ -400,6 +402,8 @@ impl ObjectDatabase {
                 None => Compression::BEST_SPEED,
             },
         };
+        std::fs::create_dir_all(&objects_directory)
+            .map_err(|e| err("ObjectDatabase::new", e))?;
         let store = gix::odb::Store::at_opts(
             objects_directory.clone().into(),
             object_hash,
@@ -778,6 +782,13 @@ impl ObjectHandle {
     /// and `id` set when exactly one matches.
     #[napi]
     pub fn lookup_prefix(&self, prefix: String) -> napi::Result<PrefixLookup> {
+        if prefix.len() < 4 {
+            return Ok(PrefixLookup {
+                found: false,
+                ambiguous: false,
+                id: None,
+            });
+        }
         let prefix = gix::hash::Prefix::from_hex(&prefix).map_err(|e| err("lookup_prefix", e))?;
         match self.inner.lock().unwrap().lookup_prefix(prefix, None) {
             Ok(Some(Ok(oid))) => Ok(PrefixLookup {
@@ -994,6 +1005,11 @@ impl ObjectHandle {
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect())
+    }
+
+    #[napi(js_name = "alternate_db_paths")]
+    pub fn alternate_db_paths_snake(&self) -> napi::Result<Vec<String>> {
+        self.alternate_db_paths()
     }
 
     /// Return the exact number of packed objects across all currently loaded indices.

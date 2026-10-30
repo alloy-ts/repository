@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
 
 use gix::ObjectId;
@@ -58,6 +58,13 @@ impl InMemoryStore {
             }))
     }
     fn lookup_prefix(&self, prefix: &str) -> napi::Result<PrefixLookup> {
+        if prefix.len() < 4 {
+            return Ok(PrefixLookup {
+                found: false,
+                ambiguous: false,
+                id: None,
+            });
+        }
         let p = prefix.to_ascii_lowercase();
         let mut found: Option<ObjectId> = None;
         let mut count = 0usize;
@@ -115,6 +122,14 @@ impl InMemoryStore {
             .insert(id, (kind, data.to_vec()));
         Ok(())
     }
+}
+
+/// Options for constructing a [`MemoryObjectStore`].
+#[napi(object)]
+#[derive(Default)]
+pub struct MemoryObjectStoreOptions {
+    /// Object hash kind: `"sha1"` or `"sha256"`.
+    pub object_hash: Option<String>,
 }
 
 /// A database for reading and writing objects kept entirely in memory, mirroring libgit2's
@@ -194,8 +209,15 @@ impl ObjectStore for MemoryObjectStore {
 impl MemoryObjectStore {
     /// Create a new in-memory object store. `object_hash` is `"sha1"` (default) or `"sha256"`.
     #[napi(constructor)]
-    pub fn new(object_hash: Option<String>) -> napi::Result<Self> {
-        let kind = object_kind_from_option(object_hash.as_deref())?;
+    pub fn new(
+        object_hash_or_options: Option<Either<String, MemoryObjectStoreOptions>>,
+    ) -> napi::Result<Self> {
+        let hash_str = match object_hash_or_options {
+            Some(Either::A(hash)) => Some(hash),
+            Some(Either::B(opts)) => opts.object_hash,
+            None => None,
+        };
+        let kind = object_kind_from_option(hash_str.as_deref())?;
         Ok(MemoryObjectStore {
             inner: Arc::new(InMemoryStore::new(kind)),
         })

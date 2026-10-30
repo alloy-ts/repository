@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::{Buffer, Either};
 use napi_derive::napi;
 
 use gix::objs::{Exists, Write};
@@ -40,6 +40,13 @@ impl ObjectStore for LooseObjectStore {
     }
 
     fn lookup_prefix_impl(&self, prefix: &str) -> napi::Result<PrefixLookup> {
+        if prefix.len() < 4 {
+            return Ok(PrefixLookup {
+                found: false,
+                ambiguous: false,
+                id: None,
+            });
+        }
         let prefix = gix::hash::Prefix::from_hex(prefix).map_err(|e| err("lookup_prefix", e))?;
         match self.inner.lookup_prefix(prefix, None) {
             Ok(Some(Ok(oid))) => Ok(PrefixLookup {
@@ -158,15 +165,22 @@ impl LooseObjectStore {
     #[napi(constructor)]
     pub fn new(
         objects_directory: String,
-        object_hash: Option<String>,
+        object_hash_or_options: Option<Either<String, ObjectStoreOptions>>,
         options: Option<ObjectStoreOptions>,
     ) -> napi::Result<Self> {
-        let kind = object_kind_from_option(object_hash.as_deref())?;
-        let options = options.unwrap_or(ObjectStoreOptions {
+        std::fs::create_dir_all(&objects_directory).map_err(|e| err("LooseObjectStore::new", e))?;
+        let (hash_str, store_opts) = match object_hash_or_options {
+            Some(Either::A(hash)) => (Some(hash), options),
+            Some(Either::B(opts)) => (opts.object_hash.clone(), Some(opts)),
+            None => (None, options),
+        };
+        let kind = object_kind_from_option(hash_str.as_deref())?;
+        let opts = store_opts.unwrap_or(ObjectStoreOptions {
+            object_hash: None,
             alloc_limit_bytes: None,
             compression_level: None,
         });
-        let compression = match options.compression_level {
+        let compression = match opts.compression_level {
             Some(level) => Compression::new(level as i32).unwrap_or(Compression::BEST_SPEED),
             None => Compression::BEST_SPEED,
         };
@@ -174,7 +188,7 @@ impl LooseObjectStore {
             objects_directory,
             kind,
             gix::odb::loose::Options {
-                alloc_limit_bytes: options.alloc_limit_bytes.map(|b| b as usize),
+                alloc_limit_bytes: opts.alloc_limit_bytes.map(|b| b as usize),
                 compression,
             },
         );
