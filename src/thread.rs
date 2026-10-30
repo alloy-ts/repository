@@ -303,15 +303,13 @@ impl ThreadPool {
             .map_err(|e| Error::new(Status::GenericFailure, format!("queue_work failed: {e:?}")))
     }
 
-    /// Run `work` on a libuv worker thread, then wake the loop via a
-    /// `uv_async_t` (the `Task` wakeup) and invoke `on_loop(result)` on the
-    /// loop thread. `on_loop` receives no `Env` — settle a `JsDeferred` there
-    /// and napi supplies the `Env` when the resolver runs. This is the shared
-    /// worker→loop delivery primitive used by `task.rs` and `promise.rs`.
-    pub(crate) fn run<F, G, T>(&self, work: F, on_loop: G) -> Result<()>
+    /// Run `work` on a libuv worker thread via `uv_queue_work`, then invoke
+    /// `on_loop(result, status)` directly on the loop thread in the after-work
+    /// callback (`uv_after_work_cb`). Returns the in-flight [`WorkReq`].
+    pub(crate) fn run<F, G, T>(&self, work: F, on_loop: G) -> Result<WorkReq>
     where
         F: FnOnce() -> T + Send + 'static,
-        G: FnOnce(T) + 'static,
+        G: FnOnce(Option<T>, std::result::Result<u32, libuv::Error>) + 'static,
         T: Send + 'static,
     {
         let slot: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
@@ -319,22 +317,18 @@ impl ThreadPool {
         let deliver_slot = Arc::clone(&slot);
         let mut work_opt: Option<F> = Some(work);
         let mut on_loop_opt: Option<G> = Some(on_loop);
-        let wake = crate::task::TaskSignal::wake_on(self.r#loop(), move || {
-            if let Some(r) = deliver_slot.lock().unwrap().take() {
-                if let Some(deliver) = on_loop_opt.take() {
-                    deliver(r);
-                }
-            }
-        })?;
+
         let work_cb = move |_req: WorkReq| {
             if let Some(w) = work_opt.take() {
                 *work_slot.lock().unwrap() = Some(w());
             }
         };
-        let after_cb = move |_req: WorkReq, _status| {
-            let _ = wake.send();
-            let _ = wake.close();
+        let after_cb = move |_req: WorkReq, status: std::result::Result<u32, libuv::Error>| {
+            let res = deliver_slot.lock().unwrap().take();
+            if let Some(deliver) = on_loop_opt.take() {
+                deliver(res, status);
+            }
         };
-        self.queue_task(work_cb, after_cb).map(|_| ())
+        self.queue_task(work_cb, after_cb)
     }
 }

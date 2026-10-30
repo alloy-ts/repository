@@ -538,6 +538,8 @@ pub struct Task {
     done: napi::sys::napi_value,
     /// Deferred created by [`Task::terminate`], settled when `exit` is emitted.
     terminate_slot: TerminateSlot,
+    /// The in-flight `uv_work_t` request, cancelled on `terminate`.
+    work_req: Arc<Mutex<Option<WorkReq>>>,
 }
 
 #[napi]
@@ -578,8 +580,7 @@ impl Task {
 
         // `work` runs on a libuv task thread (no V8 access): it resolves the
         // work plus the sandbox/object-database/network setup. The result
-        // is parked in a shared slot and delivered to the loop thread through
-        // the `Task` (uv_async_t) wakeup used internally by `ThreadPool::run`.
+        // is delivered to the loop thread via the after-work callback of `uv_queue_work`.
         let work_dir = dir.clone();
         let work_options_repo = options.repository.as_ref().map(|r| Arc::clone(&r.inner));
         let work_entries: Vec<String> = match &options.entries {
@@ -623,35 +624,46 @@ impl Task {
                 .collect()
         };
 
-        // `on_loop` runs on the event-loop thread (via the `Task` uv_async_t
-        // wakeup): settle the deferred, which evaluates the work and
-        // dispatches events.
+        let work_req: Arc<Mutex<Option<WorkReq>>> = Arc::new(Mutex::new(None));
+        let work_req_slot = Arc::clone(&work_req);
+
+        // `on_loop` runs on the event-loop thread in `uv_after_work_cb`: settle
+        // the deferred, which evaluates the work and dispatches events.
         let deliver_deferred = Arc::clone(&deferred_slot);
         let deliver_handlers = Arc::clone(&handlers);
         let deliver_terminated = Arc::clone(&terminated);
         let deliver_task_data = task_data.clone();
         let deliver_terminate = Arc::clone(&terminate_slot);
-        let on_loop = move |resolved: std::result::Result<Vec<Programme>, String>| {
-            if let Some(d) = deliver_deferred.lock().unwrap().take() {
-                let handlers = Arc::clone(&deliver_handlers);
-                let terminated = Arc::clone(&deliver_terminated);
-                let terminate_slot = Arc::clone(&deliver_terminate);
-                let task_data = deliver_task_data.clone();
-                d.resolve(Box::new(move |env: Env| {
-                    run_resolved(
-                        &env,
-                        &handlers,
-                        &terminated,
-                        Some(resolved),
-                        task_data,
-                        &terminate_slot,
-                    )
-                }));
-            }
-        };
 
-        pool.run(work, on_loop)
-            .map_err(|e| Error::new(Status::GenericFailure, format!("run: {e}")))?;
+        let req = pool.run(
+            work,
+            move |resolved: Option<std::result::Result<Vec<Programme>, String>>, status: std::result::Result<u32, libuv::Error>| {
+                let _ = work_req_slot.lock().unwrap().take();
+                if let Some(d) = deliver_deferred.lock().unwrap().take() {
+                    let handlers = Arc::clone(&deliver_handlers);
+                    let terminated = Arc::clone(&deliver_terminated);
+                    let terminate_slot = Arc::clone(&deliver_terminate);
+                    let task_data = deliver_task_data.clone();
+                    d.resolve(Box::new(move |env: Env| {
+                        let res = if status.is_ok() {
+                            resolved
+                        } else {
+                            Some(Err("task cancelled".to_string()))
+                        };
+                        run_resolved(
+                            &env,
+                            &handlers,
+                            &terminated,
+                            res,
+                            task_data,
+                            &terminate_slot,
+                        )
+                    }));
+                }
+            },
+        ).map_err(|e| Error::new(Status::GenericFailure, format!("run: {e}")))?;
+
+        *work_req.lock().unwrap() = Some(req);
 
         Ok(Task {
             id,
@@ -664,6 +676,7 @@ impl Task {
             task_data,
             done,
             terminate_slot,
+            work_req,
         })
     }
 
@@ -732,9 +745,10 @@ impl Task {
     #[napi(ts_return_type = "Promise<number>")]
     pub fn terminate(&self, env: Env) -> Result<Unknown<'static>> {
         self.terminated.store(true, Ordering::Relaxed);
-        // libuv cannot cancel work that has already started, so termination is
-        // cooperative: the flag is observed before the work is evaluated.
-        // The promise settles in `run_resolved`, when `exit` is emitted.
+        if let Some(req) = self.work_req.lock().unwrap().take() {
+            let mut r: libuv::Req = libuv::Req::from(req);
+            let _ = r.cancel();
+        }
         // If the task already exited, resolve with the recorded exit code
         // (mirrors Node, where terminating a stopped worker resolves at once).
         if let Some(code) = *self.terminate_slot.code.lock().unwrap() {

@@ -66,14 +66,12 @@ pub fn process_buffer(env: Env, buffer: Buffer) -> Result<AsyncBlock<Buffer>> {
         .build(&env)
 }
 
-/// **Promise from the libuv thread pool** (`uv_queue_work` + `uv_async_t`).
+/// **Promise from the libuv thread pool** (`uv_queue_work`).
 ///
 /// Like [`process_buffer`], but the (here: copy) work runs on a libuv worker
 /// thread via `ThreadPool::run`. The worker cannot touch V8, so the result is
-/// parked in a shared slot and the loop is woken with a `uv_async_t`
-/// (`TaskSignal`); the loop-side callback then settles a `JsDeferred`, whose
-/// promise is returned to JS. This is the same worker→loop delivery primitive
-/// `task.rs` uses to run `Task` programmes.
+/// delivered directly to the loop thread in the `uv_after_work_cb` callback,
+/// which settles a `JsDeferred` whose promise is returned to JS.
 #[napi(ts_return_type = "Promise<Buffer>")]
 pub fn process_buffer_on_pool(env: Env, buffer: Buffer) -> Result<Unknown<'static>> {
     let pool = ThreadPool::new()?;
@@ -85,9 +83,17 @@ pub fn process_buffer_on_pool(env: Env, buffer: Buffer) -> Result<Unknown<'stati
     let data = buffer.to_vec();
     pool.run(
         move || data,
-        move |data: Vec<u8>| {
+        move |data: Option<Vec<u8>>, status: std::result::Result<u32, libuv::Error>| {
             if let Some(d) = deferred_slot.lock().unwrap().take() {
-                d.resolve(Box::new(move |_env: Env| Ok(Buffer::from(data))));
+                if status.is_ok() {
+                    if let Some(data) = data {
+                        d.resolve(Box::new(move |_env: Env| Ok(Buffer::from(data))));
+                        return;
+                    }
+                }
+                d.resolve(Box::new(move |_env: Env| {
+                    Err(Error::new(Status::GenericFailure, "work cancelled or failed"))
+                }));
             }
         },
     )?;
