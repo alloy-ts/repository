@@ -33,6 +33,7 @@ mod mailmap;
 mod merge;
 mod metrics;
 mod namespace;
+mod negotiate;
 mod note;
 mod object;
 mod object_store;

@@ -50,6 +50,33 @@ pub enum RemoteDirection {
     Push,
 }
 
+/// Transport channel mode used for network requests.
+#[napi]
+pub enum TransportChannel {
+    /// HTTP/HTTPS using reqwest or curl.
+    Http,
+    /// SSH connection using ssh2 or system ssh command.
+    Ssh,
+    /// Native Git protocol over TCP port 9418.
+    Git,
+    /// Local filesystem path transport.
+    File,
+}
+
+/// Transport configuration options for remote operations.
+#[napi(object)]
+#[derive(Default)]
+pub struct TransportConfig {
+    /// Transport channel mode.
+    pub channel: Option<TransportChannel>,
+    /// User agent header string.
+    pub user_agent: Option<String>,
+    /// Request timeout in milliseconds.
+    pub timeout_ms: Option<u32>,
+    /// Custom HTTP headers (key-value pairs).
+    pub extra_headers: Option<Vec<String>>,
+}
+
 pub(crate) fn to_remote_direction(d: RemoteDirection) -> gix::remote::Direction {
     match d {
         RemoteDirection::Fetch => gix::remote::Direction::Fetch,
