@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use futures::scheduler::{LocalPool as FuturesLocalPool, LocalSpawner as FuturesLocalSpawner};
+use futures::executor::{LocalPool as FuturesLocalPool, LocalSpawner as FuturesLocalSpawner};
+use futures_executor::{ThreadPool as FuturesThreadPool, ThreadPoolBuilder};
 use futures::task::LocalSpawnExt;
 use futures_channel::oneshot;
-use futures_scheduler::{ThreadPool as FuturesThreadPool, ThreadPoolBuilder};
 use napi::JsDeferred;
 use napi::bindgen_prelude::{Function, JsValue, ToNapiValue, Unknown};
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
@@ -261,7 +261,7 @@ impl LocalDriver {
         };
 
         self.spawn_tx
-            .send(Box::new(move |spawner| {
+            .send(Box::new(move |spawner: &FuturesLocalSpawner| {
                 let _ = spawner.spawn_local(async move { fut.await });
             }))
             .map_err(|e| {
@@ -287,7 +287,7 @@ impl LocalDriver {
             .build()
             .map_err(uv_err)?;
         self.spawn_tx
-            .send(Box::new(move |spawner| {
+            .send(Box::new(move |spawner: &FuturesLocalSpawner| {
                 let _ = spawner.spawn_local(async move {
                     let _ = tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
                 });

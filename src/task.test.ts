@@ -2,7 +2,23 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { exec, Task, TaskSignal } from "./main.ts";
+import {
+  availableParallelism,
+  blockOnTask,
+  getEnvMessagePort,
+  isMainThread,
+  K_CODE_RANGE_SIZE_MB,
+  K_MAX_OLD_GENERATION_SIZE_MB,
+  K_MAX_YOUNG_GENERATION_SIZE_MB,
+  K_MB,
+  K_STACK_SIZE_MB,
+  K_TOTAL_RESOURCE_LIMIT_COUNT,
+  run,
+  spawnLocalTask,
+  Task,
+  TaskSignal,
+  Worker,
+} from "./main.ts";
 
 // `src/task.rs` exports:
 //
@@ -47,6 +63,39 @@ function scriptFile(source: string): string {
   writeFileSync(file, source);
   return file;
 }
+
+describe("Task constants and helper functions", () => {
+  test("resource limit constants are defined", () => {
+    expect(K_MB).toBe(1024 * 1024);
+    expect(K_MAX_YOUNG_GENERATION_SIZE_MB).toBe(0);
+    expect(K_MAX_OLD_GENERATION_SIZE_MB).toBe(1);
+    expect(K_CODE_RANGE_SIZE_MB).toBe(2);
+    expect(K_STACK_SIZE_MB).toBe(3);
+    expect(K_TOTAL_RESOURCE_LIMIT_COUNT).toBe(4);
+  });
+
+  test("helper functions return expected values", () => {
+    expect(isMainThread()).toBe(true);
+    expect(getEnvMessagePort()).toBeNull();
+    expect(typeof availableParallelism()).toBe("number");
+    expect(availableParallelism()).toBeGreaterThan(0);
+  });
+
+  test("spawnLocalTask and blockOnTask helper functions", async () => {
+    const task = spawnLocalTask({ entries: "postMessage('local-task');" });
+    const msgPromise = onceMessage(task);
+    await blockOnTask(task);
+    expect(await msgPromise).toBe("local-task");
+  });
+});
+
+describe("Worker class", () => {
+  test("runs inline code via Worker alias", async () => {
+    const worker = new Worker({ entries: "postMessage('from-worker');" });
+    expect(await onceMessage(worker as unknown as Task)).toBe("from-worker");
+    expect(await onceExit(worker as unknown as Task)).toBe(0);
+  });
+});
 
 describe("TaskSignal (uv_async_t)", () => {
   test("send() wakes the loop and invokes the callback", async () => {

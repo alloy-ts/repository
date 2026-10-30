@@ -26,6 +26,12 @@ impl Thread {
         }
     }
 
+    /// Checks if this thread handle represents the currently running thread.
+    #[napi]
+    pub fn is_current(&self) -> bool {
+        self.inner.id() == std_thread::current().id()
+    }
+
     /// Returns a unique identifier for this thread (as a JS number).
     #[napi(getter)]
     pub fn id(&self) -> f64 {
@@ -284,6 +290,29 @@ impl ThreadPool {
             .unwrap_or(ThreadPool::default_size())
     }
 
+    /// Schedules a JS task callback onto the libuv thread pool.
+    #[napi]
+    pub fn spawn_task(&self, task: Function<'static, (), ()>) -> Result<()> {
+        let tsfn = task
+            .build_threadsafe_function::<()>()
+            .build()?;
+        self.run(
+            move |_req: WorkReq| {
+                let _ = tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
+            },
+            move |_req: WorkReq, _status| {},
+        )?;
+        Ok(())
+    }
+
+    /// Returns the estimate of default hardware parallelism for the system.
+    #[napi]
+    pub fn available_parallelism() -> u32 {
+        std_thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1)
+    }
+
     /// The loop whose thread pool this handle drives. Exposed for use by other
     /// bindings (e.g. `Scheduler`) that schedule work onto the pool.
     pub(crate) fn r#loop(&self) -> &Loop {
@@ -301,16 +330,6 @@ impl ThreadPool {
         self.loop_
             .queue_work(work, after)
             .map_err(|e| Error::new(Status::GenericFailure, format!("queue_work failed: {e:?}")))
-    }
-
-    /// Alias for [`ThreadPool::exec`] — reads naturally at call sites
-    /// (`pool.run(work, after)`).
-    pub(crate) fn run<F, G>(&self, work: F, after: G) -> Result<WorkReq>
-    where
-        F: Into<WorkCB<'static>>,
-        G: Into<AfterWorkCB<'static>>,
-    {
-        self.run(work, after)
     }
     /// Run `work` on a libuv worker thread (`uv_queue_work`), then wake the
     /// loop via a `uv_async_t` and invoke `on_loop(result, cancelled)` on the

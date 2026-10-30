@@ -23,6 +23,8 @@ use gix::objs::Find;
 #[allow(non_upper_case_globals)]
 #[napi]
 pub const kMB: u32 = 1024 * 1024;
+#[napi]
+pub const K_MB: u32 = 1024 * 1024;
 
 /// Resource-limit array indices, mirroring the C++ `task` binding's
 /// `kMaxYoungGenerationSizeMb` / `kMaxOldGenerationSizeMb` / `kCodeRangeSizeMb`
@@ -30,18 +32,32 @@ pub const kMB: u32 = 1024 * 1024;
 #[allow(non_upper_case_globals)]
 #[napi]
 pub const kMaxYoungGenerationSizeMb: u32 = 0;
+#[napi]
+pub const K_MAX_YOUNG_GENERATION_SIZE_MB: u32 = 0;
+
 #[allow(non_upper_case_globals)]
 #[napi]
 pub const kMaxOldGenerationSizeMb: u32 = 1;
+#[napi]
+pub const K_MAX_OLD_GENERATION_SIZE_MB: u32 = 1;
+
 #[allow(non_upper_case_globals)]
 #[napi]
 pub const kCodeRangeSizeMb: u32 = 2;
+#[napi]
+pub const K_CODE_RANGE_SIZE_MB: u32 = 2;
+
 #[allow(non_upper_case_globals)]
 #[napi]
 pub const kStackSizeMb: u32 = 3;
+#[napi]
+pub const K_STACK_SIZE_MB: u32 = 3;
+
 #[allow(non_upper_case_globals)]
 #[napi]
 pub const kTotalResourceLimitCount: u32 = 4;
+#[napi]
+pub const K_TOTAL_RESOURCE_LIMIT_COUNT: u32 = 4;
 
 /// V8 resource limits for a task, mirroring the C++ `Task` `resource_limits_`
 /// float array (`node_task.h`): `maxYoungGenerationSizeMb`,
@@ -1177,6 +1193,182 @@ impl TaskRequest {
     pub fn type_name(&self) -> String {
         "WORK".to_string()
     }
+}
+
+/// Worker class wrapping Task.
+#[napi]
+pub struct Worker {
+    inner: Task,
+}
+
+#[napi]
+impl Worker {
+    #[napi(constructor)]
+    pub fn new(env: Env, options: TaskOptions) -> Result<Self> {
+        Ok(Worker {
+            inner: Task::new(env, options)?,
+        })
+    }
+
+    #[napi(getter)]
+    pub fn get_thread_id(&self) -> u32 {
+        self.inner.get_thread_id()
+    }
+
+    #[napi(getter)]
+    pub fn get_terminated(&self) -> bool {
+        self.inner.get_terminated()
+    }
+
+    #[napi(getter)]
+    pub fn get_has_ref(&self) -> bool {
+        self.inner.get_has_ref()
+    }
+
+    #[napi(getter)]
+    pub fn get_thread_name(&self) -> String {
+        self.inner.get_thread_name()
+    }
+
+    #[napi(getter)]
+    pub fn get_resource_limits(&self) -> Option<TaskResourceLimits> {
+        self.inner.get_resource_limits()
+    }
+
+    #[napi(getter)]
+    pub fn get_task_data(&self, env: Env) -> Result<Unknown<'static>> {
+        self.inner.get_task_data(env)
+    }
+
+    #[napi]
+    pub fn post_message(&self, env: Env, message: Unknown<'static>) -> Result<()> {
+        self.inner.post_message(env, message)
+    }
+
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn terminate(&self, env: Env) -> Result<Unknown<'static>> {
+        self.inner.terminate(env)
+    }
+
+    #[napi]
+    pub fn cancel(&self) -> Result<bool> {
+        self.inner.cancel()
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn done(&self, env: Env) -> Result<Unknown<'static>> {
+        self.inner.done(env)
+    }
+
+    #[napi]
+    pub fn reference(&self) -> Result<()> {
+        self.inner.reference()
+    }
+
+    #[napi]
+    pub fn unreference(&self) -> Result<()> {
+        self.inner.unreference()
+    }
+
+    #[napi(getter)]
+    pub fn get_onmessage(
+        &self,
+        env: Env,
+    ) -> Result<Option<Function<'static, Unknown<'static>, Unknown<'static>>>> {
+        self.inner.get_onmessage(env)
+    }
+
+    #[napi(setter)]
+    pub fn set_onmessage(
+        &self,
+        env: Env,
+        handler: Option<Function<'static, Unknown<'static>, Unknown<'static>>>,
+    ) -> Result<()> {
+        self.inner.set_onmessage(env, handler)
+    }
+
+    #[napi(getter)]
+    pub fn get_onerror(
+        &self,
+        env: Env,
+    ) -> Result<Option<Function<'static, Unknown<'static>, Unknown<'static>>>> {
+        self.inner.get_onerror(env)
+    }
+
+    #[napi(setter)]
+    pub fn set_onerror(
+        &self,
+        env: Env,
+        handler: Option<Function<'static, Unknown<'static>, Unknown<'static>>>,
+    ) -> Result<()> {
+        self.inner.set_onerror(env, handler)
+    }
+
+    #[napi(getter)]
+    pub fn get_onmessageerror(
+        &self,
+        env: Env,
+    ) -> Result<Option<Function<'static, Unknown<'static>, Unknown<'static>>>> {
+        self.inner.get_onmessageerror(env)
+    }
+
+    #[napi(setter)]
+    pub fn set_onmessageerror(
+        &self,
+        env: Env,
+        handler: Option<Function<'static, Unknown<'static>, Unknown<'static>>>,
+    ) -> Result<()> {
+        self.inner.set_onmessageerror(env, handler)
+    }
+
+    #[napi]
+    pub fn add_event_listener(
+        &self,
+        env: Env,
+        type_: String,
+        listener: Function<'static, Unknown<'static>, Unknown<'static>>,
+    ) -> Result<()> {
+        self.inner.add_event_listener(env, type_, listener)
+    }
+
+    #[napi]
+    pub fn remove_event_listener(
+        &self,
+        env: Env,
+        type_: String,
+        listener: Function<'static, Unknown<'static>, Unknown<'static>>,
+    ) -> Result<()> {
+        self.inner.remove_event_listener(env, type_, listener)
+    }
+
+    #[napi]
+    pub fn dispatch_event(&self, env: Env, evt: Unknown<'static>) -> Result<()> {
+        self.inner.dispatch_event(env, evt)
+    }
+}
+
+/// Returns whether the current thread is the main thread.
+#[napi]
+pub fn is_main_thread() -> bool {
+    true
+}
+
+/// Returns the environment message port, if any.
+#[napi]
+pub fn get_env_message_port() -> Option<Unknown<'static>> {
+    None
+}
+
+/// Blocks on the completion of the given task.
+#[napi]
+pub fn block_on_task(env: Env, task: &Task) -> Result<Unknown<'static>> {
+    task.done(env)
+}
+
+/// Spawns a local task using the given options.
+#[napi]
+pub fn spawn_local_task(env: Env, options: TaskOptions) -> Result<Task> {
+    Task::new(env, options)
 }
 
 /// `uv_queue_task(loop, req, task_cb, after_task_cb)` — schedule task on the

@@ -1,6 +1,14 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, test } from "vite-plus/test";
-import { asyncPlus100, processBuffer, processBufferOnPool, promiseCallback } from "./main.ts";
+import {
+  asyncPlus100,
+  blockOnPromise,
+  delayPromise,
+  joinPromises,
+  processBuffer,
+  processBufferOnPool,
+  promiseCallback,
+} from "./main.ts";
 
 // `src/promise.rs` exercises napi's Promise machinery:
 //
@@ -16,6 +24,29 @@ import { asyncPlus100, processBuffer, processBufferOnPool, promiseCallback } fro
 //
 // NOTE: the native module under `dist/` must be rebuilt (`npm run build`) after
 // the Rust bindings change for these tests to run.
+
+describe("joinPromises", () => {
+  test("joins two promises concurrently", async () => {
+    const res = await joinPromises(Promise.resolve(10), Promise.resolve(20));
+    expect(res).toEqual([10, 20]);
+  });
+});
+
+describe("delayPromise", () => {
+  test("delays execution for specified milliseconds", async () => {
+    const start = Date.now();
+    await delayPromise(50);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(40);
+  });
+});
+
+describe("blockOnPromise", () => {
+  test("synchronously blocks on a promise", () => {
+    const val = blockOnPromise(Promise.resolve(42));
+    expect(val).toBe(42);
+  });
+});
 
 describe("asyncPlus100", () => {
   test("awaits a resolved Promise and adds 100", async () => {

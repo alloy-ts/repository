@@ -1,5 +1,8 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use futures::executor::block_on;
+use futures::join;
 use napi::JsDeferred;
 use napi::bindgen_prelude::{
     AsyncBlock, AsyncBlockBuilder, Buffer, Error, Promise, PromiseRaw, Status, ToNapiValue, Unknown,
@@ -30,6 +33,32 @@ pub async fn async_plus_100(p: Promise<u32>) -> Result<u32> {
     let v = p.await?;
     v.checked_add(100)
         .ok_or_else(|| Error::new(Status::InvalidArg, "result exceeds u32"))
+}
+
+/// **Join Promises**
+///
+/// Concurrently awaits two JS Promises and returns their tuple of resolved values.
+#[napi]
+pub async fn join_promises(p1: Promise<u32>, p2: Promise<u32>) -> Result<(u32, u32)> {
+    let (res1, res2) = join!(p1, p2);
+    Ok((res1?, res2?))
+}
+
+/// **Delay Promise**
+///
+/// Asynchronously sleeps for `millis` milliseconds before resolving.
+#[napi]
+pub async fn delay_promise(millis: f64) -> Result<()> {
+    tokio::time::sleep(Duration::from_secs_f64(millis / 1000.0)).await;
+    Ok(())
+}
+
+/// **Block on Promise**
+///
+/// Synchronously blocks the calling thread on a JS Promise until it resolves.
+#[napi]
+pub fn block_on_promise(p: Promise<u32>) -> Result<u32> {
+    block_on(p)
 }
 
 /// **PromiseRaw** (sync `.then`/`.catch` on a raw JS `Promise`).
