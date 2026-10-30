@@ -8,6 +8,14 @@ use napi_derive::napi;
 
 use libuv::{AfterWorkCB, Loop, WorkCB, WorkReq};
 
+/// Returns the estimated number of hardware threads available to the process.
+#[napi]
+pub fn available_parallelism() -> u32 {
+    std_thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
+}
+
 /// A handle to a thread.
 ///
 /// Exposed to JS as the `Thread` class. Wraps [`std::thread::Thread`].
@@ -24,6 +32,12 @@ impl Thread {
         Thread {
             inner: std_thread::current(),
         }
+    }
+
+    /// Returns `true` if this thread handle represents the currently executing thread.
+    #[napi]
+    pub fn is_current(&self) -> bool {
+        self.inner.id() == std_thread::current().id()
     }
 
     /// Returns a unique identifier for this thread (as a JS number).
@@ -284,6 +298,25 @@ impl ThreadPool {
             .unwrap_or(ThreadPool::default_size())
     }
 
+    /// Returns the hardware concurrency available to the thread pool.
+    #[napi]
+    pub fn available_parallelism() -> u32 {
+        std_thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1)
+    }
+
+    /// Schedule a task function onto the thread pool.
+    #[napi]
+    pub fn spawn_task(&self, task: Function<'static, (), ()>) -> Result<()> {
+        let tsfn = task.build_threadsafe_function::<()>().build()?;
+        let work = move |_req: WorkReq| {
+            let _ = tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
+        };
+        let after = move |_req: WorkReq, _status| {};
+        self.queue_task(work, after).map(|_| ())
+    }
+
     /// The loop whose thread pool this handle drives. Exposed for use by other
     /// bindings (e.g. `Executor`) that schedule work onto the pool.
     pub(crate) fn r#loop(&self) -> &Loop {
@@ -336,5 +369,22 @@ impl ThreadPool {
             let _ = wake.close();
         };
         self.queue_task(work_cb, after_cb).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_available_parallelism() {
+        assert!(available_parallelism() >= 1);
+        assert!(ThreadPool::available_parallelism() >= 1);
+    }
+
+    #[test]
+    fn test_thread_is_current() {
+        let current = Thread::current();
+        assert!(current.is_current());
     }
 }

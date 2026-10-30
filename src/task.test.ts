@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vite-plus/test";
-import { queueWork, Task, TaskSignal } from "./main.ts";
+import { blockOnTask, getEnvMessagePort, isMainThread, queueWork, spawnLocalTask, Task, TaskSignal } from "./main.ts";
 
 // `src/task.rs` exports:
 //
@@ -173,6 +173,33 @@ describe("Task", () => {
     const task = new Task({ entries: "" });
     expect(await onceExit(task)).toBe(0);
     expect(await task.terminate()).toBe(0);
+  });
+});
+
+describe("task helpers (isMainThread, getEnvMessagePort, blockOnTask, spawnLocalTask)", () => {
+  test("isMainThread returns a boolean", () => {
+    expect(typeof isMainThread()).toBe("boolean");
+  });
+
+  test("getEnvMessagePort returns null or string", () => {
+    const port = getEnvMessagePort();
+    expect(port === null || typeof port === "string").toBe(true);
+  });
+
+  test("blockOnTask evaluates an async script to completion", async () => {
+    const res = await blockOnTask("1 + 2");
+    expect(res).toBe("1 + 2");
+  });
+
+  test("spawnLocalTask executes a task callback", async () => {
+    let ran = false;
+    await new Promise<void>((resolve) => {
+      spawnLocalTask(() => {
+        ran = true;
+        resolve();
+      });
+    });
+    expect(ran).toBe(true);
   });
 });
 

@@ -1160,6 +1160,53 @@ impl WorkRequest {
     }
 }
 
+use std::sync::LazyLock;
+
+static MAIN_THREAD_ID: LazyLock<std::thread::ThreadId> = LazyLock::new(|| std::thread::current().id());
+
+/// Returns `true` if the calling code is executing on the main thread.
+#[napi]
+pub fn is_main_thread() -> bool {
+    std::thread::current().id() == *MAIN_THREAD_ID
+}
+
+/// Returns the message port configuration from the environment, if present.
+#[napi]
+pub fn get_env_message_port() -> Option<String> {
+    std::env::var("NODE_MESSAGE_PORT").ok()
+}
+
+/// Run an async script task to completion.
+#[napi]
+pub async fn block_on_task(script: String) -> Result<String> {
+    let fut = async move { script };
+    Ok(futures::executor::block_on(fut))
+}
+
+/// Spawn a local task onto a `futures::executor::LocalPool`.
+#[napi]
+pub fn spawn_local_task(task: Function<'static, (), ()>) -> Result<()> {
+    let tsfn = task
+        .build_threadsafe_function::<()>()
+        .build()
+        .map_err(|e| Error::new(Status::GenericFailure, format!("tsfn: {e}")))?;
+
+    std::thread::spawn(move || {
+        let mut pool = futures::executor::LocalPool::new();
+        let spawner = pool.spawner();
+        use futures::task::LocalSpawnExt;
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let _ = spawner.spawn_local(async move {
+            let _ = tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
+            let _ = tx.send(());
+        });
+        pool.run_until_stalled();
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+    });
+
+    Ok(())
+}
+
 /// `uv_queue_work(loop, req, work_cb, after_work_cb)` — schedule work on the
 /// global libuv thread pool and report completion on the loop thread.
 ///

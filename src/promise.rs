@@ -54,6 +54,33 @@ pub fn promise_callback(env: Env, promise: PromiseRaw<'static, u32>) -> Result<U
     Ok(unsafe { Unknown::from_raw_unchecked(env.raw(), raw) })
 }
 
+/// **Join Promises** (await multiple JS promises concurrently in Rust).
+///
+/// Uses `futures::future::join_all` to await a list of `Promise<u32>` concurrently.
+#[napi]
+pub async fn join_promises(promises: Vec<Promise<u32>>) -> Result<Vec<u32>> {
+    let results = futures::future::join_all(promises).await;
+    let mut values = Vec::with_capacity(results.len());
+    for r in results {
+        values.push(r?);
+    }
+    Ok(values)
+}
+
+/// **Delay Promise** (resolves after `millis` milliseconds on background worker).
+#[napi]
+pub async fn delay_promise(millis: f64) -> Result<()> {
+    let dur = std::time::Duration::from_secs_f64((millis / 1000.0).max(0.0));
+    tokio::time::sleep(dur).await;
+    Ok(())
+}
+
+/// **Block On Promise** (await a JS `Promise<u32>` safely without blocking Node's event loop).
+#[napi]
+pub async fn block_on_promise(p: Promise<u32>) -> Result<u32> {
+    p.await
+}
+
 /// **AsyncBlock** (return a JS `Promise` built from a Rust future).
 ///
 /// Unlike `Promise<T>` (receive-only), `AsyncBlock<T>` is a manually built future

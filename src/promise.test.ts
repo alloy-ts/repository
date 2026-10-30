@@ -1,6 +1,14 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, test } from "vite-plus/test";
-import { asyncPlus100, processBuffer, processBufferOnPool, promiseCallback } from "./main.ts";
+import {
+  asyncPlus100,
+  blockOnPromise,
+  delayPromise,
+  joinPromises,
+  processBuffer,
+  processBufferOnPool,
+  promiseCallback,
+} from "./main.ts";
 
 // `src/promise.rs` exercises napi's Promise machinery:
 //
@@ -39,6 +47,29 @@ describe("processBuffer", () => {
     const out = await processBuffer(input);
     expect(Buffer.isBuffer(out)).toBe(true);
     expect(out.equals(input)).toBe(true);
+  });
+});
+
+describe("joinPromises", () => {
+  test("awaits multiple promises concurrently", async () => {
+    const res = await joinPromises([Promise.resolve(10), Promise.resolve(20), Promise.resolve(30)]);
+    expect(res).toEqual([10, 20, 30]);
+  });
+});
+
+describe("delayPromise", () => {
+  test("resolves after the specified delay", async () => {
+    const start = Date.now();
+    await delayPromise(10);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("blockOnPromise", () => {
+  test("drives a promise to completion synchronously", async () => {
+    const res = await blockOnPromise(Promise.resolve(42));
+    expect(res).toBe(42);
   });
 });
 
