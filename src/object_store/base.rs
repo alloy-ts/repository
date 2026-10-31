@@ -293,18 +293,18 @@ impl GenericStore {
     pub(crate) fn new(dir: &str, kind: gix::hash::Kind) -> napi::Result<Self> {
         std::fs::create_dir_all(dir).map_err(|e| err("generic_open", e))?;
         let node_store = FileNodeStore::open(dir).map_err(|e| err("generic_open", e))?;
-        let store = Store::new(node_store.clone(), GenericConfig::default());
+        let generic = Store::new(node_store.clone(), GenericConfig::default());
         let tree = match generic
             .load_named_root(HEAD_NAME)
             .map_err(|e| err("generic_load_root", e))?
         {
             Some(t) => t,
-            None => store.create(),
+            None => generic.create(),
         };
-        let order = Self::rebuild_order(&store, &tree)?;
+        let order = Self::rebuild_order(&generic, &tree)?;
         Ok(Self {
             node_store,
-            store,
+            generic,
             tree: Mutex::new(tree),
             order: Mutex::new(order),
             kind,

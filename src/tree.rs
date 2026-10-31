@@ -671,7 +671,7 @@ pub struct TreeBuilderWriteOptions {
 pub struct TreeBuilder {
     repo: Arc<gix::ThreadSafeRepository>,
     /// Content-addressed node store driver for [`TreeBuilder::index`].
-    store: Store<FileNodeStore>,
+    prolly: Store<FileNodeStore>,
     /// The effective overlay: `path -> [`encode_edit`] payload`. Empty until the
     /// first edit; the base tree is never copied into it.
     index: GenericTree,

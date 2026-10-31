@@ -833,17 +833,17 @@ enum FileOp {
 
 /// Counters and results reported back from an import run.
 #[derive(Default)]
-struct ImportStatsInner {
-    blobs: usize,
-    commits: usize,
-    tags: usize,
-    refs_updated: Vec<String>,
-    refs_skipped: Vec<String>,
-    refs_deleted: Vec<String>,
-    progress: Vec<String>,
-    marks: Vec<(usize, gix::ObjectId)>,
+pub(crate) struct ImportStatsInner {
+    pub(crate) blobs: usize,
+    pub(crate) commits: usize,
+    pub(crate) tags: usize,
+    pub(crate) refs_updated: Vec<String>,
+    pub(crate) refs_skipped: Vec<String>,
+    pub(crate) refs_deleted: Vec<String>,
+    pub(crate) progress: Vec<String>,
+    pub(crate) marks: Vec<(usize, gix::ObjectId)>,
     /// What the `warn-*` signature modes would have printed.
-    warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// A file-level change whose content has already been resolved to an object id.
