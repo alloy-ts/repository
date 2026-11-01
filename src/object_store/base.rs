@@ -22,7 +22,7 @@ use gix::zlib::{Compression, Decompress, Inflate};
 use prolly::{Config as GenericConfig, FileNodeStore, Prolly as Store, Tree as GenericTree};
 
 use crate::error::{err, err_str, parse_oid};
-use crate::object::{kind_to_string, string_to_kind};
+use crate::repo::object::{kind_to_string, string_to_kind};
 use crate::object_store::hash_kind_format;
 use crate::object_store::{
     ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget, object_kind_from_option,
@@ -45,10 +45,10 @@ pub trait ObjectStore {
     fn lookup_prefix_impl(&self, prefix: &str) -> napi::Result<PrefixLookup>;
 
     /// Read an object's body + kind, or `None` if missing.
-    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>>;
+    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectData>>;
 
     /// Read an object's header (kind + size), or `None` if missing.
-    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>>;
+    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectHeader>>;
 
     /// Write a raw object of `kind`, returning its computed id.
     fn write_buf_impl(&self, kind: Kind, data: &[u8]) -> napi::Result<ObjectId>;
@@ -84,11 +84,11 @@ pub trait ObjectStore {
         self.lookup_prefix_impl(&prefix)
     }
 
-    fn try_find(&self, id: String) -> napi::Result<Option<crate::object::ObjectData>> {
+    fn try_find(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         self.find_impl(&id)
     }
 
-    fn try_header(&self, id: String) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    fn try_header(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         self.header_impl(&id)
     }
 
@@ -202,7 +202,7 @@ fn resolve_pack_base(
 
 /// Name under which the current tree root is persisted in the node store's
 /// `roots/` namespace, so the store survives process restarts. Mirrors the
-/// `named_root` convention used by [`crate::tree::open_generic`].
+/// `named_root` convention used by [`crate::repo::tree::open_generic`].
 const HEAD_NAME: &[u8] = b"head";
 
 // --- `(kind, data, last_modified)` <-> bytes encoding -----------------------
@@ -375,13 +375,13 @@ impl GenericStore {
         }
     }
 
-    fn try_find(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>> {
+    fn try_find(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         let oid = parse_oid(id)?;
         match self.get_value(&oid)? {
             None => Ok(None),
             Some(value) => {
                 let (kind, data, _lm) = decode_entry(&value)?;
-                Ok(Some(crate::object::ObjectData {
+                Ok(Some(crate::repo::object::ObjectData {
                     kind: kind_to_string(kind),
                     data: Buffer::from(data),
                 }))
@@ -389,13 +389,13 @@ impl GenericStore {
         }
     }
 
-    fn try_header(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    fn try_header(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         let oid = parse_oid(id)?;
         match self.get_value(&oid)? {
             None => Ok(None),
             Some(value) => {
                 let (kind, data, _lm) = decode_entry(&value)?;
-                Ok(Some(crate::object::ObjectHeader {
+                Ok(Some(crate::repo::object::ObjectHeader {
                     kind: kind_to_string(kind),
                     size: data.len() as f64,
                     is_packed: false,
@@ -583,11 +583,11 @@ impl ObjectStore for GenericObjectStore {
         self.inner.lookup_prefix(prefix)
     }
 
-    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>> {
+    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         self.inner.try_find(id)
     }
 
-    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         self.inner.try_header(id)
     }
 
@@ -657,13 +657,13 @@ impl GenericObjectStore {
 
     /// Read an object's raw, decompressed body and kind, or `null` if missing.
     #[napi]
-    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::object::ObjectData>> {
+    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         ObjectStore::try_find(self, id)
     }
 
     /// Read an object's header (kind + size) without decoding its full content, or `null`.
     #[napi]
-    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         ObjectStore::try_header(self, id)
     }
 

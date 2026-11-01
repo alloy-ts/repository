@@ -46,11 +46,11 @@ impl ObjectStore for LooseObjectStore {
         self.inner.lookup_prefix_impl(prefix)
     }
 
-    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>> {
+    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         self.inner.find_impl(id)
     }
 
-    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         self.inner.header_impl(id)
     }
 
@@ -123,13 +123,13 @@ impl LooseObjectStore {
 
     /// Read an object's raw, decompressed body and kind, or `null` if missing.
     #[napi]
-    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::object::ObjectData>> {
+    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         ObjectStore::try_find(self, id)
     }
 
     /// Read an object's header (kind + size) without decoding its full content, or `null`.
     #[napi]
-    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         ObjectStore::try_header(self, id)
     }
 

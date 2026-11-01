@@ -315,8 +315,8 @@ impl From<crate::crypto::CryptoError> for RepositoryError {
     }
 }
 
-impl From<crate::vault::SafeError> for RepositoryError {
-    fn from(e: crate::vault::SafeError) -> Self {
+impl From<crate::crypto::vault::SafeError> for RepositoryError {
+    fn from(e: crate::crypto::vault::SafeError) -> Self {
         Self::from_message(NapiError::from_reason(e.to_string()))
     }
 }

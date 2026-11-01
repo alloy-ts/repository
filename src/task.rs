@@ -14,7 +14,7 @@ use napi_derive::napi;
 use libuv::{AsyncHandle, HandleTrait, Loop, ReqTrait, WorkReq as TaskReq};
 
 use crate::error::{err, thread_local};
-use crate::repository::Repository;
+use crate::repo::Repository;
 use crate::thread::ThreadPool;
 use gix::objs::Find;
 
@@ -85,7 +85,7 @@ mod task_napi {
     use uuid::Uuid;
 
     use crate::common::{deserialize_uuid, serialize_uuid};
-    use crate::protocol::LocalTaskContext;
+    use crate::repo::protocol::LocalTaskContext;
     use crate::task::TaskSessionBuilder;
     use crate::task::task_service::Task as InnerTask;
     use crate::thread::TaskConnectionPool as InnerPool;
@@ -741,7 +741,7 @@ fn resolve_task(
 /// sandboxed tasks run in parallel. Linked tasktrees share the main
 /// repository's object database, so creating one copies no objects.
 fn create_sandboxed_tasktree(dir: &Path) -> Result<Arc<gix::ThreadSafeRepository>> {
-    let base = crate::repository::current_repo()?;
+    let base = crate::repo::current_repo()?;
     let r = thread_local(&base);
     let head = r.head_id().map_err(|e| err("head_id", e))?.detach();
     let (added, _outcome) = r
@@ -767,7 +767,7 @@ fn repo_from_tasktree(
 ) -> Option<Arc<gix::ThreadSafeRepository>> {
     let base = match repo {
         Some(r) => Arc::clone(&r.inner),
-        None => crate::repository::current_repo().ok()?,
+        None => crate::repo::current_repo().ok()?,
     };
     // 1. A registered tasktree id: `$GIT_DIR/tasktrees/<id>`.
     {
@@ -814,7 +814,7 @@ fn resolve_repo(
     if let Some(r) = options.repository.as_ref() {
         return Some(Arc::clone(&r.inner));
     }
-    crate::repository::current_repo().ok()
+    crate::repo::current_repo().ok()
 }
 
 /// Directory of the isolated tasktree, when sandboxing. `.` explicitly selects
