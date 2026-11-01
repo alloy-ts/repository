@@ -5,6 +5,7 @@ pub(crate) use repo as repository;
 mod content;
 #[cfg(feature = "crypto")]
 pub mod crypto;
+pub mod sql;
 mod error;
 mod format;
 pub mod gpg;
