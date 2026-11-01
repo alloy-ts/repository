@@ -1,80 +1,27 @@
-mod apply;
-mod attributes;
-mod auth;
-mod blame;
-mod blob;
-mod branch;
-mod checkout;
-mod cherry_pick;
-mod clone;
-mod commit;
-mod commit_graph;
-mod config;
-mod conflict;
 mod content;
 #[cfg(feature = "crypto")]
-mod crypto;
-mod describe;
-mod diff;
-mod dirwalk;
-mod entry;
+pub mod crypto;
 mod error;
-mod export;
-mod fetch;
-mod filter;
 mod format;
 pub mod gpg;
-mod head;
-mod identity;
-mod import;
-mod index;
-mod init;
-mod log;
-mod mailmap;
-mod merge;
 mod metrics;
-mod namespace;
-mod negotiate;
-mod note;
-mod object;
 mod object_store;
 mod output;
-mod pack;
-mod patch;
-mod path;
-mod pathspec;
 #[cfg(feature = "gpg")]
 mod pgp;
 mod process;
-mod progress;
 mod promise;
-pub(crate) mod protocol;
-mod pull;
-mod push;
-mod rebase;
-mod ref_store;
-mod reference;
-mod reflog;
-mod refspec;
-pub(crate) mod remote;
-mod replace;
-mod repository;
+pub mod repo;
 mod req;
-mod reset;
-mod rev_spec;
-mod rev_walk;
-mod revert;
 mod scheduler;
-mod stash;
-mod status;
-mod submodule;
-mod tag;
 mod task;
-mod testament;
 mod thread;
-mod tree;
-mod vault;
-mod worktree;
+
+// Re-export repository as repo for backward compatibility if needed
+pub use repo as repository;
+pub use repo::Repository;
+#[cfg(feature = "crypto")]
+pub use crypto::vault;
 
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies
 // (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.

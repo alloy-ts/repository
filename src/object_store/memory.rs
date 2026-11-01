@@ -10,7 +10,7 @@ use gix::object::Kind;
 use gix::zlib::Compression;
 
 use crate::error::{err, err_str};
-use crate::object::kind_to_string;
+use crate::repo::object::kind_to_string;
 use crate::object_store::base::ObjectStore;
 use crate::object_store::{
     ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget, object_kind_from_option,
@@ -87,19 +87,19 @@ impl InMemoryStore {
             .map(|e| e.last_modified))
     }
 
-    fn try_find(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>> {
+    fn try_find(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         let oid = ObjectId::from_hex(id.as_bytes()).map_err(|e| err("parse_oid", e))?;
         let map = self.objects.lock().unwrap();
-        Ok(map.get(&oid).map(|e| crate::object::ObjectData {
+        Ok(map.get(&oid).map(|e| crate::repo::object::ObjectData {
             kind: kind_to_string(e.kind),
             data: Buffer::from(e.data.clone()),
         }))
     }
 
-    fn try_header(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    fn try_header(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         let oid = ObjectId::from_hex(id.as_bytes()).map_err(|e| err("parse_oid", e))?;
         let map = self.objects.lock().unwrap();
-        Ok(map.get(&oid).map(|e| crate::object::ObjectHeader {
+        Ok(map.get(&oid).map(|e| crate::repo::object::ObjectHeader {
             kind: kind_to_string(e.kind),
             size: e.data.len() as f64,
             is_packed: false,
@@ -202,11 +202,11 @@ impl ObjectStore for MemoryObjectStore {
         self.inner.lookup_prefix(prefix)
     }
 
-    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>> {
+    fn find_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         self.inner.try_find(id)
     }
 
-    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    fn header_impl(&self, id: &str) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         self.inner.try_header(id)
     }
 
@@ -276,13 +276,13 @@ impl MemoryObjectStore {
 
     /// Read an object's raw, decompressed body and kind, or `null` if missing.
     #[napi]
-    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::object::ObjectData>> {
+    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         ObjectStore::try_find(self, id)
     }
 
     /// Read an object's header (kind + size) without decoding its full content, or `null`.
     #[napi]
-    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         ObjectStore::try_header(self, id)
     }
 
@@ -311,7 +311,7 @@ impl MemoryObjectStore {
     }
 
     /// The object format this store uses, lower-cased (`"sha1"` or `"sha256"`), for parity with
-    /// [`crate::repository::Repository::objectFormat`].
+    /// [`crate::repo::Repository::objectFormat`].
     #[napi(getter)]
     pub fn object_format(&self) -> String {
         ObjectStore::object_format(self)

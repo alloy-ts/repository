@@ -15,7 +15,7 @@ use gix::odb::Header as OdbHeader;
 use gix::zlib::Compression;
 
 use crate::error::{err, err_str, parse_oid};
-use crate::object::{kind_to_string, string_to_kind};
+use crate::repo::object::{kind_to_string, string_to_kind};
 
 pub mod base;
 pub mod buffered;
@@ -35,7 +35,7 @@ fn hash_kind_format(kind: gix::hash::Kind) -> &'static str {
 fn object_kind_from_option(hash: Option<&str>) -> napi::Result<gix::hash::Kind> {
     match hash {
         None | Some("sha1") => Ok(gix::hash::Kind::Sha1),
-        Some(other) => crate::object::parse_hash_kind_ci(other).ok_or_else(|| {
+        Some(other) => crate::repo::object::parse_hash_kind_ci(other).ok_or_else(|| {
             err_str(
                 "object_hash",
                 format!("unsupported object hash {other} (expected sha1 or sha256)"),
@@ -337,7 +337,7 @@ impl ObjectDatabase {
         });
         let object_hash = match options.object_hash.as_deref() {
             None | Some("sha1") => gix::hash::Kind::Sha1,
-            Some(other) => match crate::object::parse_hash_kind_ci(other) {
+            Some(other) => match crate::repo::object::parse_hash_kind_ci(other) {
                 Some(kind) => kind,
                 None => {
                     return Err(err_str(
@@ -499,13 +499,13 @@ impl ObjectDatabase {
 
     /// Read the full object data for `id`, or `null` if it does not exist.
     #[napi]
-    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::object::ObjectData>> {
+    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         self.as_handle().try_find(id)
     }
 
     /// Read just the object header (kind + size) for `id`, or `null` if it does not exist.
     #[napi]
-    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         self.as_handle().try_header(id)
     }
 
@@ -581,7 +581,7 @@ impl ObjectDatabase {
     }
 
     /// The object format this database uses, lower-cased (`"sha1"` or `"sha256"`), for parity
-    /// with [`crate::repository::Repository::objectFormat`].
+    /// with [`crate::repo::Repository::objectFormat`].
     #[napi(getter)]
     pub fn object_format(&self) -> String {
         hash_kind_format(self.object_hash).to_string()
@@ -796,12 +796,12 @@ impl ObjectHandle {
     /// Read an object's raw, decompressed body (without the loose-object header) and kind.
     /// Returns `null` if the object is missing.
     #[napi]
-    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::object::ObjectData>> {
+    pub fn try_find(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectData>> {
         let oid = parse_oid(&id)?;
         let mut buf = Vec::new();
         let data = Find::try_find(&*self.inner.lock().unwrap(), &oid, &mut buf)
             .map_err(|e| err("try_find", e))?;
-        Ok(data.map(|d| crate::object::ObjectData {
+        Ok(data.map(|d| crate::repo::object::ObjectData {
             kind: kind_to_string(d.kind),
             data: Buffer::from(d.data.to_vec()),
         }))
@@ -810,11 +810,11 @@ impl ObjectHandle {
     /// Read an object's header (kind + size) without decoding its full content.
     /// Returns `null` if the object is missing.
     #[napi]
-    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::object::ObjectHeader>> {
+    pub fn try_header(&self, id: String) -> napi::Result<Option<crate::repo::object::ObjectHeader>> {
         let oid = parse_oid(&id)?;
         let header = OdbHeader::try_header(&*self.inner.lock().unwrap(), &oid)
             .map_err(|e| err("try_header", e))?;
-        Ok(header.map(crate::object::ObjectHeader::from))
+        Ok(header.map(crate::repo::object::ObjectHeader::from))
     }
 
     /// Open a streaming reader for the object identified by `id`.
