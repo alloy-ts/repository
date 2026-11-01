@@ -69,30 +69,12 @@ mod tests {
     fn test_emit_diesel_schema() {
         let mut tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols.insert(
-            "name".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Text,
-                nullable: false,
-                auto_increment: false,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col = ColumnIr::new(ColumnType::Integer);
+        id_col.auto_increment = true;
+        users_cols.insert("id".to_string(), id_col);
+
+        let name_col = ColumnIr::new(ColumnType::Text);
+        users_cols.insert("name".to_string(), name_col);
 
         tables.insert(
             "users".to_string(),
@@ -112,30 +94,12 @@ mod tests {
         );
 
         let mut posts_cols = BTreeMap::new();
-        posts_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        posts_cols.insert(
-            "author_id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: false,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut post_id_col = ColumnIr::new(ColumnType::Integer);
+        post_id_col.auto_increment = true;
+        posts_cols.insert("id".to_string(), post_id_col);
+
+        let author_col = ColumnIr::new(ColumnType::Integer);
+        posts_cols.insert("author_id".to_string(), author_col);
 
         tables.insert(
             "posts".to_string(),

@@ -13,22 +13,28 @@ pub enum ValidationError {
     #[error("table '{table}' has no columns defined")]
     EmptyTable { table: String },
 
-    #[error("table '{table}' primary key references non-existent column '{column}'")]
+    #[error("table '{table}': no primary key")]
+    NoPrimaryKey { table: String },
+
+    #[error("table '{table}': primary key column \"{column}\" missing")]
     PrimaryKeyColumnNotFound { table: String, column: String },
 
-    #[error("table '{table}' column '{column}' cannot be both primary key and nullable")]
+    #[error("{table}.{column}: primary key cannot be nullable")]
     PrimaryKeyCannotBeNullable { table: String, column: String },
 
-    #[error("table '{table}' column '{column}' has auto_increment enabled but is not an integer type")]
+    #[error("{table}.{column}: autoIncrement needs an integer/bigint primary key")]
     AutoIncrementNonInteger { table: String, column: String },
 
-    #[error("table '{table}' column '{column}' has max_length set on non-text type")]
+    #[error("{table}.{column}: maxLength only applies to text")]
     MaxLengthNonText { table: String, column: String },
 
-    #[error("table '{table}' column '{column}' references undefined enum '{enum_name}'")]
+    #[error("{table}.{column}: defaultNow() only applies to timestamps")]
+    DefaultNowNonTimestamp { table: String, column: String },
+
+    #[error("{table}.{column}: enum \"{enum_name}\" not declared in enums[]")]
     UndefinedEnum { table: String, column: String, enum_name: String },
 
-    #[error("table '{table}' column '{column}' default '{default_val}' is not in enum '{enum_name}' allowed values: {allowed:?}")]
+    #[error("{table}.{column}: default {default_val} is not a member of enum {enum_name}")]
     InvalidEnumDefault {
         table: String,
         column: String,
@@ -37,10 +43,10 @@ pub enum ValidationError {
         allowed: Vec<String>,
     },
 
-    #[error("table '{table}' foreign key references unknown target table '{target_table}'")]
+    #[error("{table}: foreign key targets missing table \"{target_table}\"")]
     ForeignKeyTargetTableNotFound { table: String, target_table: String },
 
-    #[error("table '{table}' foreign key column count ({col_count}) does not match target table '{target_table}' column count ({target_col_count})")]
+    #[error("{table}: foreign key column count mismatch")]
     ForeignKeyColumnCountMismatch {
         table: String,
         col_count: usize,
@@ -48,22 +54,25 @@ pub enum ValidationError {
         target_col_count: usize,
     },
 
-    #[error("table '{table}' foreign key column '{column}' does not exist")]
+    #[error("{table}: foreign key references missing column")]
     ForeignKeyLocalColumnNotFound { table: String, column: String },
 
-    #[error("table '{table}' foreign key target column '{target_column}' does not exist in table '{target_table}'")]
+    #[error("{table}: foreign key target '{target_table}.{target_column}' does not exist")]
     ForeignKeyTargetColumnNotFound { table: String, target_table: String, target_column: String },
 
-    #[error("table '{table}' foreign key column '{column}' type does not match target '{target_table}.{target_column}' type")]
+    #[error("{table}: foreign key type mismatch for '{column}'")]
     ForeignKeyTypeMismatch { table: String, column: String, target_table: String, target_column: String },
 
-    #[error("table '{table}' unique constraint references non-existent column '{column}'")]
+    #[error("{table}: foreign key target {target_table}.{target_column} is not unique")]
+    ForeignKeyTargetNotUnique { table: String, target_table: String, target_column: String },
+
+    #[error("{table}: unique constraint references missing column \"{column}\"")]
     UniqueConstraintColumnNotFound { table: String, column: String },
 
-    #[error("table '{table}' index '{index}' references non-existent column '{column}'")]
+    #[error("{table}: index '{index}' references missing column \"{column}\"")]
     IndexColumnNotFound { table: String, index: String, column: String },
 
-    #[error("duplicate index name '{index}' across schema (must be unique for PostgreSQL global index namespace)")]
+    #[error("index name \"{index}\" is used twice (global in Postgres)")]
     DuplicateIndexName { index: String },
 
     #[error("backend '{backend}' capability violation: {message}")]
@@ -91,8 +100,22 @@ pub fn validate_schema<B: Backend>(schema: &SchemaIr, backend: &B) -> Result<(),
             continue;
         }
 
+        let pk_cols = table
+            .primary_key
+            .as_ref()
+            .map(|pk| pk.columns.clone())
+            .unwrap_or_default();
+
+        if pk_cols.is_empty() {
+            errors.push(ValidationError::NoPrimaryKey {
+                table: table_name.clone(),
+            });
+        }
+
         // Validate columns
         for (col_name, col) in &table.columns {
+            let is_pk = pk_cols.contains(col_name);
+
             // Backend capability check
             if let Err(msg) = backend.supports_column_type(&col.r#type) {
                 errors.push(ValidationError::BackendUnsupported {
@@ -101,8 +124,16 @@ pub fn validate_schema<B: Backend>(schema: &SchemaIr, backend: &B) -> Result<(),
                 });
             }
 
-            // auto_increment only valid on Integer / Bigint
-            if col.auto_increment && !matches!(col.r#type, ColumnType::Integer | ColumnType::Bigint) {
+            // Primary key nullability
+            if is_pk && col.nullable {
+                errors.push(ValidationError::PrimaryKeyCannotBeNullable {
+                    table: table_name.clone(),
+                    column: col_name.clone(),
+                });
+            }
+
+            // auto_increment only valid on Integer / Bigint primary keys
+            if col.auto_increment && !(is_pk && col.r#type.is_integer()) {
                 errors.push(ValidationError::AutoIncrementNonInteger {
                     table: table_name.clone(),
                     column: col_name.clone(),
@@ -110,22 +141,30 @@ pub fn validate_schema<B: Backend>(schema: &SchemaIr, backend: &B) -> Result<(),
             }
 
             // max_length only valid on Text
-            if col.max_length.is_some() && !matches!(col.r#type, ColumnType::Text) {
+            if col.max_length.is_some() && !col.r#type.is_text() {
                 errors.push(ValidationError::MaxLengthNonText {
                     table: table_name.clone(),
                     column: col_name.clone(),
                 });
             }
 
+            // defaultNow only valid on Timestamps
+            if matches!(col.default, Some(DefaultValueIr::Now)) && !col.r#type.is_timestamp() {
+                errors.push(ValidationError::DefaultNowNonTimestamp {
+                    table: table_name.clone(),
+                    column: col_name.clone(),
+                });
+            }
+
             // Enum reference check
-            if let ColumnType::Enum { name: enum_name } = &col.r#type {
+            if let Some(enum_name) = col.r#type.enum_name() {
                 if let Some(enum_def) = schema.enums.get(enum_name) {
                     if let Some(DefaultValueIr::Literal(serde_json::Value::String(s))) = &col.default {
                         if !enum_def.values.contains(s) {
                             errors.push(ValidationError::InvalidEnumDefault {
                                 table: table_name.clone(),
                                 column: col_name.clone(),
-                                enum_name: enum_name.clone(),
+                                enum_name: enum_name.to_string(),
                                 default_val: s.clone(),
                                 allowed: enum_def.values.clone(),
                             });
@@ -135,28 +174,19 @@ pub fn validate_schema<B: Backend>(schema: &SchemaIr, backend: &B) -> Result<(),
                     errors.push(ValidationError::UndefinedEnum {
                         table: table_name.clone(),
                         column: col_name.clone(),
-                        enum_name: enum_name.clone(),
+                        enum_name: enum_name.to_string(),
                     });
                 }
             }
         }
 
-        // Primary key validation
-        if let Some(pk) = &table.primary_key {
-            for pk_col in &pk.columns {
-                if let Some(col) = table.columns.get(pk_col) {
-                    if col.nullable {
-                        errors.push(ValidationError::PrimaryKeyCannotBeNullable {
-                            table: table_name.clone(),
-                            column: pk_col.clone(),
-                        });
-                    }
-                } else {
-                    errors.push(ValidationError::PrimaryKeyColumnNotFound {
-                        table: table_name.clone(),
-                        column: pk_col.clone(),
-                    });
-                }
+        // Primary key columns existence
+        for pk_col in &pk_cols {
+            if !table.columns.contains_key(pk_col) {
+                errors.push(ValidationError::PrimaryKeyColumnNotFound {
+                    table: table_name.clone(),
+                    column: pk_col.clone(),
+                });
             }
         }
 
@@ -238,6 +268,26 @@ pub fn validate_schema<B: Backend>(schema: &SchemaIr, backend: &B) -> Result<(),
                                 target_column: target_col_name.clone(),
                             });
                         }
+
+                        // Check target uniqueness (either single PK or in a unique constraint)
+                        let target_pk = target_table
+                            .primary_key
+                            .as_ref()
+                            .map(|pk| pk.columns.clone())
+                            .unwrap_or_default();
+                        let is_target_unique = target_pk == vec![target_col_name.clone()]
+                            || target_table
+                                .unique_constraints
+                                .iter()
+                                .any(|u| u.columns == vec![target_col_name.clone()]);
+
+                        if !is_target_unique {
+                            errors.push(ValidationError::ForeignKeyTargetNotUnique {
+                                table: table_name.clone(),
+                                target_table: fk.target_table.clone(),
+                                target_column: target_col_name.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -260,30 +310,13 @@ mod tests {
     fn sample_valid_schema() -> SchemaIr {
         let mut tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols.insert(
-            "name".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Text,
-                nullable: false,
-                auto_increment: false,
-                max_length: Some(100),
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col = ColumnIr::new(ColumnType::Integer);
+        id_col.auto_increment = true;
+        users_cols.insert("id".to_string(), id_col);
+
+        let mut name_col = ColumnIr::new(ColumnType::Text);
+        name_col.max_length = Some(100);
+        users_cols.insert("name".to_string(), name_col);
 
         tables.insert(
             "users".to_string(),

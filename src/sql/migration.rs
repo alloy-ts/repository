@@ -422,18 +422,9 @@ mod tests {
 
         let mut new_tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col = ColumnIr::new(ColumnType::Integer);
+        id_col.auto_increment = true;
+        users_cols.insert("id".to_string(), id_col);
 
         new_tables.insert(
             "users".to_string(),
@@ -472,30 +463,14 @@ mod tests {
     fn test_sqlite_table_rebuild_on_type_change() {
         let mut old_tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols.insert(
-            "age".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: true,
-                auto_increment: false,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col = ColumnIr::new(ColumnType::Integer);
+        id_col.auto_increment = true;
+        users_cols.insert("id".to_string(), id_col);
+
+        let mut age_col = ColumnIr::new(ColumnType::Integer);
+        age_col.nullable = true;
+        users_cols.insert("age".to_string(), age_col);
+
         old_tables.insert(
             "users".to_string(),
             TableIr {
@@ -521,30 +496,14 @@ mod tests {
 
         let mut new_tables = BTreeMap::new();
         let mut users_cols_new = BTreeMap::new();
-        users_cols_new.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols_new.insert(
-            "age".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Bigint, // type changed
-                nullable: true,
-                auto_increment: false,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col_new = ColumnIr::new(ColumnType::Integer);
+        id_col_new.auto_increment = true;
+        users_cols_new.insert("id".to_string(), id_col_new);
+
+        let mut age_col_new = ColumnIr::new(ColumnType::Bigint);
+        age_col_new.nullable = true;
+        users_cols_new.insert("age".to_string(), age_col_new);
+
         new_tables.insert(
             "users".to_string(),
             TableIr {

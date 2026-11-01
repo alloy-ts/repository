@@ -1,4 +1,4 @@
-use crate::sql::ir::{ColumnType, SchemaIr};
+use crate::sql::ir::SchemaIr;
 use crate::sql::naming::{resolve_field_name, resolve_struct_name};
 
 /// Emit runtime `validate(&self) -> Result<(), Vec<String>>` methods for generated Row structs.
@@ -19,7 +19,7 @@ pub fn emit_validators(schema: &SchemaIr) -> String {
             let field_name = resolve_field_name(col_name, col.rust_name.as_deref());
 
             if let Some(max_len) = col.max_length {
-                if matches!(col.r#type, ColumnType::Text) {
+                if col.r#type.is_text() {
                     if col.nullable {
                         out.push_str(&format!(
                             "        if let Some(ref val) = self.{field_name} {{\n"
@@ -67,18 +67,9 @@ mod tests {
     fn test_emit_validators() {
         let mut tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "name".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Text,
-                nullable: false,
-                auto_increment: false,
-                max_length: Some(50),
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut name_col = ColumnIr::new(ColumnType::Text);
+        name_col.max_length = Some(50);
+        users_cols.insert("name".to_string(), name_col);
 
         tables.insert(
             "users".to_string(),

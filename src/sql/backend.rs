@@ -54,7 +54,7 @@ impl Backend for SqliteBackend {
             ColumnType::Float | ColumnType::Double => "REAL".to_string(),
             ColumnType::Boolean => "INTEGER".to_string(),
             ColumnType::Text => "TEXT".to_string(),
-            ColumnType::Timestamptz => "TEXT".to_string(),
+            ColumnType::Timestamp | ColumnType::Timestamptz => "TEXT".to_string(),
             ColumnType::Uuid => "TEXT".to_string(),
             ColumnType::Json => "TEXT".to_string(),
             ColumnType::Enum { .. } => "TEXT".to_string(),
@@ -69,10 +69,13 @@ impl Backend for SqliteBackend {
             ColumnType::Double => "f64".to_string(),
             ColumnType::Boolean => "bool".to_string(),
             ColumnType::Text => "String".to_string(),
+            ColumnType::Timestamp => "chrono::NaiveDateTime".to_string(),
             ColumnType::Timestamptz => "chrono::DateTime<chrono::Utc>".to_string(),
             ColumnType::Uuid => "uuid::Uuid".to_string(),
             ColumnType::Json => "serde_json::Value".to_string(),
-            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
+            ColumnType::Enum { name } => {
+                crate::sql::naming::resolve_enum_type_name(name, None)
+            }
         };
 
         if col.nullable {
@@ -90,7 +93,7 @@ impl Backend for SqliteBackend {
             ColumnType::Double => "diesel::sql_types::Double",
             ColumnType::Boolean => "diesel::sql_types::Bool",
             ColumnType::Text => "diesel::sql_types::Text",
-            ColumnType::Timestamptz => "diesel::sql_types::Text",
+            ColumnType::Timestamp | ColumnType::Timestamptz => "diesel::sql_types::Text",
             ColumnType::Uuid => "diesel::sql_types::Text",
             ColumnType::Json => "diesel::sql_types::Text",
             ColumnType::Enum { .. } => "diesel::sql_types::Text",
@@ -108,9 +111,11 @@ impl Backend for SqliteBackend {
             ColumnType::Integer | ColumnType::Float | ColumnType::Double => "number".to_string(),
             ColumnType::Bigint => "bigint".to_string(),
             ColumnType::Boolean => "boolean".to_string(),
-            ColumnType::Text | ColumnType::Timestamptz | ColumnType::Uuid => "string".to_string(),
+            ColumnType::Text | ColumnType::Timestamp | ColumnType::Timestamptz | ColumnType::Uuid => "string".to_string(),
             ColumnType::Json => "any".to_string(),
-            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
+            ColumnType::Enum { name } => {
+                crate::sql::naming::resolve_enum_type_name(name, None)
+            }
         };
 
         if col.nullable {
@@ -170,6 +175,7 @@ impl Backend for PostgresBackend {
             ColumnType::Double => "DOUBLE PRECISION".to_string(),
             ColumnType::Boolean => "BOOLEAN".to_string(),
             ColumnType::Text => "TEXT".to_string(),
+            ColumnType::Timestamp => "TIMESTAMP".to_string(),
             ColumnType::Timestamptz => "TIMESTAMPTZ".to_string(),
             ColumnType::Uuid => "UUID".to_string(),
             ColumnType::Json => "JSONB".to_string(),
@@ -185,10 +191,13 @@ impl Backend for PostgresBackend {
             ColumnType::Double => "f64".to_string(),
             ColumnType::Boolean => "bool".to_string(),
             ColumnType::Text => "String".to_string(),
+            ColumnType::Timestamp => "chrono::NaiveDateTime".to_string(),
             ColumnType::Timestamptz => "chrono::DateTime<chrono::Utc>".to_string(),
             ColumnType::Uuid => "uuid::Uuid".to_string(),
             ColumnType::Json => "serde_json::Value".to_string(),
-            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
+            ColumnType::Enum { name } => {
+                crate::sql::naming::resolve_enum_type_name(name, None)
+            }
         };
 
         if col.nullable {
@@ -206,10 +215,14 @@ impl Backend for PostgresBackend {
             ColumnType::Double => "diesel::sql_types::Double".to_string(),
             ColumnType::Boolean => "diesel::sql_types::Bool".to_string(),
             ColumnType::Text => "diesel::sql_types::Text".to_string(),
+            ColumnType::Timestamp => "diesel::sql_types::Timestamp".to_string(),
             ColumnType::Timestamptz => "diesel::sql_types::Timestamptz".to_string(),
             ColumnType::Uuid => "diesel::sql_types::Uuid".to_string(),
             ColumnType::Json => "diesel::sql_types::Jsonb".to_string(),
-            ColumnType::Enum { name } => format!("crate::sql_types::{}", crate::sql::naming::resolve_enum_type_name(name, None)),
+            ColumnType::Enum { name } => format!(
+                "crate::sql_types::{}",
+                crate::sql::naming::resolve_enum_type_name(name, None)
+            ),
         };
 
         if col.nullable {
@@ -224,9 +237,11 @@ impl Backend for PostgresBackend {
             ColumnType::Integer | ColumnType::Float | ColumnType::Double => "number".to_string(),
             ColumnType::Bigint => "bigint".to_string(),
             ColumnType::Boolean => "boolean".to_string(),
-            ColumnType::Text | ColumnType::Timestamptz | ColumnType::Uuid => "string".to_string(),
+            ColumnType::Text | ColumnType::Timestamp | ColumnType::Timestamptz | ColumnType::Uuid => "string".to_string(),
             ColumnType::Json => "any".to_string(),
-            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
+            ColumnType::Enum { name } => {
+                crate::sql::naming::resolve_enum_type_name(name, None)
+            }
         };
 
         if col.nullable {

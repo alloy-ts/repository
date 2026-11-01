@@ -5,6 +5,29 @@ use crate::sql::naming::{
     resolve_struct_name,
 };
 
+/// Hook for later emitters (Diesel, NAPI-RS) to attach derives and attributes
+/// so type mapping and naming live in exactly one place.
+pub trait ModelDecorator {
+    /// Additional attributes placed on enum definitions.
+    fn enum_attrs(&self, _enum_name: &str) -> String {
+        String::new()
+    }
+
+    /// Additional attributes placed on Row struct definitions.
+    fn row_attrs(&self, _table_name: &str) -> String {
+        String::new()
+    }
+
+    /// Additional attributes placed on NewX insert struct definitions.
+    fn new_attrs(&self, _table_name: &str) -> String {
+        String::new()
+    }
+}
+
+/// Default empty decorator.
+pub struct NoDecorators;
+impl ModelDecorator for NoDecorators {}
+
 /// Options controlling model generation.
 #[derive(Clone, Debug, Default)]
 pub struct ModelEmitterOptions {
@@ -16,8 +39,49 @@ pub struct ModelEmitterOptions {
     pub napi: bool,
 }
 
-/// Emit Rust models (Row struct, NewX insert struct, and enums).
-pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitterOptions) -> String {
+impl ModelDecorator for ModelEmitterOptions {
+    fn enum_attrs(&self, enum_name: &str) -> String {
+        let mut attrs = String::new();
+        if self.napi {
+            attrs.push_str("#[napi(string_enum)]\n");
+        }
+        if self.diesel {
+            let rust_name = resolve_enum_type_name(enum_name, None);
+            attrs.push_str(&format!("#[ExistingTypePath = \"crate::sql_types::{rust_name}\"]\n"));
+        }
+        attrs
+    }
+
+    fn row_attrs(&self, table_name: &str) -> String {
+        let mut attrs = String::new();
+        if self.diesel {
+            attrs.push_str(&format!("#[diesel(table_name = crate::schema::{table_name})]\n"));
+        }
+        if self.napi {
+            attrs.push_str("#[napi(object)]\n");
+        }
+        attrs
+    }
+
+    fn new_attrs(&self, table_name: &str) -> String {
+        let mut attrs = String::new();
+        if self.diesel {
+            attrs.push_str(&format!("#[diesel(table_name = crate::schema::{table_name})]\n"));
+        }
+        if self.napi {
+            attrs.push_str("#[napi(object)]\n");
+        }
+        attrs
+    }
+}
+
+/// Emit Rust models using a pluggable decorator hook.
+pub fn emit_models_with_decorator<B: Backend, D: ModelDecorator>(
+    schema: &SchemaIr,
+    backend: &B,
+    opts: &ModelEmitterOptions,
+    decorator: &D,
+) -> String {
     let mut out = String::new();
     out.push_str("//! Auto-generated database models from validated Schema IR.\n\n");
 
@@ -33,11 +97,9 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
         }
         out.push_str(")]\n");
 
-        if opts.napi {
-            out.push_str("#[napi(string_enum)]\n");
-        }
-        if opts.diesel && backend.name() == "postgres" {
-            out.push_str(&format!("#[ExistingTypePath = \"crate::sql_types::{rust_enum_name}\"]\n"));
+        let custom_attrs = decorator.enum_attrs(enum_name);
+        if !custom_attrs.is_empty() {
+            out.push_str(&custom_attrs);
         }
 
         out.push_str(&format!("pub enum {rust_enum_name} {{\n"));
@@ -50,15 +112,22 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
         }
         out.push_str("}\n\n");
 
-        // Display and FromStr implementations
-        out.push_str(&format!("impl std::fmt::Display for {rust_enum_name} {{\n"));
-        out.push_str("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n");
+        // Display and as_str / FromStr implementations
+        out.push_str(&format!("impl {rust_enum_name} {{\n"));
+        out.push_str("    /// The database / JSON representation of this variant.\n");
+        out.push_str("    pub const fn as_str(&self) -> &'static str {\n");
         out.push_str("        match self {\n");
         for val in &enum_def.values {
             let variant = resolve_enum_variant_name(val);
-            out.push_str(&format!("            Self::{variant} => write!(f, \"{val}\"),\n"));
+            out.push_str(&format!("            Self::{variant} => \"{val}\",\n"));
         }
         out.push_str("        }\n");
+        out.push_str("    }\n");
+        out.push_str("}\n\n");
+
+        out.push_str(&format!("impl std::fmt::Display for {rust_enum_name} {{\n"));
+        out.push_str("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n");
+        out.push_str("        write!(f, \"{}\", self.as_str())\n");
         out.push_str("    }\n");
         out.push_str("}\n\n");
     }
@@ -69,6 +138,7 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
         let new_struct_name = resolve_new_struct_name(table_name, table.rust_name.as_deref());
 
         // Row struct
+        out.push_str(&format!("/// Row of table `{table_name}`.\n"));
         out.push_str("#[derive(Debug, Clone, PartialEq");
         if opts.serde {
             out.push_str(", serde::Serialize, serde::Deserialize");
@@ -77,11 +147,10 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
             out.push_str(", diesel::Queryable, diesel::Selectable");
         }
         out.push_str(")]\n");
-        if opts.diesel {
-            out.push_str(&format!("#[diesel(table_name = crate::schema::{table_name})]\n"));
-        }
-        if opts.napi {
-            out.push_str("#[napi(object)]\n");
+
+        let row_attrs = decorator.row_attrs(table_name);
+        if !row_attrs.is_empty() {
+            out.push_str(&row_attrs);
         }
 
         out.push_str(&format!("pub struct {struct_name} {{\n"));
@@ -96,6 +165,7 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
         out.push_str("}\n\n");
 
         // Insert struct (NewX)
+        out.push_str(&format!("/// Values for inserting into `{table_name}`; omitted optional fields use database defaults.\n"));
         out.push_str("#[derive(Debug, Clone, PartialEq");
         if opts.serde {
             out.push_str(", serde::Serialize, serde::Deserialize");
@@ -104,11 +174,10 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
             out.push_str(", diesel::Insertable");
         }
         out.push_str(")]\n");
-        if opts.diesel {
-            out.push_str(&format!("#[diesel(table_name = crate::schema::{table_name})]\n"));
-        }
-        if opts.napi {
-            out.push_str("#[napi(object)]\n");
+
+        let new_attrs = decorator.new_attrs(table_name);
+        if !new_attrs.is_empty() {
+            out.push_str(&new_attrs);
         }
 
         out.push_str(&format!("pub struct {new_struct_name} {{\n"));
@@ -124,8 +193,13 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
                 base_type
             };
 
-            if opts.serde && col_name != &field_name {
-                out.push_str(&format!("    #[serde(rename = \"{col_name}\")]\n"));
+            if opts.serde {
+                if col_name != &field_name {
+                    out.push_str(&format!("    #[serde(rename = \"{col_name}\")]\n"));
+                }
+                if has_default_or_autoincrement || col.nullable {
+                    out.push_str("    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
+                }
             }
             out.push_str(&format!("    pub {field_name}: {insert_type},\n"));
         }
@@ -133,6 +207,11 @@ pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitt
     }
 
     out
+}
+
+/// Emit Rust models (Row struct, NewX insert struct, and enums).
+pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitterOptions) -> String {
+    emit_models_with_decorator(schema, backend, opts, opts)
 }
 
 #[cfg(test)]
@@ -146,42 +225,17 @@ mod tests {
     fn test_emit_models_sqlite() {
         let mut tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols.insert(
-            "name".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Text,
-                nullable: false,
-                auto_increment: false,
-                max_length: Some(100),
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols.insert(
-            "age".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: true,
-                auto_increment: false,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col = ColumnIr::new(ColumnType::Integer);
+        id_col.auto_increment = true;
+        users_cols.insert("id".to_string(), id_col);
+
+        let mut name_col = ColumnIr::new(ColumnType::Text);
+        name_col.max_length = Some(100);
+        users_cols.insert("name".to_string(), name_col);
+
+        let mut age_col = ColumnIr::new(ColumnType::Integer);
+        age_col.nullable = true;
+        users_cols.insert("age".to_string(), age_col);
 
         tables.insert(
             "users".to_string(),
@@ -223,5 +277,6 @@ mod tests {
         assert!(generated.contains("pub age: Option<i32>,"));
         assert!(generated.contains("pub struct NewUser {"));
         assert!(generated.contains("pub id: Option<i32>,")); // auto_increment -> Option in NewUser
+        assert!(generated.contains("skip_serializing_if = \"Option::is_none\""));
     }
 }

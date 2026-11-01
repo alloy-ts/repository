@@ -1,5 +1,5 @@
 use crate::sql::backend::Backend;
-use crate::sql::ir::{ColumnType, SchemaIr};
+use crate::sql::ir::SchemaIr;
 
 /// Emit full SQL DDL (CREATE TABLE, enums, indexes, constraints) for a target backend.
 pub fn emit_ddl<B: Backend>(schema: &SchemaIr, backend: &B) -> String {
@@ -38,7 +38,7 @@ pub fn emit_ddl<B: Backend>(schema: &SchemaIr, backend: &B) -> String {
                     && table
                         .columns
                         .get(&pk.columns[0])
-                        .map_or(false, |c| c.auto_increment && c.r#type == ColumnType::Integer)
+                        .map_or(false, |c| c.auto_increment && c.r#type.is_integer())
             });
 
         for (col_name, col) in &table.columns {
@@ -62,7 +62,7 @@ pub fn emit_ddl<B: Backend>(schema: &SchemaIr, backend: &B) -> String {
 
             // SQLite enum check constraint emulation
             if backend.name() == "sqlite" {
-                if let ColumnType::Enum { name: enum_name } = &col.r#type {
+                if let Some(enum_name) = col.r#type.enum_name() {
                     if let Some(enum_def) = schema.enums.get(enum_name) {
                         let allowed = enum_def
                             .values
@@ -158,46 +158,21 @@ mod tests {
     fn test_emit_ddl_sqlite() {
         let mut tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols.insert(
-            "name".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Text,
-                nullable: false,
-                auto_increment: false,
-                max_length: Some(100),
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
-        users_cols.insert(
-            "role".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Enum {
-                    name: "user_role".to_string(),
-                },
-                nullable: false,
-                auto_increment: false,
-                max_length: None,
-                default: Some(DefaultValueIr::Literal(serde_json::Value::String(
-                    "viewer".to_string(),
-                ))),
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col = ColumnIr::new(ColumnType::Integer);
+        id_col.auto_increment = true;
+        users_cols.insert("id".to_string(), id_col);
+
+        let mut name_col = ColumnIr::new(ColumnType::Text);
+        name_col.max_length = Some(100);
+        users_cols.insert("name".to_string(), name_col);
+
+        let mut role_col = ColumnIr::new(ColumnType::Enum {
+            name: "user_role".to_string(),
+        });
+        role_col.default = Some(DefaultValueIr::Literal(serde_json::Value::String(
+            "viewer".to_string(),
+        )));
+        users_cols.insert("role".to_string(), role_col);
 
         tables.insert(
             "users".to_string(),
@@ -251,18 +226,9 @@ mod tests {
     fn test_emit_ddl_postgres() {
         let mut tables = BTreeMap::new();
         let mut users_cols = BTreeMap::new();
-        users_cols.insert(
-            "id".to_string(),
-            ColumnIr {
-                r#type: ColumnType::Integer,
-                nullable: false,
-                auto_increment: true,
-                max_length: None,
-                default: None,
-                renamed_from: None,
-                rust_name: None,
-            },
-        );
+        let mut id_col = ColumnIr::new(ColumnType::Integer);
+        id_col.auto_increment = true;
+        users_cols.insert("id".to_string(), id_col);
 
         tables.insert(
             "users".to_string(),
