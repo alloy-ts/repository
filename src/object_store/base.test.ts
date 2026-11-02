@@ -2,7 +2,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { GenericObjectStore, LooseObjectStore, MemoryObjectStore } from "../main.ts";
+import {
+  GenericObjectStore,
+  LooseObjectStore,
+  MemoryObjectStore,
+  SqlObjectStore,
+} from "../main.ts";
 
 let base: string;
 beforeAll(() => {
@@ -35,6 +40,11 @@ const variants = [
   {
     name: "GenericObjectStore",
     make: () => new GenericObjectStore(join(base, "generic"), "sha1"),
+    hasObjectPath: false,
+  },
+  {
+    name: "SqlObjectStore",
+    make: () => new SqlObjectStore(join(base, "sql_base.sqlite"), "sha1"),
     hasObjectPath: false,
   },
 ];
