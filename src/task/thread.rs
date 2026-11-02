@@ -326,7 +326,7 @@ impl ThreadPool {
         let deliver_cancelled = Arc::clone(&cancelled_slot);
         let mut work_opt: Option<F> = Some(work);
         let mut on_loop_opt: Option<G> = Some(on_loop);
-        let wake = crate::task::TaskSignal::wake_on(self.r#loop(), move || {
+        let wake = super::TaskSignal::wake_on(self.r#loop(), move || {
             if let Some(r) = deliver_slot.lock().unwrap().take() {
                 let cancelled = *deliver_cancelled.lock().unwrap();
                 if let Some(deliver) = on_loop_opt.take() {
