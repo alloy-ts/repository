@@ -1368,7 +1368,7 @@ mod tests {
     #[test]
     fn cid_hex_round_trips() {
         let cid = cid_of(b"payload");
-        assert_eq!(Cid::from_hex(&cid.to_hex()), Some(cid));
+        assert_eq!(Cid::from_hex(&cid.to_hex()), Some(cid.clone()));
         assert_eq!(cid.to_hex().len(), 64);
         assert_eq!(Cid::from_hex("zz01"), None);
     }
