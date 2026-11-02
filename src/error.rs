@@ -8,7 +8,7 @@ use napi::{Error as NapiError, Status};
 use napi_derive::napi;
 
 use crate::output::{CommandOutput, ProcessStatus};
-use crate::process::{ExecutionFailure, ProcessStatusJs};
+use crate::task::process::{ExecutionFailure, ProcessStatusJs};
 
 /// Coarse, stable grouping for an error. Mirrors [`Error::category`].
 ///

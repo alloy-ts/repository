@@ -31,8 +31,8 @@ use gix_pack::data::output::entry::iter_from_counts::Options as EntryOptions;
 
 use crate::error::err_str;
 use crate::error::{err, parse_oid, thread_local};
-use crate::process::CancellationToken;
-use crate::process::cancellation_flag;
+use crate::task::process::CancellationToken;
+use crate::task::process::cancellation_flag;
 use crate::progress::ProgressCallback;
 use crate::progress::ProgressEvent;
 use crate::repository::Repository;
