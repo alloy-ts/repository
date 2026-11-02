@@ -1,0 +1,128 @@
+{
+  "irVersion": 1,
+  "enums": [],
+  "tables": [
+    {
+      "name": "users",
+      "columns": [
+        {
+          "key": "id",
+          "name": "id",
+          "type": {
+            "kind": "integer"
+          },
+          "nullable": false,
+          "autoIncrement": true
+        },
+        {
+          "key": "name",
+          "name": "name",
+          "type": {
+            "kind": "text"
+          },
+          "nullable": false,
+          "autoIncrement": false,
+          "maxLength": 100
+        },
+        {
+          "key": "email",
+          "name": "email",
+          "type": {
+            "kind": "text"
+          },
+          "nullable": false,
+          "autoIncrement": false
+        },
+        {
+          "key": "active",
+          "name": "active",
+          "type": {
+            "kind": "boolean"
+          },
+          "nullable": false,
+          "autoIncrement": false,
+          "default": {
+            "kind": "literal",
+            "value": true
+          }
+        },
+        {
+          "key": "createdAt",
+          "name": "created_at",
+          "type": {
+            "kind": "timestamptz"
+          },
+          "nullable": false,
+          "autoIncrement": false,
+          "default": {
+            "kind": "now"
+          }
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "uniques": [
+        {
+          "name": "users_email_key",
+          "columns": [
+            "email"
+          ]
+        }
+      ],
+      "indexes": [],
+      "foreignKeys": []
+    },
+    {
+      "name": "posts",
+      "columns": [
+        {
+          "key": "id",
+          "name": "id",
+          "type": {
+            "kind": "integer"
+          },
+          "nullable": false,
+          "autoIncrement": true
+        },
+        {
+          "key": "title",
+          "name": "title",
+          "type": {
+            "kind": "text"
+          },
+          "nullable": false,
+          "autoIncrement": false
+        },
+        {
+          "key": "authorId",
+          "name": "author_id",
+          "type": {
+            "kind": "integer"
+          },
+          "nullable": false,
+          "autoIncrement": false
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "uniques": [],
+      "indexes": [],
+      "foreignKeys": [
+        {
+          "name": "posts_author_id_fkey",
+          "columns": [
+            "author_id"
+          ],
+          "refTable": "users",
+          "refColumns": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no_action"
+        }
+      ]
+    }
+  ]
+}

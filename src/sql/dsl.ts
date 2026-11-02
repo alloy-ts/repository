@@ -47,6 +47,10 @@ export class ColumnBuilder {
     });
   }
 
+  autoIncrement() {
+    return new ColumnBuilder({ ...this.meta, autoIncrement: true });
+  }
+
   unique() {
     return new ColumnBuilder({ ...this.meta, unique: true });
   }
@@ -110,7 +114,21 @@ export function enumType(name: string, values: string[]) {
   return factory;
 }
 
-export function table(tableName: string, columnsObj: Record<string, any>, extraFn: any = null) {
+export function table(arg1: any, arg2?: any, arg3?: any) {
+  let tableName: string;
+  let columnsObj: Record<string, any>;
+  let extraFn: any = null;
+
+  if (typeof arg1 === "string") {
+    tableName = arg1;
+    columnsObj = arg2 || {};
+    extraFn = arg3 || null;
+  } else {
+    tableName = "";
+    columnsObj = arg1 || {};
+    extraFn = arg2 || null;
+  }
+
   for (const [key, val] of Object.entries(columnsObj)) {
     if (key.startsWith("$")) {
       throw new Error(`reserved key "${key}"`);
@@ -152,7 +170,29 @@ export function table(tableName: string, columnsObj: Record<string, any>, extraF
   return tableObj;
 }
 
-export function defineSchema({ enums = [], tables = [] }: any) {
+export function defineSchema(options: any) {
+  let enums = options.enums || [];
+  let tables: any[] = [];
+
+  if (options.tables) {
+    if (Array.isArray(options.tables)) {
+      tables = options.tables;
+    } else if (typeof options.tables === "object") {
+      // Keyed by name: tables: { users: table({...}), posts: table({...}) }
+      tables = Object.entries(options.tables).map(([k, t]: [string, any]) => {
+        if (!t.$tableName) {
+          t.$tableName = k;
+          for (const key of Object.keys(t.$columnsObj)) {
+            if (t[key] && t[key].$isColumnRef) {
+              t[key].$tableName = k;
+            }
+          }
+        }
+        return t;
+      });
+    }
+  }
+
   const tableNames = new Set<string>();
   for (const t of tables) {
     if (tableNames.has(t.$tableName)) {

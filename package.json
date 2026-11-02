@@ -17,10 +17,13 @@
   "type": "module",
   "exports": {
     ".": "./dist/index.mjs",
+    "./sql": "./src/sql/dsl.ts",
+    "./sql/dsl": "./src/sql/dsl.ts",
     "./package.json": "./package.json"
   },
   "scripts": {
     "build": "node --import @oxc-node/core/register build.ts && vp pack",
+    "generate": "node scripts/generate.mjs",
     "dev": "vp pack --watch",
     "start": "vp run dist/index.js",
     "test": "vp test",
