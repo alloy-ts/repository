@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { Scheduler } from "./main.ts";
+import { Scheduler } from "../main.ts";
 
 // `Scheduler` is a unified, generic task scheduler that supports both task-based
 // evaluation (a CPU-bound unit of work with progress + promise + cancel, backed
