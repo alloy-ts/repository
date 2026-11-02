@@ -13,9 +13,13 @@ use napi_derive::napi;
 
 use libuv::{AsyncHandle, HandleTrait, Loop, ReqTrait, WorkReq as TaskReq};
 
+pub mod promise;
+pub mod scheduler;
+pub mod thread;
+
+use self::thread::ThreadPool;
 use crate::error::{err, thread_local};
 use crate::repository::Repository;
-use crate::thread::ThreadPool;
 use gix::objs::Find;
 
 /// `1024 * 1024`. Mirrors the C++ `task` binding's `kMB` constant, used to

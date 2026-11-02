@@ -15,8 +15,8 @@ use napi_derive::napi;
 
 use libuv::{ReqTrait, WorkReq};
 
-use crate::task::{Task, TaskOptions, TaskSignal};
-use crate::thread::ThreadPool;
+use super::thread::ThreadPool;
+use super::{Task, TaskOptions, TaskSignal};
 
 /// Which scheduler drives `submit`/`run` (the *task-based* path). The
 /// *future-based* path (`submit_work`/`compute_parallel`) is always

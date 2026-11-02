@@ -321,9 +321,9 @@ impl From<crate::crypto::vault::SafeError> for RepositoryError {
     }
 }
 
-#[cfg(feature = "gpg")]
-impl From<crate::pgp::PgpError> for RepositoryError {
-    fn from(e: crate::pgp::PgpError) -> Self {
+#[cfg(all(feature = "crypto", feature = "gpg"))]
+impl From<crate::crypto::pgp::PgpError> for RepositoryError {
+    fn from(e: crate::crypto::pgp::PgpError) -> Self {
         Self::from_message(NapiError::from_reason(e.to_string()))
     }
 }

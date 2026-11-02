@@ -6,19 +6,12 @@ mod content;
 #[cfg(feature = "crypto")]
 pub mod crypto;
 mod error;
-mod format;
-pub mod gpg;
 mod object_store;
 mod output;
-#[cfg(feature = "gpg")]
-mod pgp;
 mod process;
-mod promise;
 mod req;
-mod scheduler;
 pub mod sql;
 mod task;
-mod thread;
 
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies
 // (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.
