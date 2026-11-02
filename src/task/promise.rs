@@ -7,7 +7,7 @@ use napi::bindgen_prelude::{
 use napi::{Env, Result};
 use napi_derive::napi;
 
-use crate::thread::ThreadPool;
+use crate::task::thread::ThreadPool;
 
 /// Resolver type used to settle a `u32` `JsDeferred` on the main thread.
 type DeferredU32 = Box<dyn FnOnce(Env) -> Result<u32> + Send>;

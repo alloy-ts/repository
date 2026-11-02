@@ -15,8 +15,15 @@ use libuv::{AsyncHandle, HandleTrait, Loop, ReqTrait, WorkReq as TaskReq};
 
 use crate::error::{err, thread_local};
 use crate::repository::Repository;
-use crate::thread::ThreadPool;
 use gix::objs::Find;
+
+pub mod promise;
+pub mod scheduler;
+pub mod thread;
+
+pub use promise::*;
+pub use scheduler::*;
+pub use thread::*;
 
 /// `1024 * 1024`. Mirrors the C++ `task` binding's `kMB` constant, used to
 /// convert resource-limit megabytes to bytes.
@@ -88,7 +95,7 @@ mod task_napi {
     use crate::protocol::LocalTaskContext;
     use crate::task::TaskSessionBuilder;
     use crate::task::task_service::Task as InnerTask;
-    use crate::thread::TaskConnectionPool as InnerPool;
+    use crate::task::thread::TaskConnectionPool as InnerPool;
     use crate::worker::worker_service::Worker as InnerWorker;
     use crate::{
         DefaultSessionBuilder, DistributedTaskUnitFeedContext as InnerFeedCtx, ExecuteTaskRequest,
@@ -971,7 +978,7 @@ impl Task {
         let deferred_slot: Arc<Mutex<Option<JsDeferred<(), DeferredResolver>>>> =
             Arc::new(Mutex::new(Some(deferred)));
 
-        let pool = ThreadPool::new()?;
+        let pool = thread::ThreadPool::new()?;
 
         // `task` runs on a libuv task thread (no V8 access): it resolves the
         // task plus the sandbox/object-database/network setup. The result
@@ -1608,7 +1615,7 @@ pub fn run(
         .build_threadsafe_function::<()>()
         .build()
         .map_err(|e| Error::new(Status::GenericFailure, format!("tsfn: {e}")))?;
-    let pool = ThreadPool::new()?;
+    let pool = thread::ThreadPool::new()?;
     pool.run(
         move |_req: TaskReq| {
             let _ = task_tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
