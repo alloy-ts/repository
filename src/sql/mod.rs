@@ -22,6 +22,8 @@ pub use ir::{
 pub use migration::{diff_schemas, emit_migration, MigrationError, MigrationSql, SchemaChange};
 pub use validation::{validate_schema, ValidationError};
 
+pub mod ir_test;
+
 #[cfg(test)]
 mod tests;
 
