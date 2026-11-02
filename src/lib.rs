@@ -8,10 +8,10 @@ pub mod crypto;
 mod error;
 mod object_store;
 mod output;
-mod process;
 mod req;
 pub mod sql;
-mod task;
+pub mod task;
+pub use self::task::process;
 
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies
 // (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.
