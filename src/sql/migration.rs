@@ -248,8 +248,8 @@ pub fn emit_migration<B: Backend>(
         up.push_str("-- SQLite transactional table-rebuild sequence\n");
         up.push_str("PRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n\n");
 
-        for table_name in affected_tables {
-            if let Some(target_table) = target_schema.tables.get(&table_name) {
+        for table_name in &affected_tables {
+            if let Some(target_table) = target_schema.tables.get(table_name) {
                 let temp_name = format!("_{table_name}_new");
                 let mut temp_schema = SchemaIr {
                     ir_version: target_schema.ir_version,
@@ -276,9 +276,26 @@ pub fn emit_migration<B: Backend>(
 
         up.push_str("PRAGMA foreign_key_check;\nCOMMIT;\nPRAGMA foreign_keys = ON;\n");
 
+        let mut down_rebuild = String::new();
+        down_rebuild.push_str("-- SQLite transactional table-rebuild sequence (revert)\n");
+        down_rebuild.push_str("PRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n\n");
+        for table_name in &affected_tables {
+            if let Some(target_table) = target_schema.tables.get(table_name) {
+                let temp_name = format!("_{table_name}_old");
+                let cols: Vec<String> = target_table.columns.keys().cloned().collect();
+                let col_list = cols.join(", ");
+                down_rebuild.push_str(&format!(
+                    "INSERT INTO {temp_name} ({col_list}) SELECT {col_list} FROM {table_name};\n"
+                ));
+                down_rebuild.push_str(&format!("DROP TABLE {table_name};\n"));
+                down_rebuild.push_str(&format!("ALTER TABLE {temp_name} RENAME TO {table_name};\n\n"));
+            }
+        }
+        down_rebuild.push_str("PRAGMA foreign_key_check;\nCOMMIT;\nPRAGMA foreign_keys = ON;\n");
+
         return Ok(MigrationSql {
             up_sql: up,
-            down_sql: "-- Down migration for SQLite table rebuild\n".to_string(),
+            down_sql: down_rebuild,
         });
     }
 
@@ -536,5 +553,87 @@ mod tests {
         assert!(migration.up_sql.contains("DROP TABLE users;"));
         assert!(migration.up_sql.contains("ALTER TABLE _users_new RENAME TO users;"));
         assert!(migration.up_sql.contains("PRAGMA foreign_key_check;"));
+    }
+
+    #[test]
+    fn test_postgres_migration_alters_and_indexes() {
+        let mut old_tables = BTreeMap::new();
+        let mut users_cols = BTreeMap::new();
+        users_cols.insert("id".to_string(), ColumnIr::new(ColumnType::Integer));
+        let mut name_col = ColumnIr::new(ColumnType::Text);
+        name_col.nullable = true;
+        users_cols.insert("name".to_string(), name_col);
+
+        old_tables.insert(
+            "users".to_string(),
+            TableIr {
+                columns: users_cols,
+                primary_key: Some(PrimaryKeyIr {
+                    columns: vec!["id".to_string()],
+                    name: None,
+                }),
+                foreign_keys: Vec::new(),
+                unique_constraints: Vec::new(),
+                indexes: Vec::new(),
+                check_constraints: Vec::new(),
+                renamed_from: None,
+                rust_name: None,
+            },
+        );
+
+        let old_schema = SchemaIr {
+            ir_version: 1,
+            naming: NamingConfig::default(),
+            enums: BTreeMap::new(),
+            tables: old_tables,
+        };
+
+        let mut new_tables = BTreeMap::new();
+        let mut users_cols_new = BTreeMap::new();
+        users_cols_new.insert("id".to_string(), ColumnIr::new(ColumnType::Integer));
+        let mut name_col_new = ColumnIr::new(ColumnType::Text);
+        name_col_new.nullable = false; // changed nullable to false
+        users_cols_new.insert("name".to_string(), name_col_new);
+        users_cols_new.insert("email".to_string(), ColumnIr::new(ColumnType::Text)); // added column
+
+        new_tables.insert(
+            "users".to_string(),
+            TableIr {
+                columns: users_cols_new,
+                primary_key: Some(PrimaryKeyIr {
+                    columns: vec!["id".to_string()],
+                    name: None,
+                }),
+                foreign_keys: Vec::new(),
+                unique_constraints: Vec::new(),
+                indexes: vec![IndexIr {
+                    name: "users_email_idx".to_string(),
+                    columns: vec!["email".to_string()],
+                    unique: true,
+                }],
+                check_constraints: Vec::new(),
+                renamed_from: None,
+                rust_name: None,
+            },
+        );
+
+        let new_schema = SchemaIr {
+            ir_version: 1,
+            naming: NamingConfig::default(),
+            enums: BTreeMap::new(),
+            tables: new_tables,
+        };
+
+        let diff = diff_schemas(&old_schema, &new_schema).unwrap();
+        let migration = emit_migration(&diff, &new_schema, &PostgresBackend).unwrap();
+
+        assert!(migration.up_sql.contains("ALTER TABLE users ALTER COLUMN name SET NOT NULL;"));
+        assert!(migration.down_sql.contains("ALTER TABLE users ALTER COLUMN name DROP NOT NULL;"));
+
+        assert!(migration.up_sql.contains("ALTER TABLE users ADD COLUMN email TEXT NOT NULL;"));
+        assert!(migration.down_sql.contains("ALTER TABLE users DROP COLUMN email;"));
+
+        assert!(migration.up_sql.contains("CREATE UNIQUE INDEX users_email_idx ON users (email);"));
+        assert!(migration.down_sql.contains("DROP INDEX users_email_idx;"));
     }
 }

@@ -271,57 +271,187 @@ pub fn enum_type(name: String, values: Vec<String>) -> Result<serde_json::Value>
 /// NAPI-compatible table helper that compiles JS column configurations into Table IR JSON
 #[napi(js_name = "table")]
 pub fn table_builder(
+    env: Env,
     table_name: String,
-    columns_obj: serde_json::Value,
-    extra_fn: Option<serde_json::Value>,
+    columns_obj: Object,
+    _extra_fn: Option<Unknown>,
 ) -> Result<serde_json::Value> {
-    let map = columns_obj
-        .as_object()
-        .ok_or_else(|| Error::from_reason("columns object must be a key-value dictionary"))?;
+    let prop_names = columns_obj.get_property_names()?;
+    let len = prop_names.get_array_length()?;
+    let mut cols_val = serde_json::Map::new();
 
-    for (k, _) in map {
-        if k.starts_with('$') {
-            return Err(Error::from_reason(format!("reserved key \"{k}\"")));
+    for i in 0..len {
+        let key: String = prop_names.get_element(i)?;
+        if key.starts_with('$') {
+            return Err(Error::from_reason(format!("reserved key \"{key}\"")));
         }
+        let val: Unknown = columns_obj.get_named_property(&key)?;
+        if val.get_type()? == ValueType::Object {
+            let obj = val.coerce_to_object()?;
+            if let Ok(meta_val) = obj.get_named_property::<Unknown>("meta") {
+                let json_val: serde_json::Value = env.from_js_value(meta_val).unwrap_or(serde_json::Value::Null);
+                cols_val.insert(key, json_val);
+                continue;
+            }
+        }
+        let json_val: serde_json::Value = env.from_js_value(val).unwrap_or(serde_json::Value::Null);
+        cols_val.insert(key, json_val);
     }
 
     Ok(serde_json::json!({
         "$tableName": table_name,
-        "$columnsObj": columns_obj,
-        "$extraFn": extra_fn,
+        "$columnsObj": cols_val,
+        "$extraFn": serde_json::Value::Null,
     }))
 }
 
 /// NAPI-compatible schema definition evaluator that produces a validated IR JSON Value
 #[napi(js_name = "defineSchema")]
 pub fn define_schema(config: serde_json::Value) -> Result<serde_json::Value> {
-    let enums = config
+    let enums_arr = config
         .get("enums")
         .and_then(|e| e.as_array())
         .cloned()
         .unwrap_or_default();
-    let tables = config
+    let tables_arr = config
         .get("tables")
         .and_then(|t| t.as_array())
         .cloned()
         .unwrap_or_default();
 
+    let mut enums_out = Vec::new();
+    for e in enums_arr {
+        let name = e.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        let values = e.get("values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        enums_out.push(serde_json::json!({
+            "name": name,
+            "values": values
+        }));
+    }
+
     let mut table_names = std::collections::HashSet::new();
-    for t in &tables {
-        let name = t
+    let mut tables_out = Vec::new();
+
+    for t in tables_arr {
+        let table_name = t
             .get("$tableName")
             .or_else(|| t.get("name"))
             .and_then(|n| n.as_str())
-            .unwrap_or("");
-        if !table_names.insert(name.to_string()) {
-            return Err(Error::from_reason(format!("duplicate table names: \"{name}\"")));
+            .unwrap_or("")
+            .to_string();
+
+        if !table_names.insert(table_name.clone()) {
+            return Err(Error::from_reason(format!("duplicate table names: \"{table_name}\"")));
         }
+
+        let mut columns_out = Vec::new();
+        let mut primary_key_cols = Vec::new();
+        let mut uniques_out = Vec::new();
+        let mut foreign_keys_out = Vec::new();
+
+        if let Some(cols_obj) = t.get("$columnsObj").and_then(|c| c.as_object()) {
+            for (col_key, col_val) in cols_obj {
+                let name = col_val
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| to_snake_case(col_key));
+                let kind = col_val
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("text");
+                let nullable = col_val
+                    .get("nullable")
+                    .and_then(|n| n.as_bool())
+                    .unwrap_or(false);
+                let auto_increment = col_val
+                    .get("autoIncrement")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
+                let max_length = col_val.get("maxLength").and_then(|m| m.as_u64());
+                let default_val = col_val.get("default").cloned();
+                let is_pk = col_val
+                    .get("primaryKey")
+                    .and_then(|p| p.as_bool())
+                    .unwrap_or(false);
+                let is_unq = col_val
+                    .get("unique")
+                    .and_then(|u| u.as_bool())
+                    .unwrap_or(false);
+
+                if is_pk {
+                    primary_key_cols.push(name.clone());
+                }
+                if is_unq {
+                    uniques_out.push(serde_json::json!({
+                        "name": format!("{table_name}_{name}_key"),
+                        "columns": [name.clone()]
+                    }));
+                }
+
+                if let Some(ref_table) = col_val.get("refTable").and_then(|r| r.as_str()) {
+                    let ref_column = col_val
+                        .get("refColumn")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("id");
+                    let on_delete = col_val
+                        .get("onDelete")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("no_action");
+                    let on_update = col_val
+                        .get("onUpdate")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("no_action");
+
+                    foreign_keys_out.push(serde_json::json!({
+                        "name": format!("{table_name}_{name}_fkey"),
+                        "columns": [name.clone()],
+                        "refTable": ref_table,
+                        "refColumns": [ref_column],
+                        "onDelete": on_delete,
+                        "onUpdate": on_update
+                    }));
+                }
+
+                let mut col_item = serde_json::json!({
+                    "key": col_key,
+                    "name": name,
+                    "type": { "kind": kind },
+                    "nullable": nullable,
+                    "autoIncrement": auto_increment,
+                });
+
+                if let Some(m) = max_length {
+                    col_item["maxLength"] = serde_json::json!(m);
+                }
+                if let Some(d) = default_val {
+                    if !d.is_null() {
+                        col_item["default"] = d;
+                    }
+                }
+                columns_out.push(col_item);
+            }
+        } else if let Some(existing_cols) = t.get("columns").and_then(|c| c.as_array()) {
+            columns_out = existing_cols.clone();
+            if let Some(pk) = t.get("primaryKey").and_then(|p| p.as_array()) {
+                primary_key_cols = pk.iter().filter_map(|s| s.as_str().map(|str| str.to_string())).collect();
+            }
+        }
+
+        tables_out.push(serde_json::json!({
+            "name": table_name,
+            "columns": columns_out,
+            "primaryKey": primary_key_cols,
+            "uniques": uniques_out,
+            "indexes": [],
+            "foreignKeys": foreign_keys_out
+        }));
     }
 
     Ok(serde_json::json!({
         "irVersion": 1,
-        "enums": enums,
-        "tables": tables,
+        "enums": enums_out,
+        "tables": tables_out,
     }))
 }
 
@@ -353,14 +483,14 @@ mod tests {
     }
 
     #[test]
-    fn test_table_and_define_schema_builders() {
-        let cols = serde_json::json!({
-            "id": { "kind": "integer", "nullable": false, "autoIncrement": true },
-            "name": { "kind": "text", "nullable": false }
+    fn test_define_schema_builders() {
+        let t = serde_json::json!({
+            "$tableName": "users",
+            "columns": {
+                "id": { "kind": "integer", "nullable": false, "autoIncrement": true },
+                "name": { "kind": "text", "nullable": false }
+            }
         });
-        let t = table_builder("users".to_string(), cols, None).unwrap();
-        assert_eq!(t["$tableName"], "users");
-
         let schema = define_schema(serde_json::json!({
             "tables": [t]
         }))
