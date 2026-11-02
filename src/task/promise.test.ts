@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, test } from "vite-plus/test";
-import { asyncPlus100, processBuffer, processBufferOnPool, promiseCallback } from "./main.ts";
+import { asyncPlus100, processBuffer, processBufferOnPool, promiseCallback } from "../main.ts";
 
 // `src/promise.rs` exercises napi's Promise machinery:
 //

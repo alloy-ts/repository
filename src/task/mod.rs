@@ -1,3 +1,7 @@
+pub mod promise;
+pub mod scheduler;
+pub mod thread;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -15,7 +19,7 @@ use libuv::{AsyncHandle, HandleTrait, Loop, ReqTrait, WorkReq as TaskReq};
 
 use crate::error::{err, thread_local};
 use crate::repo::Repository;
-use crate::thread::ThreadPool;
+use crate::task::thread::ThreadPool;
 use gix::objs::Find;
 
 /// `1024 * 1024`. Mirrors the C++ `task` binding's `kMB` constant, used to
@@ -88,7 +92,7 @@ mod task_napi {
     use crate::repo::protocol::LocalTaskContext;
     use crate::task::TaskSessionBuilder;
     use crate::task::task_service::Task as InnerTask;
-    use crate::thread::TaskConnectionPool as InnerPool;
+    use crate::task::thread::TaskConnectionPool as InnerPool;
     use crate::worker::worker_service::Worker as InnerWorker;
     use crate::{
         DefaultSessionBuilder, DistributedTaskUnitFeedContext as InnerFeedCtx, ExecuteTaskRequest,

@@ -14,7 +14,7 @@ import {
   exec,
   Task,
   TaskSignal,
-} from "./main.ts";
+} from "../main.ts";
 
 // `src/task.rs` exports:
 //

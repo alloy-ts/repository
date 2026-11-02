@@ -10,18 +10,18 @@ mod output;
 #[cfg(feature = "gpg")]
 mod pgp;
 mod process;
-mod promise;
 pub mod repo;
 mod req;
-mod scheduler;
-mod task;
-mod thread;
+pub mod task;
 
 // Re-export repository as repo for backward compatibility if needed
 pub use repo as repository;
 pub use repo::Repository;
 #[cfg(feature = "crypto")]
 pub use crypto::vault;
+pub use task::promise;
+pub use task::scheduler;
+pub use task::thread;
 
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies
 // (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.
