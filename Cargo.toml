@@ -87,6 +87,7 @@ sha2 = "0.10"
 pgp = "0.21.0"
 blake3 = "1"
 crc32fast = "1"
+fusevm = { version = "0.26.10", features = ["jit"] }
 
 [build-dependencies]
 napi-build = "2.6.0"

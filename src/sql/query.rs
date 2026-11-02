@@ -402,13 +402,22 @@ fn parse_operator(op: &str) -> Result<FilterOperator> {
     }
 }
 
+fn sanitize_ident(ident: &str) -> String {
+    let clean: String = ident.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '.').collect();
+    if clean.contains('.') {
+        clean.split('.').map(|part| format!("\"{part}\"")).collect::<Vec<_>>().join(".")
+    } else {
+        format!("\"{clean}\"")
+    }
+}
+
 fn format_value_sql(v: &Value) -> String {
     match v {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => if *b { "1".to_string() } else { "0".to_string() },
         Value::Number(n) => n.to_string(),
         Value::String(s) => {
-            let escaped = s.replace('\'', "''");
+            let escaped = s.replace('\0', "").replace('\'', "''");
             format!("'{escaped}'")
         }
         Value::Array(arr) => {
@@ -416,7 +425,7 @@ fn format_value_sql(v: &Value) -> String {
             format!("({})", items.join(", "))
         }
         Value::Object(_) => {
-            let s = v.to_string().replace('\'', "''");
+            let s = v.to_string().replace('\0', "").replace('\'', "''");
             format!("'{s}'")
         }
     }
@@ -561,10 +570,12 @@ impl Database {
             vals.push(format_value_sql(v));
         }
 
+        let sanitized_table = sanitize_ident(&table);
+        let sanitized_cols: Vec<String> = cols.iter().map(|c| sanitize_ident(c)).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({});",
-            table,
-            cols.join(", "),
+            sanitized_table,
+            sanitized_cols.join(", "),
             vals.join(", ")
         );
 

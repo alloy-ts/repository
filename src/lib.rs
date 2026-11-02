@@ -14,6 +14,7 @@ mod output;
 mod pgp;
 mod process;
 mod req;
+pub mod engine;
 pub mod sql;
 mod task;
 
