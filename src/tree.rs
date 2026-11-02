@@ -866,7 +866,7 @@ impl TreeBuilder {
         self.seq += 1;
         let value = encode_edit(self.seq, edit);
         self.index = self
-            .prolly
+            .store
             .put(&self.index, path.into_bytes(), value)
             .map_err(|e| err("TreeBuilder.put", e))?;
         Ok(())
@@ -877,7 +877,7 @@ impl TreeBuilder {
     fn edits(&self) -> napi::Result<Vec<(String, Edit)>> {
         let mut out = Vec::new();
         for item in self
-            .prolly
+            .store
             .range(&self.index, b"", None)
             .map_err(|e| err("TreeBuilder.range", e))?
         {
