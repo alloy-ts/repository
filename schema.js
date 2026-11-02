@@ -1,27 +1,111 @@
-// Example default schema definition for testing generation
-import { defineSchema, table, integer, text, boolean, timestamptz } from "./src/sql/dsl.ts";
-
-export const users = table(
-  {
-    id: integer().primaryKey().autoIncrement(),
-    name: text().maxLength(100),
-    email: text().unique(),
-    active: boolean().default(true),
-    createdAt: timestamptz().defaultNow(),
-  }
-);
-
-export const posts = table(
-  {
-    id: integer().primaryKey().autoIncrement(),
-    title: text(),
-    authorId: integer().references(() => users.id, { onDelete: "cascade" }),
-  }
-);
-
-export default defineSchema({
-  tables: {
-    users,
-    posts,
-  },
-});
+// Default schema definition using JSON IR representation
+export default {
+  irVersion: 1,
+  enums: [
+    {
+      name: "user_role",
+      values: ["admin", "editor", "viewer"]
+    }
+  ],
+  tables: [
+    {
+      name: "users",
+      columns: [
+        {
+          key: "id",
+          name: "id",
+          type: { kind: "integer" },
+          nullable: false,
+          autoIncrement: true
+        },
+        {
+          key: "name",
+          name: "name",
+          type: { kind: "text" },
+          nullable: false,
+          autoIncrement: false,
+          maxLength: 100
+        },
+        {
+          key: "email",
+          name: "email",
+          type: { kind: "text" },
+          nullable: false,
+          autoIncrement: false
+        },
+        {
+          key: "role",
+          name: "role",
+          type: { kind: "enum", name: "user_role" },
+          nullable: false,
+          autoIncrement: false,
+          default: { kind: "literal", value: "viewer" }
+        },
+        {
+          key: "active",
+          name: "active",
+          type: { kind: "boolean" },
+          nullable: false,
+          autoIncrement: false,
+          default: { kind: "literal", value: true }
+        },
+        {
+          key: "createdAt",
+          name: "created_at",
+          type: { kind: "timestamptz" },
+          nullable: false,
+          autoIncrement: false,
+          default: { kind: "now" }
+        }
+      ],
+      primaryKey: ["id"],
+      uniques: [
+        {
+          name: "users_email_key",
+          columns: ["email"]
+        }
+      ],
+      indexes: [],
+      foreignKeys: []
+    },
+    {
+      name: "posts",
+      columns: [
+        {
+          key: "id",
+          name: "id",
+          type: { kind: "integer" },
+          nullable: false,
+          autoIncrement: true
+        },
+        {
+          key: "title",
+          name: "title",
+          type: { kind: "text" },
+          nullable: false,
+          autoIncrement: false
+        },
+        {
+          key: "authorId",
+          name: "author_id",
+          type: { kind: "integer" },
+          nullable: false,
+          autoIncrement: false
+        }
+      ],
+      primaryKey: ["id"],
+      uniques: [],
+      indexes: [],
+      foreignKeys: [
+        {
+          name: "posts_author_id_fkey",
+          columns: ["author_id"],
+          refTable: "users",
+          refColumns: ["id"],
+          onDelete: "cascade",
+          onUpdate: "no_action"
+        }
+      ]
+    }
+  ]
+};

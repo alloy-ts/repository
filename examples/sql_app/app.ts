@@ -1,40 +1,4 @@
-import {
-  defineSchema,
-  table,
-  integer,
-  text,
-  boolean,
-  timestamptz,
-  enumType,
-} from "../../src/sql/dsl.ts";
-
-// 1. Define schema using the JS/TS DSL
-export const Role = enumType("user_role", ["admin", "editor", "viewer"]);
-
-export const users = table({
-  id: integer().primaryKey().autoIncrement(),
-  name: text().maxLength(100),
-  email: text().unique(),
-  role: Role().default("viewer"),
-  active: boolean().default(true),
-  createdAt: timestamptz().defaultNow(),
-});
-
-export const posts = table({
-  id: integer().primaryKey().autoIncrement(),
-  title: text(),
-  authorId: integer().references(() => users.id, { onDelete: "cascade" }),
-});
-
-export const schema = defineSchema({
-  enums: [Role],
-  tables: {
-    users,
-    posts,
-  },
-});
-
-// 2. Mock SQLite Database Client demonstrating the 5 internal Rust layers
+// End-to-end SQLite, Diesel and NAPI architecture demonstration
 class MockSqliteDb {
   private usersData: Map<number, any> = new Map();
   private postsData: Map<number, any> = new Map();
@@ -68,7 +32,6 @@ class MockSqliteDb {
 
   readonly posts = {
     create: async (data: { title: string; authorId: number }) => {
-      // Referential integrity check
       if (!this.usersData.has(data.authorId)) {
         throw new Error(`Foreign key violation: user ${data.authorId} does not exist`);
       }
@@ -83,7 +46,6 @@ class MockSqliteDb {
   };
 
   async transaction<T>(fn: (tx: this) => Promise<T>): Promise<T> {
-    // Snapshot state for atomic rollback
     const userSnapshot = new Map(this.usersData);
     const postSnapshot = new Map(this.postsData);
     try {

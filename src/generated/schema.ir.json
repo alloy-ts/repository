@@ -1,6 +1,15 @@
 {
   "irVersion": 1,
-  "enums": [],
+  "enums": [
+    {
+      "name": "user_role",
+      "values": [
+        "admin",
+        "editor",
+        "viewer"
+      ]
+    }
+  ],
   "tables": [
     {
       "name": "users",
@@ -32,6 +41,20 @@
           },
           "nullable": false,
           "autoIncrement": false
+        },
+        {
+          "key": "role",
+          "name": "role",
+          "type": {
+            "kind": "enum",
+            "name": "user_role"
+          },
+          "nullable": false,
+          "autoIncrement": false,
+          "default": {
+            "kind": "literal",
+            "value": "viewer"
+          }
         },
         {
           "key": "active",

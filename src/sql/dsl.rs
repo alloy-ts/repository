@@ -63,6 +63,13 @@ impl JsColumnBuilder {
     }
 
     #[napi]
+    pub fn auto_increment(&self) -> Self {
+        let mut m = (*self.meta).clone();
+        m.auto_increment = true;
+        Self::with_meta(m)
+    }
+
+    #[napi]
     pub fn unique(&self) -> Self {
         let mut m = (*self.meta).clone();
         m.unique = true;
@@ -269,6 +276,16 @@ pub fn enum_type(name: String, values: Vec<String>) -> Result<serde_json::Value>
 }
 
 /// NAPI-compatible table helper that compiles JS column configurations into Table IR JSON
+#[napi(js_name = "enumColumn")]
+pub fn enum_column(enum_name: String) -> JsColumnBuilder {
+    JsColumnBuilder::with_meta(ColumnMeta {
+        kind: "enum".to_string(),
+        enum_name: Some(enum_name),
+        ..Default::default()
+    })
+}
+
+/// NAPI-compatible table helper that compiles JS column configurations into Table IR JSON
 #[napi(js_name = "table")]
 pub fn table_builder(
     table_name: String,
@@ -366,5 +383,42 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(schema["irVersion"], 1);
+    }
+
+    #[test]
+    fn test_dsl_auto_increment_and_defaults() {
+        let col = integer().auto_increment();
+        assert!(col.meta.auto_increment);
+
+        let col_now = timestamptz().default_now();
+        assert_eq!(col_now.meta.default_val.as_ref().unwrap()["kind"], "now");
+
+        let col_lit = boolean().default(Some(serde_json::json!(true)));
+        assert_eq!(col_lit.meta.default_val.as_ref().unwrap()["kind"], "literal");
+    }
+
+    #[test]
+    fn test_enum_builder_uniqueness() {
+        let valid = enum_type("user_role".to_string(), vec!["admin".to_string(), "editor".to_string()]);
+        assert!(valid.is_ok());
+
+        let invalid = enum_type("user_role".to_string(), vec!["admin".to_string(), "admin".to_string()]);
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn test_references_builder() {
+        let target = serde_json::json!({
+            "$tableName": "users",
+            "$name": "id"
+        });
+        let opts = serde_json::json!({
+            "onDelete": "cascade",
+            "onUpdate": "cascade"
+        });
+        let col = integer().references(target, Some(opts)).unwrap();
+        assert_eq!(col.meta.ref_table.as_deref(), Some("users"));
+        assert_eq!(col.meta.ref_column.as_deref(), Some("id"));
+        assert_eq!(col.meta.on_delete.as_deref(), Some("cascade"));
     }
 }
