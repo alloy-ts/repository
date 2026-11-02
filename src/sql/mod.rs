@@ -13,8 +13,8 @@ pub mod validation;
 
 pub use backend::{Backend, PostgresBackend, SqliteBackend};
 pub use emitters::{
-    emit_ddl, emit_diesel_schema, emit_models, emit_napi_bindings, emit_repositories,
-    emit_validators, ModelEmitterOptions,
+    emit_ddl, emit_diesel_schema, emit_models, emit_napi_bindings, emit_postgres_diesel_schema,
+    emit_postgres_sql_types, emit_repositories, emit_validators, ModelEmitterOptions,
 };
 pub use runtime::{ConnectionOptions, ConnectionPool, DbError, DbErrorCode, Exec, TransactionHandle};
 pub use ir::{
@@ -28,6 +28,9 @@ pub mod dsl;
 pub mod ir_test;
 
 pub use dsl::*;
+
+#[cfg(test)]
+mod postgres_tests;
 
 #[cfg(test)]
 mod runtime_tests;
