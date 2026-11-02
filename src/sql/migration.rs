@@ -76,11 +76,17 @@ pub enum MigrationError {
 }
 
 /// Diff an old snapshot schema against a new schema.
-pub fn diff_schemas(old_schema: &SchemaIr, new_schema: &SchemaIr) -> Result<Vec<SchemaChange>, MigrationError> {
+/// Ambiguous table or column renames fail if not disambiguated with `renamed_from`.
+pub fn diff_schemas(
+    old_schema: &SchemaIr,
+    new_schema: &SchemaIr,
+) -> Result<Vec<SchemaChange>, MigrationError> {
     let mut changes = Vec::new();
 
-    let mut old_tables: BTreeMap<String, &TableIr> = old_schema.tables.iter().map(|(k, v)| (k.clone(), v)).collect();
-    let new_tables: BTreeMap<String, &TableIr> = new_schema.tables.iter().map(|(k, v)| (k.clone(), v)).collect();
+    let mut old_tables: BTreeMap<String, &TableIr> =
+        old_schema.tables.iter().map(|(k, v)| (k.clone(), v)).collect();
+    let new_tables: BTreeMap<String, &TableIr> =
+        new_schema.tables.iter().map(|(k, v)| (k.clone(), v)).collect();
 
     // Check for explicit table renames via `renamed_from`
     for (new_name, new_table) in &new_tables {
@@ -95,24 +101,36 @@ pub fn diff_schemas(old_schema: &SchemaIr, new_schema: &SchemaIr) -> Result<Vec<
         }
     }
 
-    // Check dropped tables
+    // Check for dropped tables and added tables
+    let mut dropped_tables = Vec::new();
     for (old_name, old_table) in &old_tables {
         if !new_tables.contains_key(old_name) {
-            changes.push(SchemaChange::DropTable {
-                name: old_name.clone(),
-                table: (*old_table).clone(),
-            });
+            dropped_tables.push((old_name.clone(), (*old_table).clone()));
         }
     }
 
-    // Check added tables
+    let mut added_tables = Vec::new();
     for (new_name, new_table) in &new_tables {
         if !old_schema.tables.contains_key(new_name) && new_table.renamed_from.is_none() {
-            changes.push(SchemaChange::CreateTable {
-                name: new_name.clone(),
-                table: (*new_table).clone(),
-            });
+            added_tables.push((new_name.clone(), (*new_table).clone()));
         }
+    }
+
+    // Guard against ambiguous table renames (1 table dropped and 1 table added without renamed_from hint)
+    if dropped_tables.len() == 1 && added_tables.len() == 1 {
+        let (old_t, _) = &dropped_tables[0];
+        let (new_t, _) = &added_tables[0];
+        return Err(MigrationError::AmbiguousTableRename {
+            old_table: old_t.clone(),
+            new_table: new_t.clone(),
+        });
+    }
+
+    for (name, table) in dropped_tables {
+        changes.push(SchemaChange::DropTable { name, table });
+    }
+    for (name, table) in added_tables {
+        changes.push(SchemaChange::CreateTable { name, table });
     }
 
     // Check existing tables for column and index changes
@@ -136,18 +154,49 @@ pub fn diff_schemas(old_schema: &SchemaIr, new_schema: &SchemaIr) -> Result<Vec<
                 }
             }
 
-            // Dropped columns
+            // Detect dropped and added columns
+            let mut dropped_cols = Vec::new();
             for (old_col_name, old_col) in &old_cols {
                 if !new_table.columns.contains_key(old_col_name) {
-                    changes.push(SchemaChange::DropColumn {
-                        table_name: table_name.clone(),
-                        column_name: old_col_name.clone(),
-                        column: (*old_col).clone(),
-                    });
+                    dropped_cols.push((old_col_name.clone(), (*old_col).clone()));
                 }
             }
 
-            // Added / modified columns
+            let mut added_cols = Vec::new();
+            for (new_col_name, new_col) in &new_table.columns {
+                let old_col_key = new_col.renamed_from.as_ref().unwrap_or(new_col_name);
+                if !old_table.columns.contains_key(old_col_key) && new_col.renamed_from.is_none() {
+                    added_cols.push((new_col_name.clone(), (*new_col).clone()));
+                }
+            }
+
+            // Ambiguous column rename check
+            if dropped_cols.len() == 1 && added_cols.len() == 1 {
+                let (old_c, _) = &dropped_cols[0];
+                let (new_c, _) = &added_cols[0];
+                return Err(MigrationError::AmbiguousColumnRename {
+                    table: table_name.clone(),
+                    old_col: old_c.clone(),
+                    new_col: new_c.clone(),
+                });
+            }
+
+            for (col_name, column) in dropped_cols {
+                changes.push(SchemaChange::DropColumn {
+                    table_name: table_name.clone(),
+                    column_name: col_name,
+                    column,
+                });
+            }
+            for (col_name, column) in added_cols {
+                changes.push(SchemaChange::AddColumn {
+                    table_name: table_name.clone(),
+                    column_name: col_name,
+                    column,
+                });
+            }
+
+            // Modified columns
             for (new_col_name, new_col) in &new_table.columns {
                 let old_col_key = new_col.renamed_from.as_ref().unwrap_or(new_col_name);
                 if let Some(old_col) = old_table.columns.get(old_col_key) {
@@ -169,12 +218,6 @@ pub fn diff_schemas(old_schema: &SchemaIr, new_schema: &SchemaIr) -> Result<Vec<
                             column: (*new_col).clone(),
                         });
                     }
-                } else if new_col.renamed_from.is_none() {
-                    changes.push(SchemaChange::AddColumn {
-                        table_name: table_name.clone(),
-                        column_name: new_col_name.clone(),
-                        column: (*new_col).clone(),
-                    });
                 }
             }
 
@@ -407,7 +450,7 @@ pub fn emit_migration<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::backend::{PostgresBackend, SqliteBackend};
+    use crate::sql::backend::SqliteBackend;
     use crate::sql::ir::*;
     use std::collections::BTreeMap;
 
@@ -536,5 +579,53 @@ mod tests {
         assert!(migration.up_sql.contains("DROP TABLE users;"));
         assert!(migration.up_sql.contains("ALTER TABLE _users_new RENAME TO users;"));
         assert!(migration.up_sql.contains("PRAGMA foreign_key_check;"));
+    }
+
+    #[test]
+    fn test_ambiguous_rename_rejected() {
+        let mut old_tables = BTreeMap::new();
+        old_tables.insert(
+            "old_users".to_string(),
+            TableIr {
+                columns: BTreeMap::new(),
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                unique_constraints: Vec::new(),
+                indexes: Vec::new(),
+                check_constraints: Vec::new(),
+                renamed_from: None,
+                rust_name: None,
+            },
+        );
+        let old_schema = SchemaIr {
+            ir_version: 1,
+            naming: NamingConfig::default(),
+            enums: BTreeMap::new(),
+            tables: old_tables,
+        };
+
+        let mut new_tables = BTreeMap::new();
+        new_tables.insert(
+            "new_users".to_string(),
+            TableIr {
+                columns: BTreeMap::new(),
+                primary_key: None,
+                foreign_keys: Vec::new(),
+                unique_constraints: Vec::new(),
+                indexes: Vec::new(),
+                check_constraints: Vec::new(),
+                renamed_from: None, // No hint provided
+                rust_name: None,
+            },
+        );
+        let new_schema = SchemaIr {
+            ir_version: 1,
+            naming: NamingConfig::default(),
+            enums: BTreeMap::new(),
+            tables: new_tables,
+        };
+
+        let res = diff_schemas(&old_schema, &new_schema);
+        assert!(matches!(res, Err(MigrationError::AmbiguousTableRename { .. })));
     }
 }

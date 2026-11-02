@@ -30,6 +30,9 @@ pub mod ir_test;
 pub use dsl::*;
 
 #[cfg(test)]
+mod migration_tests;
+
+#[cfg(test)]
 mod postgres_tests;
 
 #[cfg(test)]
