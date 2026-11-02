@@ -8,13 +8,15 @@ pub mod emitters;
 pub mod ir;
 pub mod migration;
 pub mod naming;
+pub mod runtime;
 pub mod validation;
 
 pub use backend::{Backend, PostgresBackend, SqliteBackend};
 pub use emitters::{
-    emit_ddl, emit_diesel_schema, emit_models, emit_napi_bindings, emit_validators,
-    ModelEmitterOptions,
+    emit_ddl, emit_diesel_schema, emit_models, emit_napi_bindings, emit_repositories,
+    emit_validators, ModelEmitterOptions,
 };
+pub use runtime::{ConnectionOptions, ConnectionPool, DbError, DbErrorCode, Exec, TransactionHandle};
 pub use ir::{
     CheckConstraintIr, ColumnIr, ColumnType, DefaultValueIr, EnumIr, ForeignKeyIr, IndexIr,
     NamingConfig, PrimaryKeyIr, ReferentialAction, SchemaIr, TableIr, CURRENT_IR_VERSION,
@@ -26,6 +28,9 @@ pub mod dsl;
 pub mod ir_test;
 
 pub use dsl::*;
+
+#[cfg(test)]
+mod runtime_tests;
 
 #[cfg(test)]
 mod tests;
