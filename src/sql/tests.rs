@@ -154,6 +154,59 @@ mod tests {
         assert!(artifacts.sql_ddl.contains("CREATE TYPE user_role AS ENUM ('admin', 'editor', 'viewer');"));
         assert!(artifacts.sql_ddl.contains("id SERIAL NOT NULL"));
         assert!(artifacts.sql_ddl.contains("created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"));
+
+        // Check Diesel schema uses Postgres types
+        assert!(artifacts.diesel_schema.contains("crate::sql_types::UserRole"));
+        assert!(artifacts.diesel_schema.contains("diesel::sql_types::Timestamptz"));
+
+        // Check Rust models
+        assert!(artifacts.rust_models.contains("pub enum UserRole"));
+        assert!(artifacts.rust_models.contains("diesel_derive_enum::DbEnum"));
+        assert!(artifacts.rust_models.contains("created_at: chrono::DateTime<chrono::Utc>"));
+    }
+
+    #[test]
+    fn test_postgres_all_types_coverage() {
+        let all_types_schema = r#"{
+          "ir_version": 1,
+          "enums": {
+            "status": {
+              "values": ["active", "inactive"]
+            }
+          },
+          "tables": {
+            "all_types": {
+              "columns": {
+                "id": { "type": "bigint", "nullable": false, "auto_increment": true },
+                "int_col": { "type": "integer", "nullable": false },
+                "float_col": { "type": "float", "nullable": false },
+                "double_col": { "type": "double", "nullable": false },
+                "bool_col": { "type": "boolean", "nullable": false, "default": { "kind": "literal", "value": true } },
+                "text_col": { "type": "text", "nullable": false },
+                "timestamp_col": { "type": "timestamp", "nullable": false },
+                "timestamptz_col": { "type": "timestamptz", "nullable": false, "default": { "kind": "now" } },
+                "uuid_col": { "type": "uuid", "nullable": false },
+                "json_col": { "type": "json", "nullable": false },
+                "enum_col": { "type": { "enum": { "name": "status" } }, "nullable": false }
+              },
+              "primary_key": { "columns": ["id"] }
+            }
+          }
+        }"#;
+
+        let artifacts = compile_schema(all_types_schema.to_string(), Some("postgres".to_string())).unwrap();
+        assert!(artifacts.sql_ddl.contains("id BIGSERIAL NOT NULL"));
+        assert!(artifacts.sql_ddl.contains("double_col DOUBLE PRECISION NOT NULL"));
+        assert!(artifacts.sql_ddl.contains("bool_col BOOLEAN NOT NULL DEFAULT TRUE"));
+        assert!(artifacts.sql_ddl.contains("uuid_col UUID NOT NULL"));
+        assert!(artifacts.sql_ddl.contains("json_col JSONB NOT NULL"));
+        assert!(artifacts.sql_ddl.contains("timestamptz_col TIMESTAMPTZ NOT NULL DEFAULT NOW()"));
+
+        assert!(artifacts.diesel_schema.contains("diesel::sql_types::BigInt"));
+        assert!(artifacts.diesel_schema.contains("diesel::sql_types::Double"));
+        assert!(artifacts.diesel_schema.contains("diesel::sql_types::Uuid"));
+        assert!(artifacts.diesel_schema.contains("diesel::sql_types::Jsonb"));
+        assert!(artifacts.diesel_schema.contains("crate::sql_types::Status"));
     }
 
     #[test]
