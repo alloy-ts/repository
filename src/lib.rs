@@ -16,6 +16,7 @@ mod process;
 mod promise;
 mod req;
 mod scheduler;
+pub mod sql;
 mod task;
 mod thread;
 
