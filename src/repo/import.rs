@@ -833,10 +833,10 @@ enum FileOp {
 
 /// Counters and results reported back from an import run.
 #[derive(Default)]
-struct ImportStatsInner {
+pub(crate) struct ImportStatsInner {
     blobs: usize,
     commits: usize,
-    tags: usize,
+    pub(crate) tags: usize,
     refs_updated: Vec<String>,
     refs_skipped: Vec<String>,
     refs_deleted: Vec<String>,
