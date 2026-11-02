@@ -22,7 +22,10 @@ pub use ir::{
 pub use migration::{diff_schemas, emit_migration, MigrationError, MigrationSql, SchemaChange};
 pub use validation::{validate_schema, ValidationError};
 
+pub mod dsl;
 pub mod ir_test;
+
+pub use dsl::*;
 
 #[cfg(test)]
 mod tests;
