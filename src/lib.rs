@@ -12,10 +12,10 @@ mod object_store;
 mod output;
 #[cfg(feature = "gpg")]
 mod pgp;
-mod process;
 mod req;
 pub mod sql;
-mod task;
+pub mod task;
+pub(crate) use task::process;
 
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies
 // (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.
