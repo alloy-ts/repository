@@ -21,6 +21,9 @@ pub mod base;
 pub mod buffered;
 pub mod loose;
 pub mod memory;
+pub mod sql;
+
+pub use sql::SqlObjectStore;
 
 /// Lower-cased string form of a hash kind (`"sha1"` / `"sha256"`). `gix::hash::Kind` is
 /// `#[non_exhaustive]`, so any future kind is reported as `sha256`.
@@ -160,6 +163,7 @@ pub(crate) enum WriterTarget {
     Handle(Mutex<HandleStore>),
     Memory(Arc<crate::object_store::memory::InMemoryStore>),
     Store(Arc<crate::object_store::base::GenericStore>),
+    Sql(Arc<crate::object_store::sql::SqlStore>),
 }
 
 /// A streaming reader over an object's raw, decompressed content.
@@ -259,6 +263,7 @@ impl ObjectStoreWriter {
             }
             WriterTarget::Memory(store) => store.write_object(self.kind, &self.buf)?,
             WriterTarget::Store(store) => store.write_object(self.kind, &self.buf)?,
+            WriterTarget::Sql(store) => store.write_object(self.kind, &self.buf)?,
         };
         Ok(id.to_string())
     }
