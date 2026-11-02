@@ -15,6 +15,10 @@ use napi_derive::napi;
 
 use thiserror::Error;
 
+pub mod format;
+pub mod gpg;
+#[cfg(feature = "gpg")]
+pub mod pgp;
 pub mod vault;
 
 #[cfg(feature = "ssh")]
@@ -3681,7 +3685,7 @@ pub fn decrypt_repo_key(
             .join(format!("{seckey}.gpg"));
         if file_path.exists() {
             if let Ok(decrypted) =
-                crate::gpg::gpg_decrypt_from_file(file_path.to_string_lossy().into_owned())
+                self::gpg::gpg_decrypt_from_file(file_path.to_string_lossy().into_owned())
             {
                 return Ok(decrypted.to_vec());
             }
@@ -3716,7 +3720,7 @@ pub fn encrypt_repo_key(
             std::fs::create_dir_all(parent)?;
         }
 
-        crate::gpg::gpg_encrypt_to_file(
+        self::gpg::gpg_encrypt_to_file(
             file_path.to_string_lossy().into_owned(),
             fingerprint.clone(),
             *key_is_trusted,

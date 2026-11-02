@@ -17,7 +17,7 @@ async support and full type definitions.
   git-remote-gcrypt entire repository mode (packfile & manifest encryption).
 - **OpenPGP & GPG**: OpenPGP encryption, decryption, signing, and signature
   verification via `rPGP`, along with GPG keyring lookup utilities. See
-  [Cryptography API Documentation](docs/api/crypto.md).
+  [Cryptography API Documentation](docs/api/crypto/index.md).
 - **SQL Schema Compiler**: Turns a JavaScript/TypeScript schema definition into
   validated Rust models, Diesel tables, NAPI-RS bindings, SQL DDL, runtime
   validators, and migrations for SQLite and PostgreSQL. See
