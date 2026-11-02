@@ -24,8 +24,10 @@ pub use validation::{validate_schema, ValidationError};
 
 pub mod dsl;
 pub mod ir_test;
+pub mod query;
 
 pub use dsl::*;
+pub use query::*;
 
 #[cfg(test)]
 mod tests;
