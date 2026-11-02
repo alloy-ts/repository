@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   defineSchema, table, enumType, integer, text, boolean, timestamptz,
-} from "./dsl.js";
+} from "./dsl.ts";
 
 const throwsMsg = (fn, re) => assert.throws(fn, (e) => re.test(e.message));
 const col = (ir, t, name) => ir.tables.find((x) => x.name === t).columns.find((c) => c.name === name);
