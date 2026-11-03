@@ -17,6 +17,9 @@ pub mod sql;
 pub mod task;
 pub(crate) use task::process;
 
+pub mod engine;
+pub use engine::*;
+
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies
 // (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.
 #[cfg(feature = "wal")]

@@ -30,7 +30,7 @@ gix-filter = "0.36.0"
 gix-imara-diff = "0.3.1"
 gix-protocol = { version = "0.67.0", features = ["blocking-client", "fetch"] }
 filetime = "0.2.29"
-napi = { version = "=3.16.0", features = ["serde-json", "tokio_rt", "napi5"] }
+napi = { version = "=3.16.0", features = ["serde-json", "tokio_rt", "napi6"] }
 napi-derive = "=3.7.0"
 futures = { version = "0.3.34", features = ["async-await", "executor"] }
 futures-executor = { version = "0.3.34", features = ["thread-pool"] }
@@ -87,6 +87,7 @@ sha2 = "0.10"
 pgp = "0.21.0"
 blake3 = "1"
 crc32fast = "1"
+fusevm = { version = "=0.26.10", default-features = false }
 
 [build-dependencies]
 napi-build = "2.6.0"
@@ -109,7 +110,8 @@ windows-sys = { version = "0.52", features = [
 ] }
 
 [features]
-default = ["crypto"]
+default = ["crypto", "jit"]
+jit = ["fusevm/jit"]
 # SSH recipient-key sharing via ed25519 keys.
 ssh = ["dep:multi-codec"]
 # GPG recipient-key sharing (keyring lookup currently a stub).
