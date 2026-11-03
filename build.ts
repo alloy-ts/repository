@@ -39,6 +39,7 @@ async function run() {
     useNapiCross,
     crossCompile,
     useCross,
+    features: ["engine", "jit"],
   });
 
   if (silent) return;
