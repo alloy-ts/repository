@@ -22,6 +22,12 @@ async support and full type definitions.
   validated Rust models, Diesel tables, NAPI-RS bindings, SQL DDL, runtime
   validators, and migrations for SQLite and PostgreSQL. See
   [SQL Schema Compiler Documentation](docs/api/sql.md).
+- **Bun-Compatible Shell**: Fast, cross-platform shell interpreter powered by
+  `fusevm`, supporting `$` template literal tag, built-in commands (echo, pwd, cd,
+  ls, rm, cat, touch, mkdir, which, mv, seq, yes, dirname, basename), pipelines,
+  redirections, native `repo`/`git` commands hooked into `src/repo/mod.rs`, and
+  `node:child_process` alias APIs (`exec`, `execSync`, `execFile`, `spawn`). See
+  [Shell API Documentation](docs/api/shell.md).
 
 ## Getting Started
 

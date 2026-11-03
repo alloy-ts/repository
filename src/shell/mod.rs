@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::shell::parser::parse_shell_script;
-use crate::shell::vm::{execute_pipeline_sequence, expand_braces};
+use crate::shell::vm::execute_pipeline_sequence;
 
 #[napi(object)]
 #[derive(Clone, Default)]

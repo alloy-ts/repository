@@ -13,6 +13,7 @@ pub struct BuiltinResult {
 
 pub fn is_builtin(name: &str) -> bool {
     name == "repo"
+        || name == "git"
         || fusevm::shell_builtins::is_builtin(name)
         || matches!(
             name,
@@ -43,7 +44,7 @@ pub fn run_builtin(
     cwd: &Path,
 ) -> Option<BuiltinResult> {
     match name {
-        "repo" => Some(crate::shell::repo_builtin::builtin_repo(args, cwd)),
+        "repo" | "git" => Some(crate::shell::repo_builtin::builtin_repo(args, cwd)),
         "echo" => Some(builtin_echo(args)),
         "pwd" => Some(builtin_pwd(cwd)),
         "cd" => Some(builtin_cd(args, cwd)),
