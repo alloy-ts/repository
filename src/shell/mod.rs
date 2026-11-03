@@ -5,6 +5,7 @@ pub mod builtins;
 pub mod child_process;
 pub mod fusevm_bridge;
 pub mod parser;
+pub mod repo_builtin;
 pub mod vm;
 
 pub use child_process::{

@@ -51,6 +51,17 @@ describe("Bun-compatible Shell ($)", () => {
     const text = await $`FOO=bar echo test`.text();
     expect(text.trim()).toBe("test");
   });
+
+  test("builtin command 'repo'", async () => {
+    const help = await $`repo`.text();
+    expect(help).toContain("Usage: repo <subcommand>");
+
+    const isRepo = await $`repo is-repo`.text();
+    expect(isRepo.trim()).toBe("true");
+
+    const status = await $`repo status`.text();
+    expect(status).toContain("git_dir:");
+  });
 });
 
 describe("node:child_process alias APIs", () => {
