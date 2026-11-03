@@ -45,6 +45,22 @@ describe("Shell Builtin Commands", () => {
     expect(resFalse.exitCode).toBe(1);
   });
 
+  test("wc counts lines, words, bytes from stdin or files", async () => {
+    const wcStdin = await $`echo "hello world" | wc -w`.text();
+    expect(wcStdin.trim()).toBe("2");
+
+    const wcLines = await $`seq 1 5 | wc -l`.text();
+    expect(wcLines.trim()).toBe("5");
+  });
+
+  test("grep filters lines with case insensitivity and invert match", async () => {
+    const matched = await $`echo "apple\nBanana\ncherry" | grep -i "banana"`.text();
+    expect(matched.trim()).toBe("Banana");
+
+    const inverted = await $`echo "apple\nBanana\ncherry" | grep -v "a"`.text();
+    expect(inverted.trim()).toBe("cherry");
+  });
+
   test("touch, ls, cat, and rm", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "shell-test-"));
     const fileA = path.join(tmpDir, "test.txt");

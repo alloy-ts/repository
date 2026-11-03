@@ -5,8 +5,26 @@ The `shell` module provides a cross-platform, Bun-compatible shell scripting env
 ## Overview
 
 - **Bun-Compatible Shell (`$`)**: Tagged template literal syntax for executing commands with built-in escaping, redirections, and pipes.
-- **Built-in Commands**: Native cross-platform implementations for `echo`, `pwd`, `cd`, `ls`, `rm`, `cat`, `touch`, `mkdir`, `which`, `mv`, `seq`, `yes`, `dirname`, `basename`, `true`, `false`, `exit`.
-- **Repository Integration**: Native `repo` command (and its `git` alias) hooked directly into `src/repo/mod.rs` via `Repository` to inspect and manage Git repositories directly from shell pipelines.
+- **Built-in Commands**: Native cross-platform implementations for:
+  - `cat`: Output file or stdin streams.
+  - `grep`: Line filtering supporting `-i` (case-insensitive) and `-v` (invert-match).
+  - `wc`: Word, line (`-l`), byte (`-c`), and word (`-w`) counting.
+  - `echo`: Print arguments with `-n` (omit trailing newline) support.
+  - `pwd`: Print current working directory.
+  - `cd`: Change directory (`~` expansion supported).
+  - `ls`: List directory contents (`-l` long format, `-a` hidden files).
+  - `rm`: Remove files and directories (`-r` recursive, `-f` force).
+  - `touch`: Update file timestamp or create empty file.
+  - `mkdir`: Create directories (`-p` parents).
+  - `which`: Locate executables on `PATH`.
+  - `mv`: Move/rename files and directories.
+  - `seq`: Generate sequence of numbers (`seq [first [step]] last`).
+  - `yes`: Output repetitive text strings.
+  - `dirname`: Extract directory component from path.
+  - `basename`: Extract filename component from path (with optional suffix stripping).
+  - `true` / `false`: Return status code 0 and 1 respectively.
+  - `exit`: Terminate command pipeline with numeric code.
+- **Repository Integration**: Native `repo` command (and its `git` alias) hooked directly into `src/repo/mod.rs` via `Repository` to inspect and manage Git repositories directly from shell pipelines (`status`, `init`, `head`, `is-repo`, `is-bare`).
 - **fusevm Integration**: Shell evaluation, brace expansion (`$.braces`), and `ShellHost` callbacks powered by `fusevm`.
 - **`node:child_process` Aliases**: `exec`, `execSync`, `execFile`, `execFileSync`, `spawn`, `spawnSync` backed by `src/task/process.rs`.
 

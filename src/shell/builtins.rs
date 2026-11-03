@@ -23,6 +23,8 @@ pub fn is_builtin(name: &str) -> bool {
                 | "ls"
                 | "rm"
                 | "cat"
+                | "grep"
+                | "wc"
                 | "touch"
                 | "mkdir"
                 | "which"
@@ -51,6 +53,8 @@ pub fn run_builtin(
         "ls" => Some(builtin_ls(args, cwd)),
         "rm" => Some(builtin_rm(args, cwd)),
         "cat" => Some(builtin_cat(args, stdin_data, cwd)),
+        "grep" => Some(builtin_grep(args, stdin_data, cwd)),
+        "wc" => Some(builtin_wc(args, stdin_data, cwd)),
         "touch" => Some(builtin_touch(args, cwd)),
         "mkdir" => Some(builtin_mkdir(args, cwd)),
         "which" => Some(builtin_which(args)),
@@ -277,6 +281,106 @@ fn builtin_rm(args: &[String], cwd: &Path) -> BuiltinResult {
     }
 }
 
+fn builtin_grep(args: &[String], stdin_data: &[u8], cwd: &Path) -> BuiltinResult {
+    let mut ignore_case = false;
+    let mut invert_match = false;
+    let mut pattern: Option<String> = None;
+    let mut files = Vec::new();
+
+    for arg in args {
+        if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
+            for c in arg.chars().skip(1) {
+                match c {
+                    'i' => ignore_case = true,
+                    'v' => invert_match = true,
+                    _ => {}
+                }
+            }
+        } else if pattern.is_none() {
+            pattern = Some(arg.clone());
+        } else {
+            files.push(arg.as_str());
+        }
+    }
+
+    let pat = match pattern {
+        Some(p) => {
+            if ignore_case {
+                p.to_lowercase()
+            } else {
+                p
+            }
+        }
+        None => {
+            return BuiltinResult {
+                exit_code: 2,
+                stdout: Vec::new(),
+                stderr: b"grep: missing pattern\n".to_vec(),
+            };
+        }
+    };
+
+    let check_line = |line: &str| -> bool {
+        let matched = if ignore_case {
+            line.to_lowercase().contains(&pat)
+        } else {
+            line.contains(&pat)
+        };
+        if invert_match {
+            !matched
+        } else {
+            matched
+        }
+    };
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = 1; // 1 if no line was selected
+
+    if files.is_empty() || (files.len() == 1 && files[0] == "-") {
+        let text = String::from_utf8_lossy(stdin_data);
+        for line in text.lines() {
+            if check_line(line) {
+                exit_code = 0;
+                stdout.extend_from_slice(line.as_bytes());
+                stdout.push(b'\n');
+            }
+        }
+        return BuiltinResult {
+            exit_code,
+            stdout,
+            stderr,
+        };
+    }
+
+    for file in &files {
+        let path = cwd.join(file);
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                for line in content.lines() {
+                    if check_line(line) {
+                        exit_code = 0;
+                        if files.len() > 1 {
+                            stdout.extend_from_slice(format!("{}:{}\n", file, line).as_bytes());
+                        } else {
+                            stdout.extend_from_slice(format!("{}\n", line).as_bytes());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                stderr.extend_from_slice(format!("grep: {}: {}\n", file, e).as_bytes());
+            }
+        }
+    }
+
+    BuiltinResult {
+        exit_code,
+        stdout,
+        stderr,
+    }
+}
+
 fn builtin_cat(args: &[String], stdin_data: &[u8], cwd: &Path) -> BuiltinResult {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -302,6 +406,100 @@ fn builtin_cat(args: &[String], stdin_data: &[u8], cwd: &Path) -> BuiltinResult 
                     exit_code = 1;
                     stderr
                         .extend_from_slice(format!("cat: {}: {}\n", path.display(), e).as_bytes());
+                }
+            }
+        }
+    }
+
+    BuiltinResult {
+        exit_code,
+        stdout,
+        stderr,
+    }
+}
+
+fn builtin_wc(args: &[String], stdin_data: &[u8], cwd: &Path) -> BuiltinResult {
+    let mut count_lines = false;
+    let mut count_words = false;
+    let mut count_bytes = false;
+    let mut files = Vec::new();
+
+    for arg in args {
+        if arg.starts_with('-') && arg.len() > 1 {
+            for c in arg.chars().skip(1) {
+                match c {
+                    'l' => count_lines = true,
+                    'w' => count_words = true,
+                    'c' | 'm' => count_bytes = true,
+                    _ => {}
+                }
+            }
+        } else {
+            files.push(arg.as_str());
+        }
+    }
+
+    if !count_lines && !count_words && !count_bytes {
+        count_lines = true;
+        count_words = true;
+        count_bytes = true;
+    }
+
+    let compute_stats = |data: &[u8]| -> (usize, usize, usize) {
+        let lines = data.iter().filter(|&&b| b == b'\n').count();
+        let text = String::from_utf8_lossy(data);
+        let words = text.split_whitespace().count();
+        let bytes = data.len();
+        (lines, words, bytes)
+    };
+
+    let format_counts = |lines: usize, words: usize, bytes: usize, label: &str| -> String {
+        let mut parts = Vec::new();
+        if count_lines {
+            parts.push(format!("{:>4}", lines));
+        }
+        if count_words {
+            parts.push(format!("{:>4}", words));
+        }
+        if count_bytes {
+            parts.push(format!("{:>4}", bytes));
+        }
+        if label.is_empty() {
+            parts.join(" ")
+        } else {
+            format!("{} {}", parts.join(" "), label)
+        }
+    };
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_code = 0;
+
+    if files.is_empty() || (files.len() == 1 && files[0] == "-") {
+        let (lines, words, bytes) = compute_stats(stdin_data);
+        let line = format!("{}\n", format_counts(lines, words, bytes, ""));
+        stdout.extend_from_slice(line.as_bytes());
+        return BuiltinResult {
+            exit_code: 0,
+            stdout,
+            stderr,
+        };
+    }
+
+    for file in &files {
+        if *file == "-" {
+            let (l, w, b) = compute_stats(stdin_data);
+            stdout.extend_from_slice(format!("{}\n", format_counts(l, w, b, "-")).as_bytes());
+        } else {
+            let path = cwd.join(file);
+            match fs::read(&path) {
+                Ok(data) => {
+                    let (l, w, b) = compute_stats(&data);
+                    stdout.extend_from_slice(format!("{}\n", format_counts(l, w, b, file)).as_bytes());
+                }
+                Err(e) => {
+                    exit_code = 1;
+                    stderr.extend_from_slice(format!("wc: {}: {}\n", file, e).as_bytes());
                 }
             }
         }
