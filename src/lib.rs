@@ -20,6 +20,12 @@ pub(crate) use task::process;
 pub mod engine;
 pub use engine::*;
 
+pub mod shell;
+pub use shell::{
+    braces, escape, exec, exec_file, exec_file_sync, exec_sync, spawn, spawn_sync,
+    ChildProcessOptions, ExecResult, Shell, ShellConfig, ShellPromiseResult,
+};
+
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies
 // (`crate::types`, `crate::vfs`, `crate::read_limits`, `crate::sys`, …) exist.
 #[cfg(feature = "wal")]
