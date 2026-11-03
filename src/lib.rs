@@ -22,8 +22,8 @@ pub use engine::*;
 
 pub mod shell;
 pub use shell::{
-    braces, escape, exec, exec_file, exec_file_sync, exec_sync, spawn, spawn_sync,
-    ChildProcessOptions, ExecResult, Shell, ShellConfig, ShellPromiseResult,
+    ChildProcessOptions, ExecResult, Shell, ShellConfig, ShellPromiseResult, braces, escape, exec,
+    exec_file, exec_file_sync, exec_sync, spawn, spawn_sync,
 };
 
 // WAL napi-binding scaffold. Gated until the surrounding core dependencies

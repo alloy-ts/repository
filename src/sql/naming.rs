@@ -58,7 +58,13 @@ pub fn singularize(word: &str) -> String {
     let lower = word.to_lowercase();
     if lower.ends_with("ies") && lower.len() > 3 {
         format!("{}y", &word[..word.len() - 3])
-    } else if (lower.ends_with("ses") || lower.ends_with("shes") || lower.ends_with("ches") || lower.ends_with("xes") || lower.ends_with("zes")) && word.len() > 3 {
+    } else if (lower.ends_with("ses")
+        || lower.ends_with("shes")
+        || lower.ends_with("ches")
+        || lower.ends_with("xes")
+        || lower.ends_with("zes"))
+        && word.len() > 3
+    {
         word[..word.len() - 2].to_string()
     } else if lower.ends_with('s') && !lower.ends_with("ss") && lower.len() > 1 {
         word[..word.len() - 1].to_string()

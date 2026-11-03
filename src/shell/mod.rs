@@ -9,7 +9,7 @@ pub mod repo_builtin;
 pub mod vm;
 
 pub use child_process::{
-    exec, exec_file, exec_file_sync, exec_sync, spawn, spawn_sync, ChildProcessOptions, ExecResult,
+    ChildProcessOptions, ExecResult, exec, exec_file, exec_file_sync, exec_sync, spawn, spawn_sync,
 };
 
 use napi::bindgen_prelude::{Buffer, Result, Status};
@@ -55,7 +55,10 @@ impl Shell {
     }
 
     #[napi]
-    pub fn env(&self, env_vars: Option<HashMap<String, String>>) -> Option<HashMap<String, String>> {
+    pub fn env(
+        &self,
+        env_vars: Option<HashMap<String, String>>,
+    ) -> Option<HashMap<String, String>> {
         let mut cfg = self.config.lock().unwrap();
         if let Some(ev) = env_vars {
             cfg.env = Some(ev.clone());
@@ -78,7 +81,11 @@ impl Shell {
     }
 
     #[napi]
-    pub async fn run(&self, script: String, local_cfg: Option<ShellConfig>) -> Result<ShellPromiseResult> {
+    pub async fn run(
+        &self,
+        script: String,
+        local_cfg: Option<ShellConfig>,
+    ) -> Result<ShellPromiseResult> {
         let (cwd, env_map, nothrow) = {
             let base = self.config.lock().unwrap();
             let cwd = local_cfg
@@ -88,7 +95,10 @@ impl Shell {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            let mut env_map = base.env.clone().unwrap_or_else(|| std::env::vars().collect());
+            let mut env_map = base
+                .env
+                .clone()
+                .unwrap_or_else(|| std::env::vars().collect());
             if let Some(loc) = local_cfg.as_ref().and_then(|c| c.env.clone()) {
                 for (k, v) in loc {
                     env_map.insert(k, v);
@@ -104,8 +114,8 @@ impl Shell {
             (cwd, env_map, nothrow)
         };
 
-        let seq = parse_shell_script(&script)
-            .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
+        let seq =
+            parse_shell_script(&script).map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
 
         let output = execute_pipeline_sequence(&seq, &cwd, &env_map).await;
 
@@ -113,7 +123,10 @@ impl Shell {
             let stderr_str = String::from_utf8_lossy(&output.stderr);
             let err = napi::Error::new(
                 Status::GenericFailure,
-                format!("Shell command failed with exit code {}: {}", output.exit_code, stderr_str),
+                format!(
+                    "Shell command failed with exit code {}: {}",
+                    output.exit_code, stderr_str
+                ),
             );
             return Err(err);
         }

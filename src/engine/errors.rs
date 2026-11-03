@@ -44,7 +44,9 @@ impl EngineError {
 
     pub fn code(&self) -> &'static str {
         match self.kind {
-            ErrorKind::LexerError | ErrorKind::ParseError | ErrorKind::CompileError => "COMPILE_ERROR",
+            ErrorKind::LexerError | ErrorKind::ParseError | ErrorKind::CompileError => {
+                "COMPILE_ERROR"
+            }
             ErrorKind::RuntimeError => "RUNTIME_ERROR",
         }
     }

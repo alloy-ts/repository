@@ -1,13 +1,13 @@
 //! Shell execution engine using `fusevm` VM and ShellHost, managing process pipelines and builtins.
 
+use fusevm::host::ShellHost;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use fusevm::host::ShellHost;
 
 use crate::shell::ast::{CommandNode, LogicalOp, PipelineNode, PipelineSequence, RedirectOp};
 use crate::shell::builtins::{is_builtin, run_builtin};
-use crate::task::process::{run_command, CommandOptions, EnvEntry};
+use crate::task::process::{CommandOptions, EnvEntry, run_command};
 
 pub struct ShellExecutionHost {
     pub cwd: PathBuf,
@@ -212,7 +212,11 @@ async fn execute_command(
             }
             RedirectOp::OutputAppend => {
                 let file_path = cwd.join(&redir.target);
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(file_path) {
+                if let Ok(mut f) = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(file_path)
+                {
                     use std::io::Write;
                     let _ = f.write_all(&stdout);
                 }
@@ -225,7 +229,11 @@ async fn execute_command(
             }
             RedirectOp::StderrAppend => {
                 let file_path = cwd.join(&redir.target);
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(file_path) {
+                if let Ok(mut f) = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(file_path)
+                {
                     use std::io::Write;
                     let _ = f.write_all(&stderr);
                 }
@@ -241,7 +249,11 @@ async fn execute_command(
             }
             RedirectOp::BothAppend => {
                 let file_path = cwd.join(&redir.target);
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(file_path) {
+                if let Ok(mut f) = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(file_path)
+                {
                     use std::io::Write;
                     let _ = f.write_all(&stdout);
                     let _ = f.write_all(&stderr);

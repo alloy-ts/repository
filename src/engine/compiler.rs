@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use fusevm::{Chunk, ChunkBuilder, Op, Value};
+use std::collections::HashSet;
 
 use crate::engine::ast::{BinaryOp, Expr, ExprKind, Stmt, StmtKind, UnaryOp};
 use crate::engine::errors::EngineError;
@@ -32,7 +32,10 @@ impl Compiler {
     pub fn compile(mut self, statements: &[Stmt]) -> Result<Chunk, EngineError> {
         // Pass 1: Collect and check function declarations
         for stmt in statements {
-            if let StmtKind::Function { name, parameters, .. } = &stmt.kind {
+            if let StmtKind::Function {
+                name, parameters, ..
+            } = &stmt.kind
+            {
                 // Reserve name in ChunkBuilder
                 let _ = self.builder.add_name(name);
                 self.functions
@@ -111,7 +114,8 @@ impl Compiler {
         }
 
         for param_idx in (0..parameters.len()).rev() {
-            self.builder.emit(Op::SetSlot(param_idx as u16), line as u32);
+            self.builder
+                .emit(Op::SetSlot(param_idx as u16), line as u32);
         }
 
         let mut has_explicit_return = false;

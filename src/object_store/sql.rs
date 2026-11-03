@@ -64,8 +64,8 @@ pub(crate) struct SqlStore {
 
 impl SqlStore {
     pub(crate) fn new(database_url: &str, kind: gix::hash::Kind) -> napi::Result<Self> {
-        let mut conn = SqliteConnection::establish(database_url)
-            .map_err(|e| err("SqlObjectStore::new", e))?;
+        let mut conn =
+            SqliteConnection::establish(database_url).map_err(|e| err("SqlObjectStore::new", e))?;
 
         // Optimize SQLite pragmas for git object store usage
         conn.batch_execute(

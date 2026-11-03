@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::sql::backend::Backend;
@@ -61,10 +61,17 @@ pub enum SchemaChange {
 /// Errors occurring during migration diffing or plan generation.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MigrationError {
-    #[error("ambiguous table change: table '{old_table}' removed and '{new_table}' added without explicit .renamed_from(\"{old_table}\") hint")]
-    AmbiguousTableRename { old_table: String, new_table: String },
+    #[error(
+        "ambiguous table change: table '{old_table}' removed and '{new_table}' added without explicit .renamed_from(\"{old_table}\") hint"
+    )]
+    AmbiguousTableRename {
+        old_table: String,
+        new_table: String,
+    },
 
-    #[error("ambiguous column change in table '{table}': column '{old_col}' removed and '{new_col}' added without explicit .renamed_from(\"{old_col}\") hint")]
+    #[error(
+        "ambiguous column change in table '{table}': column '{old_col}' removed and '{new_col}' added without explicit .renamed_from(\"{old_col}\") hint"
+    )]
     AmbiguousColumnRename {
         table: String,
         old_col: String,
@@ -76,11 +83,22 @@ pub enum MigrationError {
 }
 
 /// Diff an old snapshot schema against a new schema.
-pub fn diff_schemas(old_schema: &SchemaIr, new_schema: &SchemaIr) -> Result<Vec<SchemaChange>, MigrationError> {
+pub fn diff_schemas(
+    old_schema: &SchemaIr,
+    new_schema: &SchemaIr,
+) -> Result<Vec<SchemaChange>, MigrationError> {
     let mut changes = Vec::new();
 
-    let mut old_tables: BTreeMap<String, &TableIr> = old_schema.tables.iter().map(|(k, v)| (k.clone(), v)).collect();
-    let new_tables: BTreeMap<String, &TableIr> = new_schema.tables.iter().map(|(k, v)| (k.clone(), v)).collect();
+    let mut old_tables: BTreeMap<String, &TableIr> = old_schema
+        .tables
+        .iter()
+        .map(|(k, v)| (k.clone(), v))
+        .collect();
+    let new_tables: BTreeMap<String, &TableIr> = new_schema
+        .tables
+        .iter()
+        .map(|(k, v)| (k.clone(), v))
+        .collect();
 
     // Check for explicit table renames via `renamed_from`
     for (new_name, new_table) in &new_tables {
@@ -119,8 +137,11 @@ pub fn diff_schemas(old_schema: &SchemaIr, new_schema: &SchemaIr) -> Result<Vec<
     for (table_name, new_table) in &new_schema.tables {
         let old_table_name = new_table.renamed_from.as_ref().unwrap_or(table_name);
         if let Some(old_table) = old_schema.tables.get(old_table_name) {
-            let mut old_cols: BTreeMap<String, &ColumnIr> =
-                old_table.columns.iter().map(|(k, v)| (k.clone(), v)).collect();
+            let mut old_cols: BTreeMap<String, &ColumnIr> = old_table
+                .columns
+                .iter()
+                .map(|(k, v)| (k.clone(), v))
+                .collect();
 
             // Explicit column renames via `renamed_from`
             for (new_col_name, new_col) in &new_table.columns {
@@ -179,10 +200,16 @@ pub fn diff_schemas(old_schema: &SchemaIr, new_schema: &SchemaIr) -> Result<Vec<
             }
 
             // Indexes diff
-            let old_idx_map: BTreeMap<&str, &IndexIr> =
-                old_table.indexes.iter().map(|idx| (idx.name.as_str(), idx)).collect();
-            let new_idx_map: BTreeMap<&str, &IndexIr> =
-                new_table.indexes.iter().map(|idx| (idx.name.as_str(), idx)).collect();
+            let old_idx_map: BTreeMap<&str, &IndexIr> = old_table
+                .indexes
+                .iter()
+                .map(|idx| (idx.name.as_str(), idx))
+                .collect();
+            let new_idx_map: BTreeMap<&str, &IndexIr> = new_table
+                .indexes
+                .iter()
+                .map(|idx| (idx.name.as_str(), idx))
+                .collect();
 
             for (old_idx_name, old_idx) in &old_idx_map {
                 if !new_idx_map.contains_key(old_idx_name) {
@@ -270,7 +297,9 @@ pub fn emit_migration<B: Backend>(
                     "INSERT INTO {temp_name} ({col_list}) SELECT {col_list} FROM {table_name};\n"
                 ));
                 up.push_str(&format!("DROP TABLE {table_name};\n"));
-                up.push_str(&format!("ALTER TABLE {temp_name} RENAME TO {table_name};\n\n"));
+                up.push_str(&format!(
+                    "ALTER TABLE {temp_name} RENAME TO {table_name};\n\n"
+                ));
             }
         }
 
@@ -288,7 +317,9 @@ pub fn emit_migration<B: Backend>(
                     "INSERT INTO {temp_name} ({col_list}) SELECT {col_list} FROM {table_name};\n"
                 ));
                 down_rebuild.push_str(&format!("DROP TABLE {table_name};\n"));
-                down_rebuild.push_str(&format!("ALTER TABLE {temp_name} RENAME TO {table_name};\n\n"));
+                down_rebuild.push_str(&format!(
+                    "ALTER TABLE {temp_name} RENAME TO {table_name};\n\n"
+                ));
             }
         }
         down_rebuild.push_str("PRAGMA foreign_key_check;\nCOMMIT;\nPRAGMA foreign_keys = ON;\n");
@@ -551,7 +582,11 @@ mod tests {
         assert!(migration.up_sql.contains("BEGIN TRANSACTION;"));
         assert!(migration.up_sql.contains("INSERT INTO _users_new"));
         assert!(migration.up_sql.contains("DROP TABLE users;"));
-        assert!(migration.up_sql.contains("ALTER TABLE _users_new RENAME TO users;"));
+        assert!(
+            migration
+                .up_sql
+                .contains("ALTER TABLE _users_new RENAME TO users;")
+        );
         assert!(migration.up_sql.contains("PRAGMA foreign_key_check;"));
     }
 
@@ -627,13 +662,33 @@ mod tests {
         let diff = diff_schemas(&old_schema, &new_schema).unwrap();
         let migration = emit_migration(&diff, &new_schema, &PostgresBackend).unwrap();
 
-        assert!(migration.up_sql.contains("ALTER TABLE users ALTER COLUMN name SET NOT NULL;"));
-        assert!(migration.down_sql.contains("ALTER TABLE users ALTER COLUMN name DROP NOT NULL;"));
+        assert!(
+            migration
+                .up_sql
+                .contains("ALTER TABLE users ALTER COLUMN name SET NOT NULL;")
+        );
+        assert!(
+            migration
+                .down_sql
+                .contains("ALTER TABLE users ALTER COLUMN name DROP NOT NULL;")
+        );
 
-        assert!(migration.up_sql.contains("ALTER TABLE users ADD COLUMN email TEXT NOT NULL;"));
-        assert!(migration.down_sql.contains("ALTER TABLE users DROP COLUMN email;"));
+        assert!(
+            migration
+                .up_sql
+                .contains("ALTER TABLE users ADD COLUMN email TEXT NOT NULL;")
+        );
+        assert!(
+            migration
+                .down_sql
+                .contains("ALTER TABLE users DROP COLUMN email;")
+        );
 
-        assert!(migration.up_sql.contains("CREATE UNIQUE INDEX users_email_idx ON users (email);"));
+        assert!(
+            migration
+                .up_sql
+                .contains("CREATE UNIQUE INDEX users_email_idx ON users (email);")
+        );
         assert!(migration.down_sql.contains("DROP INDEX users_email_idx;"));
     }
 }

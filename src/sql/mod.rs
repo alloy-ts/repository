@@ -12,15 +12,15 @@ pub mod validation;
 
 pub use backend::{Backend, PostgresBackend, SqliteBackend};
 pub use emitters::{
-    emit_ddl, emit_diesel_schema, emit_models, emit_napi_bindings, emit_validators,
-    ModelEmitterOptions,
+    ModelEmitterOptions, emit_ddl, emit_diesel_schema, emit_models, emit_napi_bindings,
+    emit_validators,
 };
 pub use ir::{
-    CheckConstraintIr, ColumnIr, ColumnType, DefaultValueIr, EnumIr, ForeignKeyIr, IndexIr,
-    NamingConfig, PrimaryKeyIr, ReferentialAction, SchemaIr, TableIr, CURRENT_IR_VERSION,
+    CURRENT_IR_VERSION, CheckConstraintIr, ColumnIr, ColumnType, DefaultValueIr, EnumIr,
+    ForeignKeyIr, IndexIr, NamingConfig, PrimaryKeyIr, ReferentialAction, SchemaIr, TableIr,
 };
-pub use migration::{diff_schemas, emit_migration, MigrationError, MigrationSql, SchemaChange};
-pub use validation::{validate_schema, ValidationError};
+pub use migration::{MigrationError, MigrationSql, SchemaChange, diff_schemas, emit_migration};
+pub use validation::{ValidationError, validate_schema};
 
 pub mod dsl;
 pub mod ir_test;
@@ -52,9 +52,13 @@ pub struct GeneratedArtifacts {
 /// Compile a raw JSON Schema IR string, validate against the selected backend ("sqlite" or "postgres"),
 /// and return generated code artifacts.
 #[napi]
-pub fn compile_schema(schema_json: String, backend_name: Option<String>) -> napi::Result<GeneratedArtifacts> {
-    let schema: SchemaIr = serde_json::from_str(&schema_json)
-        .map_err(|err| napi::Error::from_reason(format!("failed to parse Schema IR JSON: {err}")))?;
+pub fn compile_schema(
+    schema_json: String,
+    backend_name: Option<String>,
+) -> napi::Result<GeneratedArtifacts> {
+    let schema: SchemaIr = serde_json::from_str(&schema_json).map_err(|err| {
+        napi::Error::from_reason(format!("failed to parse Schema IR JSON: {err}"))
+    })?;
 
     let is_postgres = backend_name
         .as_deref()
@@ -118,9 +122,13 @@ pub fn compile_schema(schema_json: String, backend_name: Option<String>) -> napi
 
 /// Validate a Schema IR JSON string against logical integrity rules and target backend.
 #[napi]
-pub fn validate_schema_json(schema_json: String, backend_name: Option<String>) -> napi::Result<bool> {
-    let schema: SchemaIr = serde_json::from_str(&schema_json)
-        .map_err(|err| napi::Error::from_reason(format!("failed to parse Schema IR JSON: {err}")))?;
+pub fn validate_schema_json(
+    schema_json: String,
+    backend_name: Option<String>,
+) -> napi::Result<bool> {
+    let schema: SchemaIr = serde_json::from_str(&schema_json).map_err(|err| {
+        napi::Error::from_reason(format!("failed to parse Schema IR JSON: {err}"))
+    })?;
 
     let is_postgres = backend_name
         .as_deref()
@@ -153,10 +161,12 @@ pub fn generate_migration(
     new_schema_json: String,
     backend_name: Option<String>,
 ) -> napi::Result<GeneratedMigration> {
-    let old_schema: SchemaIr = serde_json::from_str(&old_schema_json)
-        .map_err(|err| napi::Error::from_reason(format!("failed to parse old Schema IR JSON: {err}")))?;
-    let new_schema: SchemaIr = serde_json::from_str(&new_schema_json)
-        .map_err(|err| napi::Error::from_reason(format!("failed to parse new Schema IR JSON: {err}")))?;
+    let old_schema: SchemaIr = serde_json::from_str(&old_schema_json).map_err(|err| {
+        napi::Error::from_reason(format!("failed to parse old Schema IR JSON: {err}"))
+    })?;
+    let new_schema: SchemaIr = serde_json::from_str(&new_schema_json).map_err(|err| {
+        napi::Error::from_reason(format!("failed to parse new Schema IR JSON: {err}"))
+    })?;
 
     let is_postgres = backend_name
         .as_deref()

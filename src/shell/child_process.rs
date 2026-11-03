@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use crate::shell::parser::parse_shell_script;
 use crate::shell::vm::execute_pipeline_sequence;
-use crate::task::process::{run_command, CommandOptions, EnvEntry};
+use crate::task::process::{CommandOptions, EnvEntry, run_command};
 
 #[napi(object)]
 pub struct ChildProcessOptions {
@@ -45,12 +45,10 @@ pub async fn exec(command: String, options: Option<ChildProcessOptions>) -> Resu
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let env_map = opts.env.unwrap_or_else(|| {
-        std::env::vars().collect()
-    });
+    let env_map = opts.env.unwrap_or_else(|| std::env::vars().collect());
 
-    let seq = parse_shell_script(&command)
-        .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
+    let seq =
+        parse_shell_script(&command).map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
 
     let out = execute_pipeline_sequence(&seq, &cwd, &env_map).await;
 
@@ -204,9 +202,9 @@ pub fn exec_file_sync(
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = cmd
-        .output()
-        .map_err(|e| napi::Error::new(Status::GenericFailure, format!("execFileSync failed: {e}")))?;
+    let output = cmd.output().map_err(|e| {
+        napi::Error::new(Status::GenericFailure, format!("execFileSync failed: {e}"))
+    })?;
 
     if !output.status.success() {
         return Err(napi::Error::new(

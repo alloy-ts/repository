@@ -32,7 +32,11 @@ pub enum ValidationError {
     DefaultNowNonTimestamp { table: String, column: String },
 
     #[error("{table}.{column}: enum \"{enum_name}\" not declared in enums[]")]
-    UndefinedEnum { table: String, column: String, enum_name: String },
+    UndefinedEnum {
+        table: String,
+        column: String,
+        enum_name: String,
+    },
 
     #[error("{table}.{column}: default {default_val} is not a member of enum {enum_name}")]
     InvalidEnumDefault {
@@ -58,19 +62,36 @@ pub enum ValidationError {
     ForeignKeyLocalColumnNotFound { table: String, column: String },
 
     #[error("{table}: foreign key target '{target_table}.{target_column}' does not exist")]
-    ForeignKeyTargetColumnNotFound { table: String, target_table: String, target_column: String },
+    ForeignKeyTargetColumnNotFound {
+        table: String,
+        target_table: String,
+        target_column: String,
+    },
 
     #[error("{table}: foreign key type mismatch for '{column}'")]
-    ForeignKeyTypeMismatch { table: String, column: String, target_table: String, target_column: String },
+    ForeignKeyTypeMismatch {
+        table: String,
+        column: String,
+        target_table: String,
+        target_column: String,
+    },
 
     #[error("{table}: foreign key target {target_table}.{target_column} is not unique")]
-    ForeignKeyTargetNotUnique { table: String, target_table: String, target_column: String },
+    ForeignKeyTargetNotUnique {
+        table: String,
+        target_table: String,
+        target_column: String,
+    },
 
     #[error("{table}: unique constraint references missing column \"{column}\"")]
     UniqueConstraintColumnNotFound { table: String, column: String },
 
     #[error("{table}: index '{index}' references missing column \"{column}\"")]
-    IndexColumnNotFound { table: String, index: String, column: String },
+    IndexColumnNotFound {
+        table: String,
+        index: String,
+        column: String,
+    },
 
     #[error("index name \"{index}\" is used twice (global in Postgres)")]
     DuplicateIndexName { index: String },
@@ -80,7 +101,10 @@ pub enum ValidationError {
 }
 
 /// Validate a complete schema IR against logical integrity rules and target backend capabilities.
-pub fn validate_schema<B: Backend>(schema: &SchemaIr, backend: &B) -> Result<(), Vec<ValidationError>> {
+pub fn validate_schema<B: Backend>(
+    schema: &SchemaIr,
+    backend: &B,
+) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
 
     if schema.ir_version != crate::sql::ir::CURRENT_IR_VERSION {
@@ -159,7 +183,9 @@ pub fn validate_schema<B: Backend>(schema: &SchemaIr, backend: &B) -> Result<(),
             // Enum reference check
             if let Some(enum_name) = col.r#type.enum_name() {
                 if let Some(enum_def) = schema.enums.get(enum_name) {
-                    if let Some(DefaultValueIr::Literal(serde_json::Value::String(s))) = &col.default {
+                    if let Some(DefaultValueIr::Literal(serde_json::Value::String(s))) =
+                        &col.default
+                    {
                         if !enum_def.values.contains(s) {
                             errors.push(ValidationError::InvalidEnumDefault {
                                 table: table_name.clone(),
@@ -411,10 +437,7 @@ mod tests {
         let res = validate_schema(&schema, &SqliteBackend);
         assert!(res.is_err());
         let errs = res.unwrap_err();
-        assert!(matches!(
-            errs[0],
-            ValidationError::MaxLengthNonText { .. }
-        ));
+        assert!(matches!(errs[0], ValidationError::MaxLengthNonText { .. }));
     }
 
     #[test]

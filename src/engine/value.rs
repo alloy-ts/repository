@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
 use fusevm::Value;
-use napi::bindgen_prelude::*;
 use napi::Env;
+use napi::bindgen_prelude::*;
+use std::collections::{HashMap, HashSet};
 
 /// Typed Engine values: decoupling pure language values from NAPI and FuseVM internals.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -132,10 +132,7 @@ impl EngineValue {
                 let num = val.coerce_to_number()?.get_double()?;
                 if num == 0.0 && num.is_sign_negative() {
                     Ok(EngineValue::Float(num))
-                } else if num.is_finite()
-                    && num.fract() == 0.0
-                    && num.abs() <= 9007199254740991.0
-                {
+                } else if num.is_finite() && num.fract() == 0.0 && num.abs() <= 9007199254740991.0 {
                     Ok(EngineValue::Int(num as i64))
                 } else {
                     Ok(EngineValue::Float(num))

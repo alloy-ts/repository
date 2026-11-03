@@ -200,7 +200,10 @@ fn builtin_ls(args: &[String], cwd: &Path) -> BuiltinResult {
             }
         } else {
             exit_code = 1;
-            let err = format!("ls: cannot access '{}': No such file or directory\n", path.display());
+            let err = format!(
+                "ls: cannot access '{}': No such file or directory\n",
+                path.display()
+            );
             stderr.extend_from_slice(err.as_bytes());
         }
     }
@@ -240,23 +243,30 @@ fn builtin_rm(args: &[String], cwd: &Path) -> BuiltinResult {
                 if let Err(e) = fs::remove_dir_all(&target) {
                     if !force {
                         exit_code = 1;
-                        stderr.extend_from_slice(format!("rm: {}: {}\n", target.display(), e).as_bytes());
+                        stderr.extend_from_slice(
+                            format!("rm: {}: {}\n", target.display(), e).as_bytes(),
+                        );
                     }
                 }
             } else {
                 exit_code = 1;
-                stderr.extend_from_slice(format!("rm: {}: is a directory\n", target.display()).as_bytes());
+                stderr.extend_from_slice(
+                    format!("rm: {}: is a directory\n", target.display()).as_bytes(),
+                );
             }
         } else if target.is_file() || target.is_symlink() {
             if let Err(e) = fs::remove_file(&target) {
                 if !force {
                     exit_code = 1;
-                    stderr.extend_from_slice(format!("rm: {}: {}\n", target.display(), e).as_bytes());
+                    stderr
+                        .extend_from_slice(format!("rm: {}: {}\n", target.display(), e).as_bytes());
                 }
             }
         } else if !force {
             exit_code = 1;
-            stderr.extend_from_slice(format!("rm: {}: No such file or directory\n", target.display()).as_bytes());
+            stderr.extend_from_slice(
+                format!("rm: {}: No such file or directory\n", target.display()).as_bytes(),
+            );
         }
     }
 
@@ -290,7 +300,8 @@ fn builtin_cat(args: &[String], stdin_data: &[u8], cwd: &Path) -> BuiltinResult 
                 Ok(bytes) => stdout.extend_from_slice(&bytes),
                 Err(e) => {
                     exit_code = 1;
-                    stderr.extend_from_slice(format!("cat: {}: {}\n", path.display(), e).as_bytes());
+                    stderr
+                        .extend_from_slice(format!("cat: {}: {}\n", path.display(), e).as_bytes());
                 }
             }
         }
@@ -309,7 +320,7 @@ fn builtin_touch(args: &[String], cwd: &Path) -> BuiltinResult {
 
     for arg in args {
         let path = cwd.join(arg);
-        if let Err(e) = fs::OpenOptions::new().create(true).write(true).open(&path) {
+        if let Err(e) = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path) {
             exit_code = 1;
             stderr.extend_from_slice(format!("touch: {}: {}\n", path.display(), e).as_bytes());
         }
@@ -446,11 +457,7 @@ fn builtin_exit(args: &[String]) -> BuiltinResult {
 }
 
 fn builtin_yes(args: &[String]) -> BuiltinResult {
-    let msg = if args.is_empty() {
-        "y"
-    } else {
-        &args[0]
-    };
+    let msg = if args.is_empty() { "y" } else { &args[0] };
     // Generate a reasonable finite chunk for shell buffer
     let mut stdout = Vec::new();
     for _ in 0..100 {

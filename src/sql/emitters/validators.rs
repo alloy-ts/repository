@@ -24,9 +24,7 @@ pub fn emit_validators(schema: &SchemaIr) -> String {
                         out.push_str(&format!(
                             "        if let Some(ref val) = self.{field_name} {{\n"
                         ));
-                        out.push_str(&format!(
-                            "            if val.len() > {max_len} {{\n"
-                        ));
+                        out.push_str(&format!("            if val.len() > {max_len} {{\n"));
                         out.push_str(&format!(
                             "                errors.push(format!(\"field '{field_name}' length {{}} exceeds max {max_len}\", val.len()));\n"
                         ));

@@ -20,9 +20,7 @@ pub fn emit_ddl<B: Backend>(schema: &SchemaIr, backend: &B) -> String {
                 .map(|v| format!("'{}'", v.replace('\'', "''")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            out.push_str(&format!(
-                "CREATE TYPE {enum_name} AS ENUM ({values});\n\n"
-            ));
+            out.push_str(&format!("CREATE TYPE {enum_name} AS ENUM ({values});\n\n"));
         }
     }
 
@@ -45,7 +43,8 @@ pub fn emit_ddl<B: Backend>(schema: &SchemaIr, backend: &B) -> String {
             let mut line = String::new();
             line.push_str(&format!("    {col_name} "));
 
-            if sqlite_single_auto_pk && table.primary_key.as_ref().unwrap().columns[0] == *col_name {
+            if sqlite_single_auto_pk && table.primary_key.as_ref().unwrap().columns[0] == *col_name
+            {
                 line.push_str("INTEGER PRIMARY KEY AUTOINCREMENT");
             } else {
                 let sql_type = backend.sql_type(col, table_name, col_name);

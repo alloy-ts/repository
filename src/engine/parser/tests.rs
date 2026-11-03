@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::engine::parser::{tokenize, Parser};
-    use crate::engine::ast::{StmtKind, ExprKind, BinaryOp};
+    use crate::engine::ast::{BinaryOp, ExprKind, StmtKind};
+    use crate::engine::parser::{Parser, tokenize};
 
     #[test]
     fn test_lexer_and_parser_basic() {
@@ -15,7 +15,9 @@ mod tests {
             StmtKind::Let { name, value } => {
                 assert_eq!(name, "x");
                 match &value.kind {
-                    ExprKind::Binary { operator, right, .. } => {
+                    ExprKind::Binary {
+                        operator, right, ..
+                    } => {
                         assert_eq!(*operator, BinaryOp::Add);
                         match &right.kind {
                             ExprKind::Binary { operator, .. } => {

@@ -78,7 +78,7 @@ impl Parser {
                     format!("Expected variable name after 'let', got {:?}", other),
                     name_token.span.line,
                     name_token.span.column,
-                ))
+                ));
             }
         };
 
@@ -109,7 +109,7 @@ impl Parser {
                     format!("Expected function name after 'fn', got {:?}", other),
                     name_token.span.line,
                     name_token.span.column,
-                ))
+                ));
             }
         };
 
@@ -125,7 +125,7 @@ impl Parser {
                             format!("Expected parameter identifier, got {:?}", other),
                             param_tok.span.line,
                             param_tok.span.column,
-                        ))
+                        ));
                     }
                 }
 
@@ -136,7 +136,10 @@ impl Parser {
                 }
             }
         }
-        self.consume(TokenKind::RightParen, "Expected ')' after function parameters")?;
+        self.consume(
+            TokenKind::RightParen,
+            "Expected ')' after function parameters",
+        )?;
 
         let body = self.block_body()?;
         Ok(Stmt::new(
@@ -203,7 +206,10 @@ impl Parser {
         self.consume(TokenKind::RightParen, "Expected ')' after while condition")?;
 
         let body = self.block_body()?;
-        Ok(Stmt::new(StmtKind::While { condition, body }, while_token.span))
+        Ok(Stmt::new(
+            StmtKind::While { condition, body },
+            while_token.span,
+        ))
     }
 
     fn block_stmt(&mut self) -> Result<Stmt, EngineError> {

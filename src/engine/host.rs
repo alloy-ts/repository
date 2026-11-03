@@ -1,8 +1,8 @@
+use fusevm::{VM, Value};
+use napi::bindgen_prelude::*;
+use napi::{Env, check_status, sys};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use fusevm::{Value, VM};
-use napi::bindgen_prelude::*;
-use napi::{check_status, sys, Env};
 
 use crate::engine::compiler::EXT_HOST_CALL_BASE;
 use crate::engine::value::EngineValue;
@@ -18,7 +18,11 @@ impl HostRegistry {
         }
     }
 
-    pub fn register(&mut self, name: String, js_fn: Function<Unknown<'static>, Unknown<'static>>) -> Result<()> {
+    pub fn register(
+        &mut self,
+        name: String,
+        js_fn: Function<Unknown<'static>, Unknown<'static>>,
+    ) -> Result<()> {
         let fn_ref = js_fn.create_ref()?;
         self.functions.insert(name, Arc::new(fn_ref));
         Ok(())
@@ -36,7 +40,9 @@ impl HostRegistry {
         self.functions.is_empty()
     }
 
-    pub fn snapshot(&self) -> HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>> {
+    pub fn snapshot(
+        &self,
+    ) -> HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>> {
         self.functions.clone()
     }
 }
@@ -72,7 +78,9 @@ impl<'a> HostRuntime<'a> {
         }));
 
         let env_ptr = self.env as *const Env as usize;
-        let fn_map_ptr = &self.functions as *const HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>> as usize;
+        let fn_map_ptr = &self.functions
+            as *const HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>>
+            as usize;
         let err_clone = Arc::clone(&self.error);
 
         vm.set_extension_handler(Box::new(move |vm, id, argc| {
@@ -99,7 +107,13 @@ impl<'a> HostRuntime<'a> {
                 raw_args.reverse();
 
                 let env = unsafe { &*(env_ptr as *const Env) };
-                let fn_map = unsafe { &*(fn_map_ptr as *const HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>>) };
+                let fn_map = unsafe {
+                    &*(fn_map_ptr
+                        as *const HashMap<
+                            String,
+                            Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>,
+                        >)
+                };
 
                 let fn_ref = match fn_map.get(&fn_name) {
                     Some(r) => r,
@@ -165,7 +179,9 @@ impl<'a> HostRuntime<'a> {
                         if let Ok(u) = unknown_exc {
                             if let Ok(s) = u.coerce_to_string() {
                                 if let Ok(utf8) = s.into_utf8() {
-                                    utf8.into_owned().unwrap_or_else(|_| "Host function threw an exception".to_string())
+                                    utf8.into_owned().unwrap_or_else(|_| {
+                                        "Host function threw an exception".to_string()
+                                    })
                                 } else {
                                     "Host function threw an exception".to_string()
                                 }
@@ -178,7 +194,8 @@ impl<'a> HostRuntime<'a> {
                     } else {
                         "Host function threw an exception".to_string()
                     };
-                    *err_clone.lock().unwrap() = Some(napi::Error::new(Status::GenericFailure, err_msg));
+                    *err_clone.lock().unwrap() =
+                        Some(napi::Error::new(Status::GenericFailure, err_msg));
                     vm.push(Value::Undef);
                     vm.request_halt();
                     return;

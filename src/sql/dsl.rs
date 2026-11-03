@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::sql::naming::to_snake_case;
 
@@ -55,7 +55,11 @@ impl JsColumnBuilder {
         let mut m = (*self.meta).clone();
         m.primary_key = true;
         if let Some(opts) = opts {
-            if opts.get("autoIncrement").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if opts
+                .get("autoIncrement")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 m.auto_increment = true;
             }
         }
@@ -104,24 +108,32 @@ impl JsColumnBuilder {
     }
 
     #[napi]
-    pub fn references(&self, target_ref: serde_json::Value, opts: Option<serde_json::Value>) -> Result<Self> {
+    pub fn references(
+        &self,
+        target_ref: serde_json::Value,
+        opts: Option<serde_json::Value>,
+    ) -> Result<Self> {
         let (ref_table, ref_column) = if let Some(obj) = target_ref.as_object() {
             let table = obj
                 .get("$tableName")
                 .and_then(|t| t.as_str())
-                .ok_or_else(|| Error::from_reason("references() target object missing $tableName"))?;
+                .ok_or_else(|| {
+                    Error::from_reason("references() target object missing $tableName")
+                })?;
             let col = obj
                 .get("$name")
                 .and_then(|c| c.as_str())
                 .ok_or_else(|| Error::from_reason("references() target object missing $name"))?;
             (table.to_string(), col.to_string())
         } else if let Some(s) = target_ref.as_str() {
-            let (tbl, col) = s
-                .split_once('.')
-                .ok_or_else(|| Error::from_reason("references() target string must be table.column"))?;
+            let (tbl, col) = s.split_once('.').ok_or_else(|| {
+                Error::from_reason("references() target string must be table.column")
+            })?;
             (tbl.to_string(), col.to_string())
         } else {
-            return Err(Error::from_reason("references() expects target column or thunk result"));
+            return Err(Error::from_reason(
+                "references() expects target column or thunk result",
+            ));
         };
 
         let mut on_del = "no_action".to_string();
@@ -136,7 +148,13 @@ impl JsColumnBuilder {
             }
         }
 
-        const VALID_ACTIONS: &[&str] = &["no_action", "restrict", "cascade", "set_null", "set_default"];
+        const VALID_ACTIONS: &[&str] = &[
+            "no_action",
+            "restrict",
+            "cascade",
+            "set_null",
+            "set_default",
+        ];
         if !VALID_ACTIONS.contains(&on_del.as_str()) || !VALID_ACTIONS.contains(&on_upd.as_str()) {
             return Err(Error::from_reason("unknown referential action"));
         }
@@ -289,7 +307,9 @@ pub fn table_builder(
         if val.get_type()? == ValueType::Object {
             let obj = val.coerce_to_object()?;
             if let Ok(meta_val) = obj.get_named_property::<Unknown>("meta") {
-                let json_val: serde_json::Value = env.from_js_value(meta_val).unwrap_or(serde_json::Value::Null);
+                let json_val: serde_json::Value = env
+                    .from_js_value(meta_val)
+                    .unwrap_or(serde_json::Value::Null);
                 cols_val.insert(key, json_val);
                 continue;
             }
@@ -321,8 +341,16 @@ pub fn define_schema(config: serde_json::Value) -> Result<serde_json::Value> {
 
     let mut enums_out = Vec::new();
     for e in enums_arr {
-        let name = e.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-        let values = e.get("values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let name = e
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        let values = e
+            .get("values")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         enums_out.push(serde_json::json!({
             "name": name,
             "values": values
@@ -341,7 +369,9 @@ pub fn define_schema(config: serde_json::Value) -> Result<serde_json::Value> {
             .to_string();
 
         if !table_names.insert(table_name.clone()) {
-            return Err(Error::from_reason(format!("duplicate table names: \"{table_name}\"")));
+            return Err(Error::from_reason(format!(
+                "duplicate table names: \"{table_name}\""
+            )));
         }
 
         let mut columns_out = Vec::new();
@@ -434,7 +464,10 @@ pub fn define_schema(config: serde_json::Value) -> Result<serde_json::Value> {
         } else if let Some(existing_cols) = t.get("columns").and_then(|c| c.as_array()) {
             columns_out = existing_cols.clone();
             if let Some(pk) = t.get("primaryKey").and_then(|p| p.as_array()) {
-                primary_key_cols = pk.iter().filter_map(|s| s.as_str().map(|str| str.to_string())).collect();
+                primary_key_cols = pk
+                    .iter()
+                    .filter_map(|s| s.as_str().map(|str| str.to_string()))
+                    .collect();
             }
         }
 

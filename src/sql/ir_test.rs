@@ -121,7 +121,10 @@ pub fn validate(s: &Schema) -> Result<(), Vec<String>> {
                     None => e.push(format!("{at}: enum \"{name}\" not declared in enums[]")),
                     Some(en) => {
                         if let Some(Default::Literal { value }) = &c.default {
-                            if !value.as_str().is_some_and(|v| en.values.iter().any(|x| x == v)) {
+                            if !value
+                                .as_str()
+                                .is_some_and(|v| en.values.iter().any(|x| x == v))
+                            {
                                 e.push(format!(
                                     "{at}: default {value} is not a member of enum {name}"
                                 ));
@@ -176,9 +179,10 @@ pub fn validate(s: &Schema) -> Result<(), Vec<String>> {
                 continue;
             }
             for (l, r) in fk.columns.iter().zip(&fk.ref_columns) {
-                let (Some(lc), Some(rc)) =
-                    (cols.get(l.as_str()), rt.columns.iter().find(|c| &c.name == r))
-                else {
+                let (Some(lc), Some(rc)) = (
+                    cols.get(l.as_str()),
+                    rt.columns.iter().find(|c| &c.name == r),
+                ) else {
                     e.push(format!("{}: {} references missing column", t.name, fk.name));
                     continue;
                 };
@@ -199,17 +203,13 @@ pub fn validate(s: &Schema) -> Result<(), Vec<String>> {
             }
         }
     }
-    if e.is_empty() {
-        Ok(())
-    } else {
-        Err(e)
-    }
+    if e.is_empty() { Ok(()) } else { Err(e) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn base() -> Value {
         json!({
@@ -248,7 +248,9 @@ mod tests {
 
     fn set(v: &mut Value, ptr: &str, val: Value) {
         let (parent_ptr, field) = ptr.rsplit_once('/').expect("valid pointer");
-        let parent = v.pointer_mut(parent_ptr).unwrap_or_else(|| panic!("no such path {parent_ptr}"));
+        let parent = v
+            .pointer_mut(parent_ptr)
+            .unwrap_or_else(|| panic!("no such path {parent_ptr}"));
         if let Some(map) = parent.as_object_mut() {
             map.insert(field.to_string(), val);
         } else if let Some(arr) = parent.as_array_mut() {
@@ -260,7 +262,11 @@ mod tests {
     }
 
     fn push(v: &mut Value, ptr: &str, val: Value) {
-        v.pointer_mut(ptr).unwrap().as_array_mut().unwrap().push(val);
+        v.pointer_mut(ptr)
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(val);
     }
 
     fn errors(v: &Value) -> Vec<String> {
@@ -270,7 +276,10 @@ mod tests {
 
     fn assert_err(v: &Value, needle: &str) {
         let e = errors(v);
-        assert!(e.iter().any(|m| m.contains(needle)), "expected an error containing {needle:?}, got {e:?}");
+        assert!(
+            e.iter().any(|m| m.contains(needle)),
+            "expected an error containing {needle:?}, got {e:?}"
+        );
     }
 
     #[test]
@@ -337,21 +346,33 @@ mod tests {
     #[test]
     fn rejects_enum_default_that_is_not_a_member() {
         let mut v = base();
-        set(&mut v, "/tables/0/columns/4/default", json!({"kind": "literal", "value": "owner"}));
+        set(
+            &mut v,
+            "/tables/0/columns/4/default",
+            json!({"kind": "literal", "value": "owner"}),
+        );
         assert_err(&v, "is not a member of enum");
     }
 
     #[test]
     fn rejects_non_string_enum_default() {
         let mut v = base();
-        set(&mut v, "/tables/0/columns/4/default", json!({"kind": "literal", "value": 3}));
+        set(
+            &mut v,
+            "/tables/0/columns/4/default",
+            json!({"kind": "literal", "value": 3}),
+        );
         assert_err(&v, "is not a member of enum");
     }
 
     #[test]
     fn rejects_default_now_on_non_timestamp() {
         let mut v = base();
-        set(&mut v, "/tables/0/columns/3/default", json!({"kind": "now"}));
+        set(
+            &mut v,
+            "/tables/0/columns/3/default",
+            json!({"kind": "now"}),
+        );
         assert_err(&v, "defaultNow() only applies to timestamps");
     }
 
@@ -380,8 +401,16 @@ mod tests {
     #[test]
     fn rejects_duplicate_index_names_across_tables() {
         let mut v = base();
-        push(&mut v, "/tables/0/indexes", json!({"name": "dup", "columns": ["email"]}));
-        push(&mut v, "/tables/1/indexes", json!({"name": "dup", "columns": ["title"]}));
+        push(
+            &mut v,
+            "/tables/0/indexes",
+            json!({"name": "dup", "columns": ["email"]}),
+        );
+        push(
+            &mut v,
+            "/tables/1/indexes",
+            json!({"name": "dup", "columns": ["title"]}),
+        );
         assert_err(&v, "is used twice");
     }
 
@@ -395,14 +424,22 @@ mod tests {
     #[test]
     fn rejects_foreign_key_column_count_mismatch() {
         let mut v = base();
-        set(&mut v, "/tables/1/foreignKeys/0/refColumns", json!(["id", "id"]));
+        set(
+            &mut v,
+            "/tables/1/foreignKeys/0/refColumns",
+            json!(["id", "id"]),
+        );
         assert_err(&v, "column count mismatch");
     }
 
     #[test]
     fn rejects_foreign_key_to_missing_column() {
         let mut v = base();
-        set(&mut v, "/tables/1/foreignKeys/0/refColumns", json!(["ghost"]));
+        set(
+            &mut v,
+            "/tables/1/foreignKeys/0/refColumns",
+            json!(["ghost"]),
+        );
         assert_err(&v, "references missing column");
     }
 
@@ -424,7 +461,11 @@ mod tests {
     fn accepts_foreign_key_to_unique_non_primary_column() {
         let mut v = base();
         set(&mut v, "/tables/1/columns/2/type", json!({"kind": "text"}));
-        set(&mut v, "/tables/1/foreignKeys/0/refColumns", json!(["email"]));
+        set(
+            &mut v,
+            "/tables/1/foreignKeys/0/refColumns",
+            json!(["email"]),
+        );
         assert_eq!(errors(&v), Vec::<String>::new());
     }
 
@@ -446,7 +487,11 @@ mod tests {
     #[test]
     fn unknown_column_type_fails_to_parse() {
         let mut v = base();
-        set(&mut v, "/tables/0/columns/0/type", json!({"kind": "decimal"}));
+        set(
+            &mut v,
+            "/tables/0/columns/0/type",
+            json!({"kind": "decimal"}),
+        );
         assert!(serde_json::from_value::<Schema>(v).is_err());
     }
 }

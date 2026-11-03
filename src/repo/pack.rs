@@ -31,12 +31,12 @@ use gix_pack::data::output::entry::iter_from_counts::Options as EntryOptions;
 
 use crate::error::err_str;
 use crate::error::{err, parse_oid, thread_local};
-use crate::task::process::CancellationToken;
-use crate::task::process::cancellation_flag;
 use crate::progress::ProgressCallback;
 use crate::progress::ProgressEvent;
 use crate::repository::Repository;
 use crate::rev_walk::WalkOptions;
+use crate::task::process::CancellationToken;
+use crate::task::process::cancellation_flag;
 
 /// A single entry (full or delta object) within a pack data file, mirroring `gix_pack::data::Entry`.
 ///

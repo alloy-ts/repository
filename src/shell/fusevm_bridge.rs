@@ -1,7 +1,7 @@
 //! Integration of fusevm for shell scripting and expression evaluation.
 
+use fusevm::{ChunkBuilder, Op, VM, Value};
 use std::collections::HashMap;
-use fusevm::{ChunkBuilder, Op, Value, VM};
 
 use crate::shell::vm::ShellExecutionHost;
 

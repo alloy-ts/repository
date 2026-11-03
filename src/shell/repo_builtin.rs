@@ -1,9 +1,9 @@
 //! `repo` builtin implementation hooking into `src/repo/mod.rs` (gix-backed repository).
 
-use std::path::Path;
-use crate::repo::init::InitOptions;
 use crate::repo::Repository;
+use crate::repo::init::InitOptions;
 use crate::shell::builtins::BuiltinResult;
+use std::path::Path;
 
 pub fn builtin_repo(args: &[String], cwd: &Path) -> BuiltinResult {
     if args.is_empty() {

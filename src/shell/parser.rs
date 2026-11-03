@@ -1,7 +1,9 @@
 //! Shell tokenizer and parser supporting pipelines, redirections, variable assignments,
 //! command sequences (&&, ||, ;), and command substitution.
 
-use crate::shell::ast::{CommandNode, LogicalOp, PipelineNode, PipelineSequence, RedirectOp, Redirection};
+use crate::shell::ast::{
+    CommandNode, LogicalOp, PipelineNode, PipelineSequence, RedirectOp, Redirection,
+};
 
 pub fn parse_shell_script(input: &str) -> Result<PipelineSequence, String> {
     let mut parser = ShellParser::new(input);

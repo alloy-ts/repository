@@ -114,7 +114,8 @@ mod tests {
 
     #[test]
     fn test_compile_schema_sqlite() {
-        let artifacts = compile_schema(SAMPLE_SCHEMA_JSON.to_string(), Some("sqlite".to_string())).unwrap();
+        let artifacts =
+            compile_schema(SAMPLE_SCHEMA_JSON.to_string(), Some("sqlite".to_string())).unwrap();
 
         // Check Rust models
         assert!(artifacts.rust_models.contains("pub struct User {"));
@@ -127,15 +128,31 @@ mod tests {
         assert!(artifacts.diesel_schema.contains("diesel::table! {"));
         assert!(artifacts.diesel_schema.contains("users (id) {"));
         assert!(artifacts.diesel_schema.contains("posts (id) {"));
-        assert!(artifacts.diesel_schema.contains("diesel::joinable!(posts -> users (author_id));"));
+        assert!(
+            artifacts
+                .diesel_schema
+                .contains("diesel::joinable!(posts -> users (author_id));")
+        );
 
         // Check SQL DDL
         assert!(artifacts.sql_ddl.contains("PRAGMA foreign_keys = ON;"));
         assert!(artifacts.sql_ddl.contains("CREATE TABLE users ("));
-        assert!(artifacts.sql_ddl.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"));
-        assert!(artifacts.sql_ddl.contains("CHECK (role IN ('admin', 'editor', 'viewer'))"));
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("id INTEGER PRIMARY KEY AUTOINCREMENT")
+        );
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("CHECK (role IN ('admin', 'editor', 'viewer'))")
+        );
         assert!(artifacts.sql_ddl.contains("DEFAULT CURRENT_TIMESTAMP"));
-        assert!(artifacts.sql_ddl.contains("CREATE INDEX users_name_role_idx ON users (name, role);"));
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("CREATE INDEX users_name_role_idx ON users (name, role);")
+        );
 
         // Check NAPI bindings
         assert!(artifacts.napi_bindings.contains("#[napi(object)]"));
@@ -148,21 +165,42 @@ mod tests {
 
     #[test]
     fn test_compile_schema_postgres() {
-        let artifacts = compile_schema(SAMPLE_SCHEMA_JSON.to_string(), Some("postgres".to_string())).unwrap();
+        let artifacts =
+            compile_schema(SAMPLE_SCHEMA_JSON.to_string(), Some("postgres".to_string())).unwrap();
 
         // Check SQL DDL
-        assert!(artifacts.sql_ddl.contains("CREATE TYPE user_role AS ENUM ('admin', 'editor', 'viewer');"));
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("CREATE TYPE user_role AS ENUM ('admin', 'editor', 'viewer');")
+        );
         assert!(artifacts.sql_ddl.contains("id SERIAL NOT NULL"));
-        assert!(artifacts.sql_ddl.contains("created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"));
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+        );
 
         // Check Diesel schema uses Postgres types
-        assert!(artifacts.diesel_schema.contains("crate::sql_types::UserRole"));
-        assert!(artifacts.diesel_schema.contains("diesel::sql_types::Timestamptz"));
+        assert!(
+            artifacts
+                .diesel_schema
+                .contains("crate::sql_types::UserRole")
+        );
+        assert!(
+            artifacts
+                .diesel_schema
+                .contains("diesel::sql_types::Timestamptz")
+        );
 
         // Check Rust models
         assert!(artifacts.rust_models.contains("pub enum UserRole"));
         assert!(artifacts.rust_models.contains("diesel_derive_enum::DbEnum"));
-        assert!(artifacts.rust_models.contains("created_at: chrono::DateTime<chrono::Utc>"));
+        assert!(
+            artifacts
+                .rust_models
+                .contains("created_at: chrono::DateTime<chrono::Utc>")
+        );
     }
 
     #[test]
@@ -194,16 +232,37 @@ mod tests {
           }
         }"#;
 
-        let artifacts = compile_schema(all_types_schema.to_string(), Some("postgres".to_string())).unwrap();
+        let artifacts =
+            compile_schema(all_types_schema.to_string(), Some("postgres".to_string())).unwrap();
         assert!(artifacts.sql_ddl.contains("id BIGSERIAL NOT NULL"));
-        assert!(artifacts.sql_ddl.contains("double_col DOUBLE PRECISION NOT NULL"));
-        assert!(artifacts.sql_ddl.contains("bool_col BOOLEAN NOT NULL DEFAULT TRUE"));
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("double_col DOUBLE PRECISION NOT NULL")
+        );
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("bool_col BOOLEAN NOT NULL DEFAULT TRUE")
+        );
         assert!(artifacts.sql_ddl.contains("uuid_col UUID NOT NULL"));
         assert!(artifacts.sql_ddl.contains("json_col JSONB NOT NULL"));
-        assert!(artifacts.sql_ddl.contains("timestamptz_col TIMESTAMPTZ NOT NULL DEFAULT NOW()"));
+        assert!(
+            artifacts
+                .sql_ddl
+                .contains("timestamptz_col TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+        );
 
-        assert!(artifacts.diesel_schema.contains("diesel::sql_types::BigInt"));
-        assert!(artifacts.diesel_schema.contains("diesel::sql_types::Double"));
+        assert!(
+            artifacts
+                .diesel_schema
+                .contains("diesel::sql_types::BigInt")
+        );
+        assert!(
+            artifacts
+                .diesel_schema
+                .contains("diesel::sql_types::Double")
+        );
         assert!(artifacts.diesel_schema.contains("diesel::sql_types::Uuid"));
         assert!(artifacts.diesel_schema.contains("diesel::sql_types::Jsonb"));
         assert!(artifacts.diesel_schema.contains("crate::sql_types::Status"));
@@ -211,7 +270,10 @@ mod tests {
 
     #[test]
     fn test_validate_schema_json() {
-        assert!(validate_schema_json(SAMPLE_SCHEMA_JSON.to_string(), Some("sqlite".to_string())).is_ok());
+        assert!(
+            validate_schema_json(SAMPLE_SCHEMA_JSON.to_string(), Some("sqlite".to_string()))
+                .is_ok()
+        );
 
         // Test with invalid schema JSON
         let invalid_json = SAMPLE_SCHEMA_JSON.replace("\"nullable\": false", "\"nullable\": true");

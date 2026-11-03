@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Version identifier for the IR format to protect against format mismatches.
 pub const CURRENT_IR_VERSION: u32 = 1;
@@ -48,7 +48,8 @@ where
                     #[serde(default, alias = "rust_name")]
                     rust_name: Option<String>,
                 }
-                let item: EnumDefItem = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+                let item: EnumDefItem =
+                    serde_json::from_value(v).map_err(serde::de::Error::custom)?;
                 out.insert(
                     item.name,
                     EnumIr {
@@ -59,7 +60,9 @@ where
             }
             Ok(out)
         }
-        _ => Err(serde::de::Error::custom("expected object or array for enums")),
+        _ => Err(serde::de::Error::custom(
+            "expected object or array for enums",
+        )),
     }
 }
 
@@ -86,11 +89,20 @@ where
                     name: String,
                     #[serde(default, deserialize_with = "deserialize_columns")]
                     columns: BTreeMap<String, ColumnIr>,
-                    #[serde(default, alias = "primary_key", deserialize_with = "deserialize_primary_key")]
+                    #[serde(
+                        default,
+                        alias = "primary_key",
+                        deserialize_with = "deserialize_primary_key"
+                    )]
                     primary_key: Option<PrimaryKeyIr>,
                     #[serde(default, alias = "foreign_keys", alias = "foreignKeys")]
                     foreign_keys: Vec<ForeignKeyIr>,
-                    #[serde(default, alias = "uniques", alias = "unique_constraints", alias = "uniqueConstraints")]
+                    #[serde(
+                        default,
+                        alias = "uniques",
+                        alias = "unique_constraints",
+                        alias = "uniqueConstraints"
+                    )]
                     unique_constraints: Vec<UniqueConstraintIr>,
                     #[serde(default)]
                     indexes: Vec<IndexIr>,
@@ -101,7 +113,8 @@ where
                     #[serde(default, alias = "rust_name")]
                     rust_name: Option<String>,
                 }
-                let item: TableItem = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+                let item: TableItem =
+                    serde_json::from_value(v).map_err(serde::de::Error::custom)?;
                 out.insert(
                     item.name,
                     TableIr {
@@ -118,7 +131,9 @@ where
             }
             Ok(out)
         }
-        _ => Err(serde::de::Error::custom("expected object or array for tables")),
+        _ => Err(serde::de::Error::custom(
+            "expected object or array for tables",
+        )),
     }
 }
 
@@ -178,13 +193,22 @@ pub struct TableIr {
     #[serde(default, deserialize_with = "deserialize_columns")]
     pub columns: BTreeMap<String, ColumnIr>,
     /// Primary key constraint (composite or single).
-    #[serde(default, alias = "primary_key", deserialize_with = "deserialize_primary_key")]
+    #[serde(
+        default,
+        alias = "primary_key",
+        deserialize_with = "deserialize_primary_key"
+    )]
     pub primary_key: Option<PrimaryKeyIr>,
     /// Foreign key constraints on this table.
     #[serde(default, alias = "foreign_keys", alias = "foreignKeys")]
     pub foreign_keys: Vec<ForeignKeyIr>,
     /// Unique constraints across one or more columns.
-    #[serde(default, alias = "uniques", alias = "unique_constraints", alias = "uniqueConstraints")]
+    #[serde(
+        default,
+        alias = "uniques",
+        alias = "unique_constraints",
+        alias = "uniqueConstraints"
+    )]
     pub unique_constraints: Vec<UniqueConstraintIr>,
     /// Secondary indexes defined on this table.
     #[serde(default)]
@@ -209,7 +233,8 @@ where
         serde_json::Value::Object(map) => {
             let mut out = BTreeMap::new();
             for (k, v) in map {
-                let mut item: ColumnIr = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+                let mut item: ColumnIr =
+                    serde_json::from_value(v).map_err(serde::de::Error::custom)?;
                 if item.key.is_empty() {
                     item.key = k.clone();
                 }
@@ -241,7 +266,8 @@ where
                     #[serde(default, alias = "rust_name")]
                     rust_name: Option<String>,
                 }
-                let item: ColumnItem = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+                let item: ColumnItem =
+                    serde_json::from_value(v).map_err(serde::de::Error::custom)?;
                 out.insert(
                     item.name.clone(),
                     ColumnIr {
@@ -258,7 +284,9 @@ where
             }
             Ok(out)
         }
-        _ => Err(serde::de::Error::custom("expected object or array for columns")),
+        _ => Err(serde::de::Error::custom(
+            "expected object or array for columns",
+        )),
     }
 }
 
@@ -286,10 +314,13 @@ where
             }
         }
         Some(serde_json::Value::Object(_)) => {
-            let obj: PrimaryKeyIr = serde_json::from_value(value.unwrap()).map_err(serde::de::Error::custom)?;
+            let obj: PrimaryKeyIr =
+                serde_json::from_value(value.unwrap()).map_err(serde::de::Error::custom)?;
             Ok(Some(obj))
         }
-        _ => Err(serde::de::Error::custom("invalid primary key representation")),
+        _ => Err(serde::de::Error::custom(
+            "invalid primary key representation",
+        )),
     }
 }
 
@@ -411,7 +442,9 @@ impl<'de> Deserialize<'de> for ColumnType {
                     map
                 )))
             }
-            _ => Err(serde::de::Error::custom("expected string or object for column type")),
+            _ => Err(serde::de::Error::custom(
+                "expected string or object for column type",
+            )),
         }
     }
 }
@@ -538,10 +571,20 @@ pub struct ForeignKeyIr {
     /// Local column names.
     pub columns: Vec<String>,
     /// Referenced target table name.
-    #[serde(alias = "target_table", alias = "ref_table", alias = "targetTable", alias = "refTable")]
+    #[serde(
+        alias = "target_table",
+        alias = "ref_table",
+        alias = "targetTable",
+        alias = "refTable"
+    )]
     pub target_table: String,
     /// Referenced target column names.
-    #[serde(alias = "target_columns", alias = "ref_columns", alias = "targetColumns", alias = "refColumns")]
+    #[serde(
+        alias = "target_columns",
+        alias = "ref_columns",
+        alias = "targetColumns",
+        alias = "refColumns"
+    )]
     pub target_columns: Vec<String>,
     /// Action on parent row deletion.
     #[serde(default, alias = "on_delete")]
