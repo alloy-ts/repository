@@ -4,6 +4,7 @@ pub mod compiler;
 pub mod errors;
 pub mod functions;
 pub mod host;
+pub mod lexer;
 pub mod parser;
 pub mod symbols;
 pub mod token;
@@ -22,7 +23,8 @@ use crate::engine::async_run::RunAsyncTask;
 use crate::engine::compiler::Compiler;
 use crate::engine::errors::EngineError;
 use crate::engine::host::{HostRegistry, HostRuntime};
-use crate::engine::parser::{Parser, tokenize};
+use crate::engine::lexer::tokenize;
+use crate::engine::parser::Parser;
 use crate::engine::value::EngineValue;
 
 fn create_engine_error(env: &Env, err: &EngineError) -> napi::Error {
