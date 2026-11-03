@@ -1,11 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use fusevm::Value;
 use napi::bindgen_prelude::*;
 use napi::Env;
 
 /// Typed Engine values: decoupling pure language values from NAPI and FuseVM internals.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
 pub enum EngineValue {
     Undef,
     Null,
@@ -112,6 +111,15 @@ impl EngineValue {
     }
 
     pub fn from_js<'env>(env: &'env Env, val: Unknown<'env>) -> Result<Self> {
+        let mut seen = Vec::new();
+        Self::from_js_inner(env, val, &mut seen)
+    }
+
+    fn from_js_inner<'env>(
+        env: &'env Env,
+        val: Unknown<'env>,
+        seen: &mut Vec<sys::napi_value>,
+    ) -> Result<Self> {
         let vtype = val.get_type()?;
         match vtype {
             ValueType::Undefined => Ok(EngineValue::Undef),
@@ -122,7 +130,12 @@ impl EngineValue {
             }
             ValueType::Number => {
                 let num = val.coerce_to_number()?.get_double()?;
-                if num.is_finite() && num.fract() == 0.0 && num >= (i64::MIN as f64) && num <= (i64::MAX as f64) {
+                if num == 0.0 && num.is_sign_negative() {
+                    Ok(EngineValue::Float(num))
+                } else if num.is_finite()
+                    && num.fract() == 0.0
+                    && num.abs() <= 9007199254740991.0
+                {
                     Ok(EngineValue::Int(num as i64))
                 } else {
                     Ok(EngineValue::Float(num))
@@ -133,14 +146,29 @@ impl EngineValue {
                 Ok(EngineValue::String(s))
             }
             ValueType::Object => {
+                let raw_val = val.raw();
+                for &seen_val in seen.iter() {
+                    let mut is_equal = false;
+                    unsafe {
+                        napi::sys::napi_strict_equals(env.raw(), raw_val, seen_val, &mut is_equal);
+                    }
+                    if is_equal {
+                        return Err(napi::Error::new(
+                            Status::InvalidArg,
+                            "Cyclic object references are not supported",
+                        ));
+                    }
+                }
+                seen.push(raw_val);
+
                 let obj = unsafe { val.cast::<Object>() }?;
-                if obj.is_array()? {
+                let res = if obj.is_array()? {
                     let arr = unsafe { val.cast::<Array>() }?;
                     let len = arr.len();
                     let mut vec = Vec::with_capacity(len as usize);
                     for i in 0..len {
                         if let Some(elem) = arr.get::<Unknown>(i)? {
-                            vec.push(Self::from_js(env, elem)?);
+                            vec.push(Self::from_js_inner(env, elem, seen)?);
                         } else {
                             vec.push(EngineValue::Undef);
                         }
@@ -151,15 +179,31 @@ impl EngineValue {
                     let mut map = HashMap::new();
                     for key in keys {
                         if let Some(elem) = obj.get::<Unknown>(&key)? {
-                            map.insert(key, Self::from_js(env, elem)?);
+                            map.insert(key, Self::from_js_inner(env, elem, seen)?);
                         }
                     }
                     Ok(EngineValue::Object(map))
-                }
+                };
+                seen.pop();
+                res
             }
+            ValueType::Function => Err(napi::Error::new(
+                Status::InvalidArg,
+                "Functions cannot be passed directly as values",
+            )),
+            ValueType::Symbol => Err(napi::Error::new(
+                Status::InvalidArg,
+                "Symbols are not supported as values",
+            )),
             _ => {
                 if let Ok(bigint) = unsafe { val.cast::<BigInt>() } {
-                    let (val, _lossless) = bigint.get_i64();
+                    let (val, lossless) = bigint.get_i64();
+                    if !lossless {
+                        return Err(napi::Error::new(
+                            Status::InvalidArg,
+                            "BigInt value exceeds 64-bit integer range",
+                        ));
+                    }
                     return Ok(EngineValue::Int(val));
                 }
                 Ok(EngineValue::Undef)

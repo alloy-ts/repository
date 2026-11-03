@@ -8,7 +8,7 @@ use crate::engine::compiler::EXT_HOST_CALL_BASE;
 use crate::engine::value::EngineValue;
 
 pub struct HostRegistry {
-    functions: HashMap<String, FunctionRef<Unknown<'static>, Unknown<'static>>>,
+    functions: HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>>,
 }
 
 impl HostRegistry {
@@ -20,7 +20,7 @@ impl HostRegistry {
 
     pub fn register(&mut self, name: String, js_fn: Function<Unknown<'static>, Unknown<'static>>) -> Result<()> {
         let fn_ref = js_fn.create_ref()?;
-        self.functions.insert(name, fn_ref);
+        self.functions.insert(name, Arc::new(fn_ref));
         Ok(())
     }
 
@@ -36,23 +36,27 @@ impl HostRegistry {
         self.functions.is_empty()
     }
 
-    pub fn get_ref(&self, name: &str) -> Option<&FunctionRef<Unknown<'static>, Unknown<'static>>> {
-        self.functions.get(name)
+    pub fn snapshot(&self) -> HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>> {
+        self.functions.clone()
     }
 }
 
 pub struct HostRuntime<'a> {
     env: &'a Env,
-    registry: &'a HostRegistry,
+    functions: HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>>,
     stdout: Arc<Mutex<String>>,
     error: Arc<Mutex<Option<napi::Error>>>,
 }
 
 impl<'a> HostRuntime<'a> {
-    pub fn new(env: &'a Env, registry: &'a HostRegistry, stdout: Arc<Mutex<String>>) -> Self {
+    pub fn new(
+        env: &'a Env,
+        functions: HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>>,
+        stdout: Arc<Mutex<String>>,
+    ) -> Self {
         Self {
             env,
-            registry,
+            functions,
             stdout,
             error: Arc::new(Mutex::new(None)),
         }
@@ -67,37 +71,21 @@ impl<'a> HostRuntime<'a> {
             }
         }));
 
-        // Extension handler for host function calls
         let env_ptr = self.env as *const Env as usize;
-        let reg_ptr = self.registry as *const HostRegistry as usize;
+        let fn_map_ptr = &self.functions as *const HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>> as usize;
         let err_clone = Arc::clone(&self.error);
 
         vm.set_extension_handler(Box::new(move |vm, id, argc| {
+            if err_clone.lock().unwrap().is_some() {
+                vm.request_halt();
+                return;
+            }
+
             if id >= EXT_HOST_CALL_BASE {
                 let name_idx = (id - EXT_HOST_CALL_BASE) as usize;
                 let fn_name = match vm.chunk.names.get(name_idx) {
                     Some(n) => n.clone(),
                     None => {
-                        vm.push(Value::Undef);
-                        return;
-                    }
-                };
-
-                let env = unsafe { &*(env_ptr as *const Env) };
-                let registry = unsafe { &*(reg_ptr as *const HostRegistry) };
-
-                let fn_ref = match registry.get_ref(&fn_name) {
-                    Some(r) => r,
-                    None => {
-                        vm.push(Value::Undef);
-                        return;
-                    }
-                };
-
-                let js_fn = match fn_ref.borrow_back(env) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        *err_clone.lock().unwrap() = Some(e);
                         vm.push(Value::Undef);
                         return;
                     }
@@ -110,6 +98,27 @@ impl<'a> HostRuntime<'a> {
                 }
                 raw_args.reverse();
 
+                let env = unsafe { &*(env_ptr as *const Env) };
+                let fn_map = unsafe { &*(fn_map_ptr as *const HashMap<String, Arc<FunctionRef<Unknown<'static>, Unknown<'static>>>>) };
+
+                let fn_ref = match fn_map.get(&fn_name) {
+                    Some(r) => r,
+                    None => {
+                        vm.push(Value::Undef);
+                        return;
+                    }
+                };
+
+                let js_fn = match fn_ref.borrow_back(env) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        *err_clone.lock().unwrap() = Some(e);
+                        vm.push(Value::Undef);
+                        vm.request_halt();
+                        return;
+                    }
+                };
+
                 // Convert arguments to JS values
                 let mut js_args: Vec<sys::napi_value> = Vec::with_capacity(raw_args.len());
                 for arg in raw_args {
@@ -119,12 +128,12 @@ impl<'a> HostRuntime<'a> {
                         Err(e) => {
                             *err_clone.lock().unwrap() = Some(e);
                             vm.push(Value::Undef);
+                            vm.request_halt();
                             return;
                         }
                     }
                 }
 
-                // Call the JavaScript function directly via sys::napi_call_function
                 let mut raw_this = std::ptr::null_mut();
                 if let Err(e) = check_status!(
                     unsafe { sys::napi_get_undefined(env.raw(), &mut raw_this) },
@@ -132,6 +141,7 @@ impl<'a> HostRuntime<'a> {
                 ) {
                     *err_clone.lock().unwrap() = Some(e);
                     vm.push(Value::Undef);
+                    vm.request_halt();
                     return;
                 }
 
@@ -170,6 +180,7 @@ impl<'a> HostRuntime<'a> {
                     };
                     *err_clone.lock().unwrap() = Some(napi::Error::new(Status::GenericFailure, err_msg));
                     vm.push(Value::Undef);
+                    vm.request_halt();
                     return;
                 }
 
@@ -181,11 +192,11 @@ impl<'a> HostRuntime<'a> {
                     Err(e) => {
                         *err_clone.lock().unwrap() = Some(e);
                         vm.push(Value::Undef);
+                        vm.request_halt();
                     }
                 }
             }
         }));
-
     }
 
     pub fn take_error(&mut self) -> Option<napi::Error> {

@@ -24,6 +24,7 @@ impl Task for RunAsyncTask {
     fn compute(&mut self) -> Result<Self::Output> {
         let mut vm = VM::new(self.chunk.clone());
 
+        #[cfg(feature = "jit")]
         if self.jit {
             vm.enable_tracing_jit();
         }

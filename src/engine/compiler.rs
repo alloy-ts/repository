@@ -285,10 +285,15 @@ impl Compiler {
             ExprKind::Variable(name) => {
                 if let Ok(slot) = self.symbols.resolve(name) {
                     self.builder.emit(Op::GetSlot(slot), line);
-                } else {
-                    // Fall back to named variable/global
+                } else if self.global_names.contains(name) {
                     let name_idx = self.builder.add_name(name);
                     self.builder.emit(Op::GetVar(name_idx), line);
+                } else {
+                    return Err(EngineError::compile(
+                        format!("Undefined variable: {name}"),
+                        expr.span.line,
+                        expr.span.column,
+                    ));
                 }
             }
 

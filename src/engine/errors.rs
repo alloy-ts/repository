@@ -41,6 +41,13 @@ impl EngineError {
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::RuntimeError, message, 0, 0)
     }
+
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            ErrorKind::LexerError | ErrorKind::ParseError | ErrorKind::CompileError => "COMPILE_ERROR",
+            ErrorKind::RuntimeError => "RUNTIME_ERROR",
+        }
+    }
 }
 
 impl fmt::Display for EngineError {

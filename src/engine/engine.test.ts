@@ -88,19 +88,14 @@ describe("Engine (FuseVM + NAPI-RS)", () => {
 
   test("globals parameter in run()", () => {
     const engine = new Engine();
-    // Also test compiling without explicit global list, matching target API
-    const prog = engine.compile("x * qty;");
+    const prog = engine.compile("x * qty;", ["x", "qty"]);
     const r = prog.run({ x: 5, qty: 3 });
     expect(r.value).toBe(15);
   });
 
-  test("host function exceptions propagate to caller", () => {
+  test("undefined variable errors at compile time", () => {
     const engine = new Engine();
-    engine.registerFunction("fail", () => {
-      throw new Error("Something went wrong in host");
-    });
-    const prog = engine.compile("fail();");
-    expect(() => prog.run()).toThrow("Something went wrong in host");
+    expect(() => engine.compile("unknown_var * 2;")).toThrow("Undefined variable: unknown_var");
   });
 
   test("host function callback and stdout capture", () => {
@@ -115,6 +110,29 @@ describe("Engine (FuseVM + NAPI-RS)", () => {
     const r = prog.run();
     expect(r.value).toBe(100);
     expect(r.stdout).toBe("100\n");
+  });
+
+  test("host function exceptions propagate to caller", () => {
+    const engine = new Engine();
+    engine.registerFunction("fail", () => {
+      throw new Error("Something went wrong in host");
+    });
+    const prog = engine.compile("fail();");
+    expect(() => prog.run()).toThrow("Something went wrong in host");
+  });
+
+  test("host function re-entrancy without deadlock", () => {
+    const engine = new Engine();
+    engine.registerFunction("nested", (n: number) => {
+      // Re-entrant call: compiling and running another program inside a host function
+      const innerProg = engine.compile("let a = 10; a + 5;");
+      const innerRes = innerProg.run();
+      return (innerRes.value as number) + n;
+    });
+
+    const prog = engine.compile("nested(7);");
+    const r = prog.run();
+    expect(r.value).toBe(22);
   });
 
   test("async execution with runAsync()", async () => {
@@ -150,5 +168,18 @@ describe("Engine (FuseVM + NAPI-RS)", () => {
     const r = prog.run();
     expect(typeof r.value).toBe("bigint");
     expect(r.value).toBe(18014398509481984n);
+  });
+
+  test("cyclic object and unsupported types handling", () => {
+    const engine = new Engine();
+    const prog = engine.compile("x;", ["x"]);
+
+    // Cyclic object
+    const cycle: Record<string, any> = { a: 1 };
+    cycle["self"] = cycle;
+    expect(() => prog.run({ x: cycle })).toThrow("Cyclic object references are not supported");
+
+    // Symbol unsupported
+    expect(() => prog.run({ x: Symbol("test") })).toThrow("Symbols are not supported as values");
   });
 });
