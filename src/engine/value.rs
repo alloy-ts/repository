@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use fusevm::Value;
 use napi::bindgen_prelude::*;
 use napi::Env;

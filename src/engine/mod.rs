@@ -26,15 +26,16 @@ use crate::engine::errors::EngineError;
 use crate::engine::value::EngineValue;
 
 fn create_engine_error(env: &Env, err: &EngineError) -> napi::Error {
-    let mut js_err = napi::Error::new(Status::GenericFailure, err.message.clone());
-    // Attach code, line, and column properties
-    if let Ok(mut obj) = Object::new(env) {
-        let _ = obj.set("code", err.code());
-        let _ = obj.set("line", err.line as u32);
-        let _ = obj.set("column", err.column as u32);
-        let _ = obj.set("message", err.message.clone());
+    let js_err = napi::Error::new(Status::GenericFailure, err.message.clone());
+    if let Ok(mut err_obj) = js_err.into_unknown(env).and_then(|u| u.coerce_to_object()) {
+        let _ = err_obj.set("code", err.code());
+        let _ = err_obj.set("line", err.line as u32);
+        let _ = err_obj.set("column", err.column as u32);
+        if let Ok(u) = err_obj.into_unknown(env) {
+            return napi::Error::from_unknown_without_coercion(u);
+        }
     }
-    js_err
+    napi::Error::new(Status::GenericFailure, err.message.clone())
 }
 
 #[napi(object)]
