@@ -13,6 +13,7 @@ mod output;
 #[cfg(feature = "gpg")]
 mod pgp;
 mod req;
+pub mod engine;
 pub mod sql;
 pub mod task;
 pub(crate) use task::process;
