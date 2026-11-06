@@ -410,6 +410,7 @@ impl OpStoreTrait for SimpleOpStore {
 }
 
 /// NAPI-exposed handle to an OpStore.
+#[derive(Clone)]
 #[napi]
 pub struct OpStore {
     pub(crate) inner: Arc<dyn OpStoreTrait>,

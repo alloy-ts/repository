@@ -1,14 +1,14 @@
-# Jujutsu (jj) Op-Heads-Store & Op-Store NAPI Bindings
+# Jujutsu (jj) Op-Heads-Store, Op-Store & Backend Storage NAPI Bindings
 
-This document describes the Jujutsu (`jj-lib`) operation logging, operation heads store (`op-heads-store`), operation store (`op-store`), backend storage, and repository bindings.
+This document describes the Jujutsu (`jj-lib`) operation logging, operation heads store (`op-heads-store`), operation store (`op-store`), backend storage, caching `Store`, and repository bindings.
 
 ## Overview
 
-In Jujutsu, repository state transitions are represented as an operation DAG (`Operation`), where each operation points to parent operations and records:
+In Jujutsu, repository state transitions are represented as an operation DAG (`Operation`), where each operation points to parent operations (`parentIds`) and records:
 
 - An operation ID (`OperationId`)
 - A view ID (`ViewId`) describing root commit heads, bookmarks, tags, and working copy checkouts
-- Operation metadata (`OpMetadata`) including description, timestamp range, host, user, and snapshot flag
+- Operation metadata (`OpMetadata`) including description, timestamp range, host, user, snapshot flag, and commit predecessors
 
 The operation heads store (`OpHeadsStore`) tracks the current leaf heads of this operation DAG and handles concurrent multi-head resolution.
 
@@ -16,9 +16,11 @@ The operation heads store (`OpHeadsStore`) tracks the current leaf heads of this
 
 ### Detection and Initialisation
 
-- `repo.isOpRepo()` / `repo.hasOpStore()`: Returns `true` if `.git/repo/op_store/` or `.jj/` is present.
-- `repo.initOpRepo()`: Initialises `.git/repo/op_store/` and `.git/repo/op_heads/` with a root view and operation.
-- `init.storeOp`: When set to `true` during `Repository.initOpts({ storeOp: true })`, the repository is initialised with both a Git object store and an op store.
+- `repo.isOpRepo()` / `repo.hasOpStore()`: Returns `true` if `<git-dir>/ops` or configured `init.opsDir` exists.
+- `repo.initOpRepo()`: Initialises `<git-dir>/ops/op_store/` and `<git-dir>/ops/op_heads/` with a root view and operation.
+- `repo.initOpRepoAt(opsDir)`: Initialises operation store files at the designated directory.
+- `InitOptions.storeOp`: When set to `true` during `Repository.initOpts({ storeOp: true, opsDir?: string })`, initialises the repository with both a Git object store and an op store.
+- `InitOptions.opsDir`: Customises operation store directory path, defaulting to `<git-dir>/ops` (persisted in config `init.opsDir`).
 
 ### Loose Object Store Cache Mode
 
@@ -32,7 +34,7 @@ When an op store is present:
 
 ### `Operation`
 
-Represents an operation (transaction) on the repository view.
+Represents an operation (transaction) on the repository view, maintaining a reference to its parent `OpStore`.
 
 ```ts
 class Operation {
@@ -42,13 +44,21 @@ class Operation {
     parents: string[],
     description: string,
     metadata?: Record<string, string>,
+    opStore?: OpStore,
   );
 
-  id(): string;
-  viewId(): string;
-  parents(): string[];
+  id(): OperationId;
+  viewId(): ViewId;
+  parentIds(): OperationId[];
+  parents(): Operation[];
+  view(): View | null;
+  metadata(): OpMetadata;
   description(): string;
-  metadata(): Record<string, string>;
+  opStore(): OpStore | null;
+  storesCommitPredecessors(): boolean;
+  predecessorsForCommit(commitId: string): string[] | null;
+  allReferencedCommitIds(): string[];
+  storeOperation(): OperationRecord;
   toRecord(): OperationRecord;
 
   // Convert a single Commit object into an Operation, mapping any parent operations or parent commit IDs
@@ -107,11 +117,13 @@ class View {
 }
 ```
 
-### `SimpleBackend`
+### `SimpleBackend` & `Store`
 
 ```ts
 const COMMIT_ID_LENGTH: number = 64;
 const CHANGE_ID_LENGTH: number = 16;
+const COMMIT_CACHE_CAPACITY: number = 100;
+const TREE_CACHE_CAPACITY: number = 1000;
 
 class SimpleBackend {
   static init(storePath: string): SimpleBackend;
@@ -131,6 +143,26 @@ class SimpleBackend {
   writeTree(contents: string): string;
   readCommit(id: string): string;
   writeCommit(commitData: string): string;
+}
+
+class Store {
+  constructor(backend: SimpleBackend);
+  static init(storePath: string): Store;
+  commitIdLength(): number;
+  changeIdLength(): number;
+  rootCommitId(): string;
+  rootChangeId(): string;
+  emptyTreeId(): string;
+  concurrency(): number;
+  getCommit(id: string): string;
+  writeCommit(commitData: string): string;
+  getTree(id: string): string;
+  writeTree(contents: string): string;
+  readFile(id: string): string;
+  writeFile(contents: string): string;
+  readSymlink(id: string): string;
+  writeSymlink(contents: string): string;
+  clearCaches(): void;
 }
 ```
 

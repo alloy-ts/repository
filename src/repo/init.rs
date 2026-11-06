@@ -4,7 +4,7 @@ use napi_derive::napi;
 
 use crate::error::{err, err_str, thread_local};
 use crate::object::lossy;
-use crate::repository::{OpenOptions, Repository, to_gix_open_options};
+use crate::repository::{to_gix_open_options, OpenOptions, Repository};
 
 /// Options controlling [`Repository::init_opts`] (repository creation).
 #[napi(object)]
@@ -32,6 +32,8 @@ pub struct InitOptions {
     /// When `true` (or configured via `init.storeOp`), initialises the repository with both a
     /// git object store and an operation store (`op_store`).
     pub store_op: Option<bool>,
+    /// Directory path for operation store files (mirrors config `init.opsDir`), defaulting to `<git-dir>/ops`.
+    pub ops_dir: Option<String>,
 }
 
 fn to_gix_create_options(o: &InitOptions) -> gix::create::Options {
@@ -145,15 +147,34 @@ impl Repository {
             Some(v) => v,
             None => {
                 let r = thread_local(&repo.inner);
-                r.config_snapshot()
-                    .boolean("init.storeOp")
-                    .unwrap_or(false)
+                r.config_snapshot().boolean("init.storeOp").unwrap_or(false)
             }
         };
 
-        if store_op_enabled {
-            repo.init_op_repo()?;
+        let configured_ops_dir = match options.ops_dir.as_deref() {
+            Some(d) => Some(d.to_string()),
+            None => {
+                let r = thread_local(&repo.inner);
+                r.config_snapshot()
+                    .string("init.opsDir")
+                    .map(|v| lossy(&v).to_string())
+            }
+        };
+
+        if let Some(ref d) = configured_ops_dir {
+            repo.config_set("init.opsDir".to_string(), d.clone())?;
         }
+
+        if store_op_enabled {
+            repo.init_op_repo_at(configured_ops_dir.clone())?;
+        }
+
+        // If ops_dir was configured or store_op was initialized, reopen so thread-local config_snapshot sees the changes
+        let repo = if configured_ops_dir.is_some() || store_op_enabled {
+            Repository::open_opts(path, options.open_options.unwrap_or_default())?
+        } else {
+            repo
+        };
 
         Ok(repo)
     }

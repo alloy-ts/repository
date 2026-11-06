@@ -233,15 +233,15 @@ impl View {
     }
 }
 
-/// Represents an operation (transaction) on the repository view.
-#[derive(Clone, Debug)]
+/// Represents an operation (transaction) on the repository view,
+/// storing a pointer to the `OpStore` the operation belongs to.
+#[derive(Clone)]
 #[napi(js_name = "Operation")]
 pub struct Operation {
-    id: String,
-    view_id: String,
-    parents: Vec<String>,
-    description: String,
-    metadata: HashMap<String, String>,
+    op_store: Option<OpStore>,
+    id: OperationId,
+    data: OperationRecord,
+    predecessors: Option<HashMap<String, Vec<String>>>,
 }
 
 pub type Op = Operation;
@@ -256,39 +256,176 @@ impl Operation {
         parents: Vec<String>,
         description: String,
         metadata: Option<HashMap<String, String>>,
+        op_store: Option<&OpStore>,
     ) -> Self {
+        let mut attributes = BTreeMap::new();
+        if let Some(ref m) = metadata {
+            for (k, v) in m {
+                attributes.insert(k.clone(), v.clone());
+            }
+        }
+
+        let data = OperationRecord {
+            id: id.clone(),
+            view_id: view_id.clone(),
+            parents: parents.clone(),
+            metadata: crate::object_store::op_heads::OpMetadata {
+                description: description.clone(),
+                hostname: "localhost".to_string(),
+                username: "jules".to_string(),
+                is_snapshot: false,
+                workspace_name: None,
+                time: crate::object_store::op_heads::OpTimestampRange {
+                    start_millis: napi::bindgen_prelude::BigInt::from(0i64),
+                    end_millis: napi::bindgen_prelude::BigInt::from(1i64),
+                    tz_offset: 0,
+                },
+                attributes,
+            },
+        };
+
         Self {
-            id,
-            view_id,
-            parents,
-            description,
-            metadata: metadata.unwrap_or_default(),
+            op_store: op_store.cloned(),
+            id: OperationId::new(id),
+            data,
+            predecessors: Some(HashMap::new()),
         }
     }
 
+    /// Returns the OpStore this operation belongs to, if available.
     #[napi]
-    pub fn id(&self) -> String {
+    pub fn op_store(&self) -> Option<OpStore> {
+        self.op_store.clone()
+    }
+
+    /// The OperationId identifier.
+    #[napi]
+    pub fn id(&self) -> OperationId {
         self.id.clone()
     }
 
+    /// The ViewId identifier.
     #[napi]
-    pub fn view_id(&self) -> String {
-        self.view_id.clone()
+    pub fn view_id(&self) -> ViewId {
+        ViewId::new(self.data.view_id.clone())
     }
 
+    /// The parent operation IDs as OperationId objects.
     #[napi]
-    pub fn parents(&self) -> Vec<String> {
-        self.parents.clone()
+    pub fn parent_ids(&self) -> Vec<OperationId> {
+        self.data
+            .parents
+            .iter()
+            .map(|p| OperationId::new(p.clone()))
+            .collect()
     }
 
+    /// Read parent operations from the op store.
+    #[napi]
+    pub fn parents(&self) -> napi::Result<Vec<Operation>> {
+        let store = match self.op_store.as_ref() {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut parents = Vec::new();
+        for pid in &self.data.parents {
+            if let Ok(rec) = store.read_operation(pid.clone()) {
+                parents.push(Operation {
+                    op_store: Some(store.clone()),
+                    id: OperationId::new(rec.id.clone()),
+                    data: rec,
+                    predecessors: Some(HashMap::new()),
+                });
+            }
+        }
+        Ok(parents)
+    }
+
+    /// Read the associated View from the op store.
+    #[napi]
+    pub fn view(&self) -> napi::Result<Option<View>> {
+        let store = match self.op_store.as_ref() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        if let Ok(rec) = store.read_view(self.data.view_id.clone()) {
+            let mut v = View::new(rec.head_ids);
+            for (name, target) in rec.local_bookmarks {
+                let first_add = target.adds.first().cloned();
+                let conflicts = if target.is_conflict {
+                    Some(target.adds)
+                } else {
+                    None
+                };
+                v.set_local_bookmark(
+                    name,
+                    RefTarget {
+                        commit_id: first_add,
+                        conflict_commits: conflicts,
+                    },
+                );
+            }
+            for (name, cid) in rec.wc_commit_ids {
+                v.set_wc_commit_id(name, cid);
+            }
+            Ok(Some(v))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Operation metadata details.
+    #[napi]
+    pub fn metadata(&self) -> crate::object_store::op_heads::OpMetadata {
+        self.data.metadata.clone()
+    }
+
+    /// Operation description.
     #[napi]
     pub fn description(&self) -> String {
-        self.description.clone()
+        self.data.metadata.description.clone()
     }
 
+    /// Returns true if predecessors are recorded in this operation.
     #[napi]
-    pub fn metadata(&self) -> HashMap<String, String> {
-        self.metadata.clone()
+    pub fn stores_commit_predecessors(&self) -> bool {
+        self.predecessors.is_some()
+    }
+
+    /// Returns predecessors of the specified commit if recorded.
+    #[napi]
+    pub fn predecessors_for_commit(&self, commit_id: String) -> Option<Vec<String>> {
+        self.predecessors.as_ref()?.get(&commit_id).cloned()
+    }
+
+    /// Return all commit IDs referenced by this operation.
+    #[napi]
+    pub fn all_referenced_commit_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        if let Some(ref map) = self.predecessors {
+            for (new_id, old_ids) in map {
+                ids.push(new_id.clone());
+                ids.extend(old_ids.clone());
+            }
+        }
+        if let Some(cid) = self.data.metadata.attributes.get("commit_id") {
+            ids.push(cid.clone());
+        }
+        ids
+    }
+
+    /// Underlying raw operation record.
+    #[napi]
+    pub fn store_operation(&self) -> OperationRecord {
+        self.data.clone()
+    }
+
+    /// Convert to an OperationRecord for OpStore persistence.
+    #[napi]
+    pub fn to_record(&self) -> OperationRecord {
+        self.data.clone()
     }
 
     /// Convert a single Commit object into an Operation, mapping any parent operations or parent commit IDs.
@@ -302,7 +439,6 @@ impl Operation {
         let msg = commit.message()?;
         let author = commit.author()?;
 
-        // If parent operation IDs were not explicitly supplied, map the commit's parent commits
         let parents = match parent_op_ids {
             Some(p) => p,
             None => {
@@ -332,20 +468,26 @@ impl Operation {
         let mut meta = HashMap::new();
         meta.insert("author".to_string(), author.name);
         meta.insert("email".to_string(), author.email);
-        meta.insert("commit_id".to_string(), commit_id);
+        meta.insert("commit_id".to_string(), commit_id.clone());
 
-        Ok(Operation {
-            id: op_id,
+        let op_store = repo.op_store().ok();
+
+        let mut predecessors = HashMap::new();
+        predecessors.insert(commit_id, Vec::new());
+
+        let mut op = Operation::new(
+            op_id,
             view_id,
             parents,
-            description: msg.trim().to_string(),
-            metadata: meta,
-        })
+            msg.trim().to_string(),
+            Some(meta),
+            op_store.as_ref(),
+        );
+        op.predecessors = Some(predecessors);
+        Ok(op)
     }
 
-    /// Compose multiple operations into a merged operation (e.g. squashing or combining sequential operations).
-    ///
-    /// Preserves roots and head views while combining metadata and descriptions.
+    /// Compose multiple operations into a merged operation.
     #[napi]
     pub fn compose(operations: Vec<&Operation>) -> napi::Result<Operation> {
         if operations.is_empty() {
@@ -359,11 +501,11 @@ impl Operation {
 
         let mut combined_desc = Vec::new();
         let mut combined_meta = HashMap::new();
-        let all_parents = first.parents.clone();
+        let all_parents: Vec<String> = first.parent_ids().into_iter().map(|p| p.hex()).collect();
 
         for op in &operations {
-            combined_desc.push(op.description.clone());
-            for (k, v) in &op.metadata {
+            combined_desc.push(op.description());
+            for (k, v) in &op.data.metadata.attributes {
                 combined_meta.insert(k.clone(), v.clone());
             }
         }
@@ -371,45 +513,21 @@ impl Operation {
         let op_id = {
             let mut hasher = blake3::Hasher::new();
             for op in &operations {
-                hasher.update(op.id.as_bytes());
+                hasher.update(op.id().hex().as_bytes());
             }
             hasher.finalize().to_hex().to_string()
         };
 
-        Ok(Operation {
-            id: op_id,
-            view_id: last.view_id.clone(),
-            parents: all_parents,
-            description: combined_desc.join("\n\n"),
-            metadata: combined_meta,
-        })
-    }
+        let op_store = last.op_store.clone().or_else(|| first.op_store.clone());
 
-    /// Convert to an OperationRecord for OpStore persistence.
-    #[napi]
-    pub fn to_record(&self) -> OperationRecord {
-        let mut attributes = BTreeMap::new();
-        for (k, v) in &self.metadata {
-            attributes.insert(k.clone(), v.clone());
-        }
-        OperationRecord {
-            id: self.id.clone(),
-            view_id: self.view_id.clone(),
-            parents: self.parents.clone(),
-            metadata: crate::object_store::op_heads::OpMetadata {
-                description: self.description.clone(),
-                hostname: "localhost".to_string(),
-                username: "jules".to_string(),
-                is_snapshot: false,
-                workspace_name: None,
-                time: crate::object_store::op_heads::OpTimestampRange {
-                    start_millis: napi::bindgen_prelude::BigInt::from(0i64),
-                    end_millis: napi::bindgen_prelude::BigInt::from(1i64),
-                    tz_offset: 0,
-                },
-                attributes,
-            },
-        }
+        Ok(Operation::new(
+            op_id,
+            last.view_id().hex(),
+            all_parents,
+            combined_desc.join("\n\n"),
+            Some(combined_meta),
+            op_store.as_ref(),
+        ))
     }
 }
 
@@ -451,16 +569,59 @@ pub struct ReparentStats {
 
 #[napi]
 impl Repository {
+    fn ops_dir_path(&self) -> std::path::PathBuf {
+        let r = thread_local(&self.inner);
+        if let Some(custom) = r
+            .config_snapshot()
+            .string("init.opsDir")
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+        {
+            let p = std::path::PathBuf::from(custom);
+            if p.is_dir() || p.join("op_store").is_dir() {
+                return p;
+            }
+        }
+        let git_dir = r.git_dir();
+        if git_dir.join("ops").join("op_store").is_dir() || git_dir.join("ops").is_dir() {
+            return git_dir.join("ops");
+        }
+        if git_dir.join("repo").join("op_store").is_dir() {
+            return git_dir.join("repo");
+        }
+        if let Some(wd) = r.workdir() {
+            if wd.join(".git").join("ops").is_dir() {
+                return wd.join(".git").join("ops");
+            }
+            if wd.join(".jj").join("repo").is_dir() {
+                return wd.join(".jj").join("repo");
+            }
+        }
+        git_dir.join("ops")
+    }
+
     /// Check whether an op store directory exists.
     #[napi]
     pub fn is_op_repo(&self) -> bool {
         let r = thread_local(&self.inner);
         let git_dir = r.git_dir();
-        if git_dir.join("repo").join("op_store").is_dir() {
+        let config_ops_dir = r
+            .config_snapshot()
+            .string("init.opsDir")
+            .map(|v| String::from_utf8_lossy(&v).into_owned());
+
+        if let Some(custom) = config_ops_dir {
+            let p = std::path::PathBuf::from(custom);
+            if p.exists() {
+                return true;
+            }
+        }
+        if git_dir.join("ops").is_dir() || git_dir.join("repo").join("op_store").is_dir() {
             return true;
         }
         if let Some(wd) = r.workdir() {
-            wd.join(".git").join("repo").join("op_store").is_dir() || wd.join(".jj").is_dir()
+            wd.join(".git").join("ops").is_dir()
+                || wd.join(".git").join("repo").join("op_store").is_dir()
+                || wd.join(".jj").is_dir()
         } else {
             git_dir.join(".jj").is_dir()
         }
@@ -477,23 +638,11 @@ impl Repository {
     }
 
     /// Obtain the OpHeadsStore handle for this repository.
-    /// Defaults to `.git/repo/op_heads/`.
+    /// Defaults to `<git-dir>/ops/op_heads/`.
     #[napi(js_name = "OpHeadsStore")]
     pub fn op_heads_store(&self) -> napi::Result<OpHeadsStore> {
-        let r = thread_local(&self.inner);
-        let git_dir = r.git_dir();
-        let repo_path = if let Some(wd) = r.workdir() {
-            if wd.join(".jj").join("repo").join("op_heads").is_dir() {
-                wd.join(".jj").join("repo")
-            } else {
-                git_dir.join("repo")
-            }
-        } else if git_dir.join(".jj").join("repo").join("op_heads").is_dir() {
-            git_dir.join(".jj").join("repo")
-        } else {
-            git_dir.join("repo")
-        };
-        OpHeadsStore::new(repo_path.to_string_lossy().into_owned())
+        let base_dir = self.ops_dir_path();
+        OpHeadsStore::new(base_dir.to_string_lossy().into_owned())
     }
 
     #[napi]
@@ -502,22 +651,16 @@ impl Repository {
     }
 
     /// Obtain the OpStore handle for this repository.
-    /// Defaults to `.git/repo/op_store/`.
+    /// Defaults to `<git-dir>/ops/op_store/`.
     #[napi(js_name = "OpStore")]
     pub fn op_store(&self) -> napi::Result<OpStore> {
-        let r = thread_local(&self.inner);
-        let git_dir = r.git_dir();
-        let op_store_path = if let Some(wd) = r.workdir() {
-            if wd.join(".jj").join("repo").join("op_store").is_dir() {
-                wd.join(".jj").join("repo").join("op_store")
-            } else {
-                git_dir.join("repo").join("op_store")
-            }
-        } else if git_dir.join(".jj").join("repo").join("op_store").is_dir() {
-            git_dir.join(".jj").join("repo").join("op_store")
+        let base_dir = self.ops_dir_path();
+        let op_store_path = if base_dir.join("op_store").is_dir() || !base_dir.exists() {
+            base_dir.join("op_store")
         } else {
-            git_dir.join("repo").join("op_store")
+            base_dir.clone()
         };
+        let r = thread_local(&self.inner);
         let head_id = r.head_commit().ok().map(|c| c.id.to_string());
         OpStore::new(op_store_path.to_string_lossy().into_owned(), head_id)
     }
@@ -527,14 +670,22 @@ impl Repository {
         self.op_store()
     }
 
-    /// Initialise repository operation store metadata (.git/repo/op_store/ and op_heads/)
-    /// backed by this git repository.
+    /// Initialise repository operation store metadata (`<git-dir>/ops/op_store/` and `op_heads/`).
     #[napi]
     pub fn init_op_repo(&self) -> napi::Result<OpHeadsStore> {
+        self.init_op_repo_at(None)
+    }
+
+    /// Initialise operation store metadata at a designated directory (or default `<git-dir>/ops`).
+    #[napi]
+    pub fn init_op_repo_at(&self, ops_dir: Option<String>) -> napi::Result<OpHeadsStore> {
+        let base_dir = match ops_dir {
+            Some(d) => std::path::PathBuf::from(d),
+            None => self.ops_dir_path(),
+        };
         let r = thread_local(&self.inner);
-        let repo_dir = r.git_dir().join("repo");
         let head_id = r.head_commit().ok().map(|c| c.id.to_string());
-        OpHeadsStore::init(repo_dir.to_string_lossy().into_owned(), head_id)
+        OpHeadsStore::init(base_dir.to_string_lossy().into_owned(), head_id)
     }
 
     #[napi]

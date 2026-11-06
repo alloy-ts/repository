@@ -58,9 +58,10 @@ pub fn map_not_found_err(err: std::io::Error, object_type: &str, hash: &str) -> 
 }
 
 /// Simple filesystem-based backend for commits, trees, files, symlinks, and conflicts.
+#[derive(Clone)]
 #[napi]
 pub struct SimpleBackend {
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     root_commit_id: String,
     root_change_id: String,
     empty_tree_id: String,

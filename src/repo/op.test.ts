@@ -28,16 +28,22 @@ import {
   RemoteRef,
   type RemoteRefState,
   View,
+  Store,
+  COMMIT_CACHE_CAPACITY,
+  TREE_CACHE_CAPACITY,
 } from "../../dist/index.js";
 
 describe("Repository Op and Workspace NAPI bindings", () => {
-  it("initializes an op repo and queries head operations and op resolution", () => {
+  it("initializes an op repo with default opsDir <git-dir>/ops and queries head operations and op resolution", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-op-test-"));
     const repo = Repository.init(tmpDir);
 
     expect(repo.isOpRepo()).toBe(false);
     const headsStore = repo.initOpRepo();
     expect(repo.isOpRepo()).toBe(true);
+
+    const opsPath = path.join(tmpDir, ".git", "ops");
+    expect(fs.existsSync(opsPath)).toBe(true);
 
     const headOps = repo.currentHeadOps();
     expect(headOps.length).toBeGreaterThan(0);
@@ -181,6 +187,47 @@ describe("Repository Op and Workspace NAPI bindings", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("supports InitOptions opsDir and init.opsDir custom configuration", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-custom-ops-"));
+    const customOpsDir = path.join(tmpDir, "custom-ops");
+
+    const repo = Repository.initOpts(tmpDir, {
+      storeOp: true,
+      opsDir: customOpsDir,
+    });
+
+    expect(repo.isOpRepo()).toBe(true);
+    expect(fs.existsSync(path.join(customOpsDir, "op_store"))).toBe(true);
+    expect(fs.existsSync(path.join(customOpsDir, "op_heads"))).toBe(true);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("tests Store caching wrapper over backend", () => {
+    expect(COMMIT_CACHE_CAPACITY).toBe(100);
+    expect(TREE_CACHE_CAPACITY).toBe(1000);
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "store-test-"));
+    const store = Store.init(tmpDir);
+
+    expect(store.commitIdLength()).toBe(64);
+    expect(store.changeIdLength()).toBe(16);
+
+    const fId = store.writeFile("cached content");
+    expect(store.readFile(fId)).toBe("cached content");
+
+    const tId = store.writeTree("tree content");
+    expect(store.getTree(tId)).toBe("tree content");
+
+    const cId = store.writeCommit("commit content");
+    expect(store.getCommit(cId)).toBe("commit content");
+
+    store.clearCaches();
+    expect(store.getCommit(cId)).toBe("commit content");
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("tests Op, Op.fromCommits, OperationId, ViewId, RemoteRef, and View", () => {
     const viewId = new ViewId("deadbeef");
     expect(viewId.hex()).toBe("deadbeef");
@@ -204,11 +251,11 @@ describe("Repository Op and Workspace NAPI bindings", () => {
 
     // Test Operation class directly
     const op1 = new Operation("op-1", "view-1", [], "initial op", { branch: "main" });
-    expect(op1.id()).toBe("op-1");
-    expect(op1.viewId()).toBe("view-1");
+    expect(op1.id().hex()).toBe("op-1");
+    expect(op1.viewId().hex()).toBe("view-1");
     expect(op1.parents()).toEqual([]);
     expect(op1.description()).toBe("initial op");
-    expect(op1.metadata()["branch"]).toBe("main");
+    expect(op1.metadata().attributes["branch"]).toBe("main");
 
     const record = op1.toRecord();
     expect(record.id).toBe("op-1");
@@ -217,12 +264,12 @@ describe("Repository Op and Workspace NAPI bindings", () => {
     // Test compose operations
     const op2 = new Operation("op-2", "view-2", ["op-1"], "second op", { author: "alice" });
     const composed = Operation.compose([op1, op2]);
-    expect(composed.parents()).toEqual([]);
-    expect(composed.viewId()).toBe("view-2");
+    expect(composed.parentIds()).toEqual([]);
+    expect(composed.viewId().hex()).toBe("view-2");
     expect(composed.description()).toContain("initial op");
     expect(composed.description()).toContain("second op");
-    expect(composed.metadata()["branch"]).toBe("main");
-    expect(composed.metadata()["author"]).toBe("alice");
+    expect(composed.metadata().attributes["branch"]).toBe("main");
+    expect(composed.metadata().attributes["author"]).toBe("alice");
 
     // Test Operation.from_commit with real Git commits
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "op-from-commits-"));
@@ -236,11 +283,11 @@ describe("Repository Op and Workspace NAPI bindings", () => {
 
     const singleOp1 = Operation.from_commit(repo, commitObj1);
     expect(singleOp1.description()).toBe("Commit 1");
-    expect(singleOp1.parents()).toEqual([]);
+    expect(singleOp1.parentIds()).toEqual([]);
 
-    const singleOp2 = Operation.from_commit(repo, commitObj2, [singleOp1.id()]);
+    const singleOp2 = Operation.from_commit(repo, commitObj2, [singleOp1.id().hex()]);
     expect(singleOp2.description()).toBe("Commit 2");
-    expect(singleOp2.parents()).toEqual([singleOp1.id()]);
+    expect(singleOp2.parentIds().map((p) => p.hex())).toEqual([singleOp1.id().hex()]);
 
     // Convert commit dag to operation dag using from_commit
     const commitIds = [c1, c2];
@@ -250,14 +297,19 @@ describe("Repository Op and Workspace NAPI bindings", () => {
       const c = repo.findCommit(cid);
       const parentOpIds = c.parentIds.map((pid) => commitToOp.get(pid)!);
       const op = Operation.from_commit(repo, c, parentOpIds);
-      commitToOp.set(cid, op.id());
+      commitToOp.set(cid, op.id().hex());
       dagOps.push(op);
     }
 
     expect(dagOps.length).toBe(2);
     expect(dagOps[0]!.description()).toBe("Commit 1");
     expect(dagOps[1]!.description()).toBe("Commit 2");
-    expect(dagOps[1]!.parents()).toContain(dagOps[0]!.id());
+    expect(dagOps[1]!.parentIds().map((p) => p.hex())).toContain(dagOps[0]!.id().hex());
+
+    // Test methods on Operation
+    expect(singleOp1.storesCommitPredecessors()).toBe(true);
+    expect(Array.isArray(singleOp1.allReferencedCommitIds())).toBe(true);
+    expect(singleOp1.storeOperation().id).toBe(singleOp1.id().hex());
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });

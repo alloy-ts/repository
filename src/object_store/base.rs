@@ -16,16 +16,18 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 use chrono::{DateTime, Utc};
-use gix::ObjectId;
 use gix::object::Kind;
 use gix::zlib::{Compression, Decompress, Inflate};
-use prolly::{Config as GenericConfig, FileNodeStore, Prolly as Store, Tree as GenericTree};
+use gix::ObjectId;
+use prolly::{
+    Config as GenericConfig, FileNodeStore, Prolly as ProllyTreeStore, Tree as GenericTree,
+};
 
 use crate::error::{err, err_str, parse_oid};
 use crate::object::{kind_to_string, string_to_kind};
 use crate::object_store::hash_kind_format;
 use crate::object_store::{
-    ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget, object_kind_from_option,
+    object_kind_from_option, ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget,
 };
 
 /// HTTP protocol version used when a [`crate::object_store::GenericObjectStore`] talks to a
@@ -209,6 +211,159 @@ fn resolve_pack_base(
 }
 
 // ===========================================================================
+// Caching Store wrapper over Backend (mirroring jj_lib::store::Store)
+// ===========================================================================
+
+/// Cache capacity for commits in the Store wrapper.
+#[napi]
+pub const COMMIT_CACHE_CAPACITY: u32 = 100;
+
+/// Cache capacity for trees in the Store wrapper.
+#[napi]
+pub const TREE_CACHE_CAPACITY: u32 = 1000;
+
+/// Wraps a low-level backend (`SimpleBackend`) adding commit and tree caching.
+#[napi]
+pub struct Store {
+    backend: Arc<crate::backend::SimpleBackend>,
+    commit_cache: Mutex<std::collections::HashMap<String, String>>,
+    tree_cache: Mutex<std::collections::HashMap<String, String>>,
+}
+
+#[napi]
+impl Store {
+    /// Creates a store wrapping `backend`.
+    #[napi(constructor)]
+    pub fn new(backend: &crate::backend::SimpleBackend) -> Self {
+        Self {
+            backend: Arc::new(backend.clone()),
+            commit_cache: Mutex::new(std::collections::HashMap::new()),
+            tree_cache: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Initialize a store with a backend at `store_path`.
+    #[napi(factory)]
+    pub fn init(store_path: String) -> napi::Result<Store> {
+        let backend = crate::backend::SimpleBackend::init(store_path)?;
+        Ok(Self {
+            backend: Arc::new(backend),
+            commit_cache: Mutex::new(std::collections::HashMap::new()),
+            tree_cache: Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// The length of commit IDs in bytes.
+    #[napi]
+    pub fn commit_id_length(&self) -> u32 {
+        self.backend.commit_id_length()
+    }
+
+    /// The length of change IDs in bytes.
+    #[napi]
+    pub fn change_id_length(&self) -> u32 {
+        self.backend.change_id_length()
+    }
+
+    /// The root commit's ID.
+    #[napi]
+    pub fn root_commit_id(&self) -> String {
+        self.backend.root_commit_id()
+    }
+
+    /// The root commit's change ID.
+    #[napi]
+    pub fn root_change_id(&self) -> String {
+        self.backend.root_change_id()
+    }
+
+    /// The empty tree's ID.
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        self.backend.empty_tree_id()
+    }
+
+    /// The number of concurrent requests the backend can handle.
+    #[napi]
+    pub fn concurrency(&self) -> u32 {
+        self.backend.concurrency()
+    }
+
+    /// Reads a commit, using the commit cache if possible.
+    #[napi]
+    pub fn get_commit(&self, id: String) -> napi::Result<String> {
+        let mut cache = self.commit_cache.lock().unwrap();
+        if let Some(c) = cache.get(&id) {
+            return Ok(c.clone());
+        }
+        let data = self.backend.read_commit(id.clone())?;
+        cache.insert(id, data.clone());
+        Ok(data)
+    }
+
+    /// Writes a commit to the backend and adds it to the cache.
+    #[napi]
+    pub fn write_commit(&self, commit_data: String) -> napi::Result<String> {
+        let id = self.backend.write_commit(commit_data.clone())?;
+        let mut cache = self.commit_cache.lock().unwrap();
+        cache.insert(id.clone(), commit_data);
+        Ok(id)
+    }
+
+    /// Reads a tree, using the tree cache if possible.
+    #[napi]
+    pub fn get_tree(&self, id: String) -> napi::Result<String> {
+        let mut cache = self.tree_cache.lock().unwrap();
+        if let Some(t) = cache.get(&id) {
+            return Ok(t.clone());
+        }
+        let data = self.backend.read_tree(id.clone())?;
+        cache.insert(id, data.clone());
+        Ok(data)
+    }
+
+    /// Writes a tree to the backend and caches it.
+    #[napi]
+    pub fn write_tree(&self, contents: String) -> napi::Result<String> {
+        let id = self.backend.write_tree(contents.clone())?;
+        let mut cache = self.tree_cache.lock().unwrap();
+        cache.insert(id.clone(), contents);
+        Ok(id)
+    }
+
+    /// Reads the contents of a file.
+    #[napi]
+    pub fn read_file(&self, id: String) -> napi::Result<String> {
+        self.backend.read_file(id)
+    }
+
+    /// Writes the contents of a file to the backend.
+    #[napi]
+    pub fn write_file(&self, contents: String) -> napi::Result<String> {
+        self.backend.write_file(contents)
+    }
+
+    /// Reads the target of a symlink.
+    #[napi]
+    pub fn read_symlink(&self, id: String) -> napi::Result<String> {
+        self.backend.read_symlink(id)
+    }
+
+    /// Writes a symlink with the given target to the backend.
+    #[napi]
+    pub fn write_symlink(&self, contents: String) -> napi::Result<String> {
+        self.backend.write_symlink(contents)
+    }
+
+    /// Clear cached objects. Mainly intended for testing.
+    #[napi]
+    pub fn clear_caches(&self) {
+        self.commit_cache.lock().unwrap().clear();
+        self.tree_cache.lock().unwrap().clear();
+    }
+}
+
+// ===========================================================================
 // Store-backed object store (the shared, external-crate-free implementation).
 // ===========================================================================
 
@@ -290,7 +445,7 @@ pub(crate) struct GenericStore {
     /// Cloned (cheaply — see `FileNodeStore`'s `Arc` internals) to build a fresh
     /// `Store` driver for a fork that still shares the same on-disk nodes.
     node_store: FileNodeStore,
-    store: Store<FileNodeStore>,
+    store: ProllyTreeStore<FileNodeStore>,
     /// The immutable, copy-on-write tree root. Every write derives a new root.
     tree: Mutex<GenericTree>,
     /// Insertion-order index, kept alongside the tree so `entries()` matches
@@ -305,7 +460,7 @@ impl GenericStore {
     pub(crate) fn new(dir: &str, kind: gix::hash::Kind) -> napi::Result<Self> {
         std::fs::create_dir_all(dir).map_err(|e| err("generic_open", e))?;
         let node_store = FileNodeStore::open(dir).map_err(|e| err("generic_open", e))?;
-        let store = Store::new(node_store.clone(), GenericConfig::default());
+        let store = ProllyTreeStore::new(node_store.clone(), GenericConfig::default());
         let tree = match store
             .load_named_root(HEAD_NAME)
             .map_err(|e| err("generic_load_root", e))?
@@ -327,7 +482,7 @@ impl GenericStore {
     /// Rebuild the insertion-order index from a tree by scanning it (used after a
     /// restore/load, where insertion order is unrecoverable → hash order).
     fn rebuild_order(
-        store: &Store<FileNodeStore>,
+        store: &ProllyTreeStore<FileNodeStore>,
         tree: &GenericTree,
     ) -> napi::Result<Vec<ObjectId>> {
         let mut ids = Vec::new();
@@ -556,7 +711,7 @@ impl GenericStore {
     /// derive independent roots and do not affect the other.
     fn fork(&self) -> Self {
         let node_store = self.node_store.clone();
-        let store = Store::new(node_store.clone(), GenericConfig::default());
+        let store = ProllyTreeStore::new(node_store.clone(), GenericConfig::default());
         let tree = self.tree.lock().unwrap().clone();
         let order = self.order.lock().unwrap().clone();
         Self {
