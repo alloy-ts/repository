@@ -22,7 +22,7 @@ import {
   SimpleBackend,
   COMMIT_ID_LENGTH,
   CHANGE_ID_LENGTH,
-  Op,
+  Operation,
   ViewId,
   OperationId,
   RemoteRef,
@@ -202,28 +202,62 @@ describe("Repository Op and Workspace NAPI bindings", () => {
     view.setLocalBookmark("main", { commitId: "123456" });
     expect(view.getLocalBookmark("main")?.commitId).toBe("123456");
 
-    // Test Op class directly
-    const op = new Op("op-1", "view-1", [], "initial op", { branch: "main" });
-    expect(op.id()).toBe("op-1");
-    expect(op.viewId()).toBe("view-1");
-    expect(op.parents()).toEqual([]);
-    expect(op.description()).toBe("initial op");
-    expect(op.metadata()["branch"]).toBe("main");
+    // Test Operation class directly
+    const op1 = new Operation("op-1", "view-1", [], "initial op", { branch: "main" });
+    expect(op1.id()).toBe("op-1");
+    expect(op1.viewId()).toBe("view-1");
+    expect(op1.parents()).toEqual([]);
+    expect(op1.description()).toBe("initial op");
+    expect(op1.metadata()["branch"]).toBe("main");
 
-    const record = op.toRecord();
+    const record = op1.toRecord();
     expect(record.id).toBe("op-1");
     expect(record.viewId).toBe("view-1");
 
-    // Test Op.fromCommits with a real repository commit
+    // Test compose operations
+    const op2 = new Operation("op-2", "view-2", ["op-1"], "second op", { author: "alice" });
+    const composed = Operation.compose([op1, op2]);
+    expect(composed.parents()).toEqual([]);
+    expect(composed.viewId()).toBe("view-2");
+    expect(composed.description()).toContain("initial op");
+    expect(composed.description()).toContain("second op");
+    expect(composed.metadata()["branch"]).toBe("main");
+    expect(composed.metadata()["author"]).toBe("alice");
+
+    // Test Operation.from_commit with real Git commits
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "op-from-commits-"));
     const repo = Repository.init(tmpDir);
     const emptyTreeId = repo.writeTree([]);
-    const commitId = repo.commit("HEAD", "Initial commit for op", emptyTreeId, []);
+    const c1 = repo.commit("refs/heads/main", "Commit 1", emptyTreeId, []);
+    const c2 = repo.commit("refs/heads/main", "Commit 2", emptyTreeId, [c1]);
 
-    const ops = Op.fromCommits(repo, [commitId]);
-    expect(ops.length).toBe(1);
-    expect(ops[0]!.description()).toBe("Initial commit for op");
-    expect(ops[0]!.metadata()["commit_id"]).toBe(commitId);
+    const commitObj1 = repo.findCommit(c1);
+    const commitObj2 = repo.findCommit(c2);
+
+    const singleOp1 = Operation.from_commit(repo, commitObj1);
+    expect(singleOp1.description()).toBe("Commit 1");
+    expect(singleOp1.parents()).toEqual([]);
+
+    const singleOp2 = Operation.from_commit(repo, commitObj2, [singleOp1.id()]);
+    expect(singleOp2.description()).toBe("Commit 2");
+    expect(singleOp2.parents()).toEqual([singleOp1.id()]);
+
+    // Convert commit dag to operation dag using from_commit
+    const commitIds = [c1, c2];
+    const dagOps: Operation[] = [];
+    const commitToOp = new Map<string, string>();
+    for (const cid of commitIds) {
+      const c = repo.findCommit(cid);
+      const parentOpIds = c.parentIds.map((pid) => commitToOp.get(pid)!);
+      const op = Operation.from_commit(repo, c, parentOpIds);
+      commitToOp.set(cid, op.id());
+      dagOps.push(op);
+    }
+
+    expect(dagOps.length).toBe(2);
+    expect(dagOps[0]!.description()).toBe("Commit 1");
+    expect(dagOps[1]!.description()).toBe("Commit 2");
+    expect(dagOps[1]!.parents()).toContain(dagOps[0]!.id());
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });

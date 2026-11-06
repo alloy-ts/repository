@@ -233,10 +233,10 @@ impl View {
     }
 }
 
-/// An operation in the operation graph.
+/// Represents an operation (transaction) on the repository view.
 #[derive(Clone, Debug)]
-#[napi]
-pub struct Op {
+#[napi(js_name = "Operation")]
+pub struct Operation {
     id: String,
     view_id: String,
     parents: Vec<String>,
@@ -244,9 +244,11 @@ pub struct Op {
     metadata: HashMap<String, String>,
 }
 
+pub type Op = Operation;
+
 #[napi]
-impl Op {
-    /// Construct a new Op object.
+impl Operation {
+    /// Construct a new Operation object.
     #[napi(constructor)]
     pub fn new(
         id: String,
@@ -289,49 +291,98 @@ impl Op {
         self.metadata.clone()
     }
 
-    /// Converts Git commits into an array of operations.
+    /// Convert a single Commit object into an Operation, mapping any parent operations or parent commit IDs.
+    #[napi(js_name = "from_commit")]
+    pub fn from_commit(
+        repo: &Repository,
+        commit: &crate::commit::Commit,
+        parent_op_ids: Option<Vec<String>>,
+    ) -> napi::Result<Operation> {
+        let commit_id = commit.id();
+        let msg = commit.message()?;
+        let author = commit.author()?;
+
+        // If parent operation IDs were not explicitly supplied, map the commit's parent commits
+        let parents = match parent_op_ids {
+            Some(p) => p,
+            None => {
+                let parent_commit_ids = commit.parent_ids()?;
+                parent_commit_ids
+                    .into_iter()
+                    .map(|pid| {
+                        let mut hasher = blake3::Hasher::new();
+                        hasher.update(pid.as_bytes());
+                        hasher.finalize().to_hex().to_string()
+                    })
+                    .collect()
+            }
+        };
+
+        let op_id = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(commit_id.as_bytes());
+            hasher.update(msg.as_bytes());
+            for p in &parents {
+                hasher.update(p.as_bytes());
+            }
+            hasher.finalize().to_hex().to_string()
+        };
+
+        let view_id = format!("view-{}", op_id);
+        let mut meta = HashMap::new();
+        meta.insert("author".to_string(), author.name);
+        meta.insert("email".to_string(), author.email);
+        meta.insert("commit_id".to_string(), commit_id);
+
+        Ok(Operation {
+            id: op_id,
+            view_id,
+            parents,
+            description: msg.trim().to_string(),
+            metadata: meta,
+        })
+    }
+
+    /// Compose multiple operations into a merged operation (e.g. squashing or combining sequential operations).
+    ///
+    /// Preserves roots and head views while combining metadata and descriptions.
     #[napi]
-    pub fn from_commits(repo: &Repository, commit_ids: Vec<String>) -> napi::Result<Vec<Op>> {
-        let mut ops = Vec::new();
-        let mut last_op_id: Option<String> = None;
-
-        for commit_id in commit_ids {
-            let commit = repo.find_commit(commit_id.clone())?;
-            let parents = if let Some(ref prev) = last_op_id {
-                vec![prev.clone()]
-            } else {
-                Vec::new()
-            };
-
-            let msg = commit.message()?;
-            let author = commit.author()?;
-
-            let op_id = {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(commit_id.as_bytes());
-                hasher.update(msg.as_bytes());
-                hasher.finalize().to_hex().to_string()
-            };
-
-            let view_id = format!("view-{}", op_id);
-            let mut meta = HashMap::new();
-            meta.insert("author".to_string(), author.name);
-            meta.insert("email".to_string(), author.email);
-            meta.insert("commit_id".to_string(), commit_id.clone());
-
-            let op = Op {
-                id: op_id.clone(),
-                view_id,
-                parents,
-                description: msg.trim().to_string(),
-                metadata: meta,
-            };
-
-            last_op_id = Some(op_id);
-            ops.push(op);
+    pub fn compose(operations: Vec<&Operation>) -> napi::Result<Operation> {
+        if operations.is_empty() {
+            return Err(napi::Error::from_reason(
+                "Cannot compose empty list of operations",
+            ));
         }
 
-        Ok(ops)
+        let first = operations[0];
+        let last = operations[operations.len() - 1];
+
+        let mut combined_desc = Vec::new();
+        let mut combined_meta = HashMap::new();
+        let all_parents = first.parents.clone();
+
+        for op in &operations {
+            combined_desc.push(op.description.clone());
+            for (k, v) in &op.metadata {
+                combined_meta.insert(k.clone(), v.clone());
+            }
+        }
+
+        let op_id = {
+            let mut hasher = blake3::Hasher::new();
+            for op in &operations {
+                hasher.update(op.id.as_bytes());
+            }
+            hasher.finalize().to_hex().to_string()
+        };
+
+        Ok(Operation {
+            id: op_id,
+            view_id: last.view_id.clone(),
+            parents: all_parents,
+            description: combined_desc.join("\n\n"),
+            metadata: combined_meta,
+        })
     }
 
     /// Convert to an OperationRecord for OpStore persistence.

@@ -4,7 +4,7 @@ This document describes the Jujutsu (`jj-lib`) operation logging, operation head
 
 ## Overview
 
-In Jujutsu, operation history represents transactional repository changes as a directed acyclic graph (DAG) of operations (`OperationRecord`), where each operation points to parent operations and records:
+In Jujutsu, repository state transitions are represented as an operation DAG (`Operation`), where each operation points to parent operations and records:
 
 - An operation ID (`OperationId`)
 - A view ID (`ViewId`) describing root commit heads, bookmarks, tags, and working copy checkouts
@@ -30,12 +30,12 @@ When an op store is present:
 
 ## Classes and Types
 
-### `Op`
+### `Operation`
 
-Represents an operation in the operation graph.
+Represents an operation (transaction) on the repository view.
 
 ```ts
-class Op {
+class Operation {
   constructor(
     id: string,
     viewId: string,
@@ -51,8 +51,11 @@ class Op {
   metadata(): Record<string, string>;
   toRecord(): OperationRecord;
 
-  // Convert Git commits to operations
-  static fromCommits(repo: Repository, commitIds: string[]): Op[];
+  // Convert a single Commit object into an Operation, mapping any parent operations or parent commit IDs
+  static from_commit(repo: Repository, commit: Commit, parentOpIds?: string[]): Operation;
+
+  // Compose multiple sequential operations into a single merged operation
+  static compose(operations: Operation[]): Operation;
 }
 ```
 
