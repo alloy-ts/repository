@@ -160,11 +160,10 @@ impl SimpleOpHeadsStore {
 
     pub fn init(dir: &Path, root_op_id: &OperationId) -> Result<Self, OpHeadsStoreError> {
         let op_heads_dir = dir.join("heads");
-        fs::create_dir_all(&op_heads_dir)
-            .map_err(|e| OpHeadsStoreError::Write {
-                new_op_id: root_op_id.clone(),
-                source: Box::new(e),
-            })?;
+        fs::create_dir_all(&op_heads_dir).map_err(|e| OpHeadsStoreError::Write {
+            new_op_id: root_op_id.clone(),
+            source: Box::new(e),
+        })?;
         let store = Self { dir: op_heads_dir };
         store.add_op_head(root_op_id)?;
         Ok(store)
@@ -177,11 +176,10 @@ impl SimpleOpHeadsStore {
 
     pub fn add_op_head(&self, id: &OperationId) -> Result<(), OpHeadsStoreError> {
         let path = self.dir.join(id);
-        fs::write(&path, "")
-            .map_err(|e| OpHeadsStoreError::Write {
-                new_op_id: id.clone(),
-                source: Box::new(e),
-            })
+        fs::write(&path, "").map_err(|e| OpHeadsStoreError::Write {
+            new_op_id: id.clone(),
+            source: Box::new(e),
+        })
     }
 
     pub fn remove_op_head(&self, id: &OperationId) -> Result<(), OpHeadsStoreError> {
@@ -235,7 +233,9 @@ impl OpHeadsStoreTrait for SimpleOpHeadsStore {
         }
         op_heads.sort();
         if op_heads.is_empty() {
-            Err(OpHeadsStoreError::Read("Corrupt repository: no head operation".into()))
+            Err(OpHeadsStoreError::Read(
+                "Corrupt repository: no head operation".into(),
+            ))
         } else {
             Ok(op_heads)
         }
@@ -257,7 +257,9 @@ impl OpHeadsStoreTrait for SimpleOpHeadsStore {
             use std::os::unix::io::AsRawFd;
             unsafe {
                 if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
-                    return Err(OpHeadsStoreError::Lock(Box::new(std::io::Error::last_os_error())));
+                    return Err(OpHeadsStoreError::Lock(Box::new(
+                        std::io::Error::last_os_error(),
+                    )));
                 }
             }
         }
@@ -384,13 +386,17 @@ impl OpHeadsStore {
     /// Return the list of current operation heads.
     #[napi]
     pub fn get_op_heads(&self) -> napi::Result<Vec<String>> {
-        self.inner.get_op_heads().map_err(|e| err("get_op_heads", e))
+        self.inner
+            .get_op_heads()
+            .map_err(|e| err("get_op_heads", e))
     }
 
     /// Add an operation head ID.
     #[napi]
     pub fn add_op_head(&self, op_id: String) -> napi::Result<()> {
-        self.inner.update_op_heads(&[], &op_id).map_err(|e| err("add_op_head", e))
+        self.inner
+            .update_op_heads(&[], &op_id)
+            .map_err(|e| err("add_op_head", e))
     }
 
     /// Remove an operation head ID.
@@ -399,7 +405,9 @@ impl OpHeadsStore {
         let heads = self.get_op_heads()?;
         let remaining: Vec<String> = heads.into_iter().filter(|h| h != &op_id).collect();
         if let Some(first) = remaining.first() {
-            self.inner.update_op_heads(&[op_id], first).map_err(|e| err("remove_op_head", e))
+            self.inner
+                .update_op_heads(&[op_id], first)
+                .map_err(|e| err("remove_op_head", e))
         } else {
             Err(err_str("remove_op_head", "cannot remove the only op head"))
         }
@@ -408,7 +416,9 @@ impl OpHeadsStore {
     /// Update operation heads: remove `old_ids` and add `new_id`.
     #[napi]
     pub fn update_op_heads(&self, old_ids: Vec<String>, new_id: String) -> napi::Result<()> {
-        self.inner.update_op_heads(&old_ids, &new_id).map_err(|e| err("update_op_heads", e))
+        self.inner
+            .update_op_heads(&old_ids, &new_id)
+            .map_err(|e| err("update_op_heads", e))
     }
 
     /// Acquire an exclusive lock on the op heads store.
@@ -448,11 +458,14 @@ impl OpHeadsStore {
     pub fn read_operation(&self, op_id: String) -> napi::Result<OperationRecord> {
         let p = self.operations_dir.join(&op_id);
         if !p.exists() {
-            return Err(err_str("read_operation", format!("operation not found: {op_id}")));
+            return Err(err_str(
+                "read_operation",
+                format!("operation not found: {op_id}"),
+            ));
         }
         let data = fs::read(&p).map_err(|e| err("read operation file", e))?;
-        let dto: OperationRecordDto = serde_json::from_slice(&data)
-            .map_err(|e| err("parse operation JSON", e))?;
+        let dto: OperationRecordDto =
+            serde_json::from_slice(&data).map_err(|e| err("parse operation JSON", e))?;
         Ok(dto.into_record(op_id))
     }
 
@@ -484,8 +497,8 @@ impl OpHeadsStore {
             return Err(err_str("read_view", format!("view not found: {view_id}")));
         }
         let data = fs::read(&p).map_err(|e| err("read view file", e))?;
-        let dto: ViewRecordDto = serde_json::from_slice(&data)
-            .map_err(|e| err("parse view JSON", e))?;
+        let dto: ViewRecordDto =
+            serde_json::from_slice(&data).map_err(|e| err("parse view JSON", e))?;
         Ok(dto.into_record(view_id))
     }
 
@@ -494,7 +507,10 @@ impl OpHeadsStore {
     pub fn resolve_op_heads(&self) -> napi::Result<ResolvedOpHeads> {
         let heads = self.get_op_heads()?;
         if heads.is_empty() {
-            return Err(err_str("resolve_op_heads", "corrupt repository: no operation heads"));
+            return Err(err_str(
+                "resolve_op_heads",
+                "corrupt repository: no operation heads",
+            ));
         }
 
         if heads.len() == 1 {
@@ -572,7 +588,10 @@ impl OpHeadsStore {
             view_id: new_view_id,
             parents: current_heads.clone(),
             metadata: OpMetadata {
-                description: format!("reconcile divergent operations ({})", current_heads.join(", ")),
+                description: format!(
+                    "reconcile divergent operations ({})",
+                    current_heads.join(", ")
+                ),
                 hostname: "localhost".to_string(),
                 username: "jj".to_string(),
                 is_snapshot: false,
@@ -738,10 +757,26 @@ impl From<&ViewRecord> for ViewRecordDto {
             id: v.id.clone(),
             head_ids: v.head_ids.clone(),
             wc_commit_ids: v.wc_commit_ids.clone(),
-            local_bookmarks: v.local_bookmarks.iter().map(|(k, val)| (k.clone(), OpRefTargetDto::from(val))).collect(),
-            local_tags: v.local_tags.iter().map(|(k, val)| (k.clone(), OpRefTargetDto::from(val))).collect(),
-            git_refs: v.git_refs.iter().map(|(k, val)| (k.clone(), OpRefTargetDto::from(val))).collect(),
-            git_heads: v.git_heads.iter().map(|(k, val)| (k.clone(), OpRefTargetDto::from(val))).collect(),
+            local_bookmarks: v
+                .local_bookmarks
+                .iter()
+                .map(|(k, val)| (k.clone(), OpRefTargetDto::from(val)))
+                .collect(),
+            local_tags: v
+                .local_tags
+                .iter()
+                .map(|(k, val)| (k.clone(), OpRefTargetDto::from(val)))
+                .collect(),
+            git_refs: v
+                .git_refs
+                .iter()
+                .map(|(k, val)| (k.clone(), OpRefTargetDto::from(val)))
+                .collect(),
+            git_heads: v
+                .git_heads
+                .iter()
+                .map(|(k, val)| (k.clone(), OpRefTargetDto::from(val)))
+                .collect(),
         }
     }
 }
@@ -752,10 +787,26 @@ impl ViewRecordDto {
             id,
             head_ids: self.head_ids,
             wc_commit_ids: self.wc_commit_ids,
-            local_bookmarks: self.local_bookmarks.into_iter().map(|(k, val)| (k, OpRefTarget::from(val))).collect(),
-            local_tags: self.local_tags.into_iter().map(|(k, val)| (k, OpRefTarget::from(val))).collect(),
-            git_refs: self.git_refs.into_iter().map(|(k, val)| (k, OpRefTarget::from(val))).collect(),
-            git_heads: self.git_heads.into_iter().map(|(k, val)| (k, OpRefTarget::from(val))).collect(),
+            local_bookmarks: self
+                .local_bookmarks
+                .into_iter()
+                .map(|(k, val)| (k, OpRefTarget::from(val)))
+                .collect(),
+            local_tags: self
+                .local_tags
+                .into_iter()
+                .map(|(k, val)| (k, OpRefTarget::from(val)))
+                .collect(),
+            git_refs: self
+                .git_refs
+                .into_iter()
+                .map(|(k, val)| (k, OpRefTarget::from(val)))
+                .collect(),
+            git_heads: self
+                .git_heads
+                .into_iter()
+                .map(|(k, val)| (k, OpRefTarget::from(val)))
+                .collect(),
         }
     }
 }

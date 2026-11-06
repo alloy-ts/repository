@@ -25,7 +25,10 @@ pub mod op;
 pub mod op_heads;
 pub mod sql;
 
-pub use op::{OpPrefixResolution, OpStore, OpStoreError, OpStoreTrait, RootOperationData, SimpleOpStore};
+pub use op::{
+    OpPrefixResolution, OpStore, OpStoreError, OpStoreTrait, OperationStore, RootOperationData,
+    SimpleOpStore,
+};
 pub use op_heads::{
     OpHeadsLock, OpHeadsStore, OpHeadsStoreError, OpHeadsStoreLock, OpHeadsStoreTrait,
     OpMetadata, OpRefTarget, OpTimestampRange, OperationRecord, ResolvedOpHeads,

@@ -31,6 +31,7 @@ pub mod namespace;
 pub mod negotiate;
 pub mod note;
 pub mod object;
+pub mod op;
 pub mod pack;
 pub mod patch;
 pub mod path;
@@ -56,6 +57,7 @@ pub mod submodule;
 pub mod tag;
 pub mod testament;
 pub mod tree;
+pub mod workspace;
 pub mod worktree;
 
 use std::sync::Arc;
@@ -863,55 +865,24 @@ impl Repository {
         Ok(())
     }
 
-    /// Check whether a Jujutsu repository directory (`.jj`) exists alongside this repository.
+    /// Return a [`crate::object_store::loose::LooseObjectStore`] for this repository.
+    /// If an op store is present (.git/repo/op_store/ or configured via `init.storeOp`),
+    /// the returned loose object store automatically runs in cache mode backed by the op store.
     #[napi]
-    pub fn is_jj_repo(&self) -> bool {
+    pub fn loose_object_store(&self) -> napi::Result<crate::object_store::loose::LooseObjectStore> {
         let r = thread_local(&self.inner);
-        if let Some(wd) = r.workdir() {
-            wd.join(".jj").is_dir()
-        } else {
-            r.git_dir().join(".jj").is_dir()
+        let objects_dir = r.git_dir().join("objects");
+        let loose = crate::object_store::loose::LooseObjectStore::new(
+            objects_dir.to_string_lossy().into_owned(),
+            Some(self.object_format()),
+            None,
+        )?;
+        if self.has_op_store() {
+            if let Ok(op_store) = self.op_store() {
+                loose.set_op_store(&op_store)?;
+            }
         }
-    }
-
-    /// Obtain the Jujutsu OpHeadsStore handle for this repository.
-    #[napi]
-    pub fn jj_op_heads_store(&self) -> napi::Result<crate::object_store::op_heads::OpHeadsStore> {
-        let r = thread_local(&self.inner);
-        let jj_repo_path = if let Some(wd) = r.workdir() {
-            wd.join(".jj").join("repo")
-        } else {
-            r.git_dir().join(".jj").join("repo")
-        };
-        crate::object_store::op_heads::OpHeadsStore::new(jj_repo_path.to_string_lossy().into_owned())
-    }
-
-    /// Obtain the Jujutsu OpStore handle for this repository.
-    #[napi]
-    pub fn jj_op_store(&self) -> napi::Result<crate::object_store::op::OpStore> {
-        let r = thread_local(&self.inner);
-        let jj_op_store_path = if let Some(wd) = r.workdir() {
-            wd.join(".jj").join("repo").join("op_store")
-        } else {
-            r.git_dir().join(".jj").join("repo").join("op_store")
-        };
-        let head_id = r.head_commit().ok().map(|c| c.id.to_string());
-        crate::object_store::op::OpStore::new(jj_op_store_path.to_string_lossy().into_owned(), head_id)
-    }
-
-    /// Initialise Jujutsu repository metadata (.jj/repo structure and OpHeadsStore)
-    /// backed by this git repository.
-    #[napi]
-    pub fn init_jj(&self) -> napi::Result<crate::object_store::op_heads::OpHeadsStore> {
-        let r = thread_local(&self.inner);
-        let root = if let Some(wd) = r.workdir() {
-            wd.join(".jj")
-        } else {
-            r.git_dir().join(".jj")
-        };
-        let jj_repo = root.join("repo");
-        let head_id = r.head_commit().ok().map(|c| c.id.to_string());
-        crate::object_store::op_heads::OpHeadsStore::init(jj_repo.to_string_lossy().into_owned(), head_id)
+        Ok(loose)
     }
 
     /// Count the commits `HEAD` is ahead of and behind `upstream` (a sha or a ref name).

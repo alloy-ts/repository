@@ -18,8 +18,8 @@ use thiserror::Error;
 
 use crate::error::{err, err_str};
 use crate::object_store::op_heads::{
-    OpMetadata, OpRefTarget, OpTimestampRange, OperationRecord, OperationRecordDto,
-    ViewRecord, ViewRecordDto,
+    OpMetadata, OpRefTarget, OpTimestampRange, OperationRecord, OperationRecordDto, ViewRecord,
+    ViewRecordDto,
 };
 
 // BLAKE2b-512 / BLAKE3 hash length in bytes
@@ -80,7 +80,8 @@ pub trait OpStoreTrait: Any + Send + Sync + Debug {
     fn write_view(&self, view: &ViewRecord) -> Result<String, OpStoreError>;
     fn read_operation(&self, id: &str) -> Result<OperationRecord, OpStoreError>;
     fn write_operation(&self, operation: &OperationRecord) -> Result<String, OpStoreError>;
-    fn resolve_operation_id_prefix(&self, prefix: &str) -> Result<OpPrefixResolution, OpStoreError>;
+    fn resolve_operation_id_prefix(&self, prefix: &str)
+        -> Result<OpPrefixResolution, OpStoreError>;
     fn gc(&self, head_ids: &[String], keep_newer_seconds: i64) -> Result<u32, OpStoreError>;
 }
 
@@ -107,7 +108,9 @@ impl SimpleOpStore {
 
     pub fn init(store_path: &Path, root_data: RootOperationData) -> Result<Self, OpStoreError> {
         let store = Self::new(store_path, root_data);
-        store.init_base_dirs().map_err(|e| OpStoreError::Other(Box::new(e)))?;
+        store
+            .init_base_dirs()
+            .map_err(|e| OpStoreError::Other(Box::new(e)))?;
         Ok(store)
     }
 
@@ -168,11 +171,12 @@ impl OpStoreTrait for SimpleOpStore {
             hash: id.to_string(),
             source: Some(Box::new(e)),
         })?;
-        let dto: ViewRecordDto = serde_json::from_slice(&data).map_err(|e| OpStoreError::ReadObject {
-            object_type: "view",
-            hash: id.to_string(),
-            source: Some(Box::new(e)),
-        })?;
+        let dto: ViewRecordDto =
+            serde_json::from_slice(&data).map_err(|e| OpStoreError::ReadObject {
+                object_type: "view",
+                hash: id.to_string(),
+                source: Some(Box::new(e)),
+            })?;
         Ok(dto.into_record(id.to_string()))
     }
 
@@ -190,9 +194,11 @@ impl OpStoreTrait for SimpleOpStore {
         let mut to_write = view.clone();
         to_write.id = id.clone();
 
-        let data = serde_json::to_vec_pretty(&ViewRecordDto::from(&to_write)).map_err(|e| OpStoreError::WriteObject {
-            object_type: "view",
-            source: Box::new(e),
+        let data = serde_json::to_vec_pretty(&ViewRecordDto::from(&to_write)).map_err(|e| {
+            OpStoreError::WriteObject {
+                object_type: "view",
+                source: Box::new(e),
+            }
         })?;
         let p = self.views_dir().join(&id);
         fs::write(&p, data).map_err(|e| OpStoreError::WriteObject {
@@ -237,11 +243,12 @@ impl OpStoreTrait for SimpleOpStore {
             hash: id.to_string(),
             source: Some(Box::new(e)),
         })?;
-        let dto: OperationRecordDto = serde_json::from_slice(&data).map_err(|e| OpStoreError::ReadObject {
-            object_type: "operation",
-            hash: id.to_string(),
-            source: Some(Box::new(e)),
-        })?;
+        let dto: OperationRecordDto =
+            serde_json::from_slice(&data).map_err(|e| OpStoreError::ReadObject {
+                object_type: "operation",
+                hash: id.to_string(),
+                source: Some(Box::new(e)),
+            })?;
         Ok(dto.into_record(id.to_string()))
     }
 
@@ -259,10 +266,13 @@ impl OpStoreTrait for SimpleOpStore {
         let mut to_write = operation.clone();
         to_write.id = id.clone();
 
-        let data = serde_json::to_vec_pretty(&OperationRecordDto::from(&to_write)).map_err(|e| OpStoreError::WriteObject {
-            object_type: "operation",
-            source: Box::new(e),
-        })?;
+        let data =
+            serde_json::to_vec_pretty(&OperationRecordDto::from(&to_write)).map_err(|e| {
+                OpStoreError::WriteObject {
+                    object_type: "operation",
+                    source: Box::new(e),
+                }
+            })?;
         let p = self.operations_dir().join(&id);
         fs::write(&p, data).map_err(|e| OpStoreError::WriteObject {
             object_type: "operation",
@@ -271,7 +281,10 @@ impl OpStoreTrait for SimpleOpStore {
         Ok(id)
     }
 
-    fn resolve_operation_id_prefix(&self, prefix: &str) -> Result<OpPrefixResolution, OpStoreError> {
+    fn resolve_operation_id_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<OpPrefixResolution, OpStoreError> {
         let op_dir = self.operations_dir();
         if prefix.len() == OPERATION_ID_LENGTH {
             if prefix == self.root_operation_id || op_dir.join(prefix).exists() {
@@ -348,7 +361,8 @@ impl OpStoreTrait for SimpleOpStore {
             reachable_views.insert(op.view_id.clone());
         }
 
-        let cutoff = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(keep_newer_seconds.max(0) as u64);
+        let cutoff = SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(keep_newer_seconds.max(0) as u64);
         let mut pruned = 0u32;
 
         // Prune unreachable operations
@@ -398,15 +412,25 @@ impl OpStoreTrait for SimpleOpStore {
 /// NAPI-exposed handle to an OpStore.
 #[napi]
 pub struct OpStore {
-    inner: Arc<dyn OpStoreTrait>,
+    pub(crate) inner: Arc<dyn OpStoreTrait>,
     path: PathBuf,
 }
 
+impl OpStore {
+    pub fn get_inner(&self) -> Arc<dyn OpStoreTrait> {
+        self.inner.clone()
+    }
+}
+
+/// NAPI alias for `OpStore`.
+pub type OperationStore = OpStore;
+
 #[napi]
 impl OpStore {
-    /// Bind an `OpStore` to a directory (e.g. `.jj/repo/op_store`).
+    /// Bind an `OpStore` to a directory or file URL (e.g. `.git/repo/op_store`).
     #[napi(constructor)]
     pub fn new(store_path: String, root_commit_id: Option<String>) -> napi::Result<Self> {
+        let store_path = parse_file_path_or_url(&store_path);
         let p = PathBuf::from(store_path);
         let root_data = RootOperationData {
             root_commit_id: root_commit_id.unwrap_or_else(|| "0".repeat(40)),
@@ -418,9 +442,17 @@ impl OpStore {
         })
     }
 
-    /// Initialise a new `SimpleOpStore` at `store_path`.
+    /// Factory constructor function to initiate an op store at a designated file or directory
+    /// (argument can be a path string or `file://` URL).
+    #[napi(factory)]
+    pub fn open(store_path: String, root_commit_id: Option<String>) -> napi::Result<Self> {
+        Self::new(store_path, root_commit_id)
+    }
+
+    /// Initialise a new `SimpleOpStore` at `store_path` (file path or file URL).
     #[napi]
     pub fn init(store_path: String, root_commit_id: Option<String>) -> napi::Result<Self> {
+        let store_path = parse_file_path_or_url(&store_path);
         let p = PathBuf::from(&store_path);
         let root_data = RootOperationData {
             root_commit_id: root_commit_id.unwrap_or_else(|| "0".repeat(40)),
@@ -453,25 +485,33 @@ impl OpStore {
     /// Write a view and return its content hash ID.
     #[napi]
     pub fn write_view(&self, view: ViewRecord) -> napi::Result<String> {
-        self.inner.write_view(&view).map_err(|e| err("write_view", e))
+        self.inner
+            .write_view(&view)
+            .map_err(|e| err("write_view", e))
     }
 
     /// Read an operation by its hex ID.
     #[napi]
     pub fn read_operation(&self, id: String) -> napi::Result<OperationRecord> {
-        self.inner.read_operation(&id).map_err(|e| err("read_operation", e))
+        self.inner
+            .read_operation(&id)
+            .map_err(|e| err("read_operation", e))
     }
 
     /// Write an operation and return its content hash ID.
     #[napi]
     pub fn write_operation(&self, operation: OperationRecord) -> napi::Result<String> {
-        self.inner.write_operation(&operation).map_err(|e| err("write_operation", e))
+        self.inner
+            .write_operation(&operation)
+            .map_err(|e| err("write_operation", e))
     }
 
     /// Disambiguate an operation ID prefix.
     #[napi]
     pub fn resolve_operation_id_prefix(&self, prefix: String) -> napi::Result<OpPrefixResolution> {
-        self.inner.resolve_operation_id_prefix(&prefix).map_err(|e| err("resolve_operation_id_prefix", e))
+        self.inner
+            .resolve_operation_id_prefix(&prefix)
+            .map_err(|e| err("resolve_operation_id_prefix", e))
     }
 
     /// Garbage-collect unreachable operations and views older than `keep_newer_seconds`.
@@ -496,6 +536,14 @@ fn compute_op_hash(op: &OperationRecord) -> String {
     hasher.update(&end_val.to_le_bytes());
     let hash = hasher.finalize();
     hex::encode(hash.as_bytes())
+}
+
+fn parse_file_path_or_url(input: &str) -> String {
+    if let Some(stripped) = input.strip_prefix("file://") {
+        stripped.to_string()
+    } else {
+        input.to_string()
+    }
 }
 
 fn compute_view_hash(view: &ViewRecord) -> String {

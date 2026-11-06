@@ -1,11 +1,16 @@
+use std::sync::{Arc, RwLock};
+
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 use gix::ObjectId;
 use gix::object::Kind;
 
+use crate::error::err_str;
 use crate::object_store::base::GenericObjectStore;
 use crate::object_store::base::ObjectStore;
+use crate::object_store::op::{OpStore, OpStoreTrait};
+use crate::object_store::op_heads::{OperationRecordDto, ViewRecordDto};
 use crate::object_store::{
     ObjectStoreOptions, ObjectStoreReader, ObjectStoreWriter, PrefixLookup, WriterTarget,
 };
@@ -31,6 +36,26 @@ use crate::object_store::{
 #[napi]
 pub struct LooseObjectStore {
     inner: GenericObjectStore,
+    op_store: Arc<RwLock<Option<Arc<dyn OpStoreTrait>>>>,
+}
+
+impl LooseObjectStore {
+    fn maybe_materialize_from_op_store(&self, id: &str) -> Option<(Kind, Vec<u8>)> {
+        let op_store_guard = self.op_store.read().ok()?;
+        let op_store = op_store_guard.as_ref()?;
+
+        if let Ok(view) = op_store.read_view(id) {
+            let json = serde_json::to_vec_pretty(&ViewRecordDto::from(&view)).ok()?;
+            return Some((Kind::Blob, json));
+        }
+
+        if let Ok(op) = op_store.read_operation(id) {
+            let json = serde_json::to_vec_pretty(&OperationRecordDto::from(&op)).ok()?;
+            return Some((Kind::Commit, json));
+        }
+
+        None
+    }
 }
 
 impl ObjectStore for LooseObjectStore {
@@ -39,22 +64,82 @@ impl ObjectStore for LooseObjectStore {
     }
 
     fn contains_id(&self, id: &str) -> bool {
-        self.inner.contains_id(id)
+        if self.inner.contains_id(id) {
+            return true;
+        }
+        if let Some((kind, data)) = self.maybe_materialize_from_op_store(id) {
+            let _ = self.inner.write_buf_impl(kind, &data);
+            return true;
+        }
+        false
     }
 
     fn lookup_prefix_impl(&self, prefix: &str) -> napi::Result<PrefixLookup> {
-        self.inner.lookup_prefix_impl(prefix)
+        let res = self.inner.lookup_prefix_impl(prefix)?;
+        if res.found || res.ambiguous {
+            return Ok(res);
+        }
+        if let Ok(guard) = self.op_store.read() {
+            if let Some(op_store) = guard.as_ref() {
+                if let Ok(op_res) = op_store.resolve_operation_id_prefix(prefix) {
+                    if op_res.found {
+                        if let Some(id) = &op_res.id {
+                            if let Some((kind, data)) = self.maybe_materialize_from_op_store(id) {
+                                let _ = self.inner.write_buf_impl(kind, &data);
+                                return Ok(PrefixLookup {
+                                    found: true,
+                                    ambiguous: false,
+                                    id: Some(id.clone()),
+                                });
+                            }
+                        }
+                    } else if op_res.ambiguous {
+                        return Ok(PrefixLookup {
+                            found: false,
+                            ambiguous: true,
+                            id: None,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(res)
     }
 
     fn find_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectData>> {
-        self.inner.find_impl(id)
+        if let Some(data) = self.inner.find_impl(id)? {
+            return Ok(Some(data));
+        }
+        if let Some((kind, data)) = self.maybe_materialize_from_op_store(id) {
+            let _ = self.inner.write_buf_impl(kind, &data);
+            return self.inner.find_impl(id);
+        }
+        Ok(None)
     }
 
     fn header_impl(&self, id: &str) -> napi::Result<Option<crate::object::ObjectHeader>> {
-        self.inner.header_impl(id)
+        if let Some(header) = self.inner.header_impl(id)? {
+            return Ok(Some(header));
+        }
+        if let Some((kind, data)) = self.maybe_materialize_from_op_store(id) {
+            let _ = self.inner.write_buf_impl(kind, &data);
+            return self.inner.header_impl(id);
+        }
+        Ok(None)
     }
 
     fn write_buf_impl(&self, kind: Kind, data: &[u8]) -> napi::Result<ObjectId> {
+        if let Ok(guard) = self.op_store.read() {
+            if let Some(op_store) = guard.as_ref() {
+                if let Ok(op_dto) = serde_json::from_slice::<OperationRecordDto>(data) {
+                    let op_rec = op_dto.into_record(String::new());
+                    let _ = op_store.write_operation(&op_rec);
+                } else if let Ok(view_dto) = serde_json::from_slice::<ViewRecordDto>(data) {
+                    let view_rec = view_dto.into_record(String::new());
+                    let _ = op_store.write_view(&view_rec);
+                }
+            }
+        }
         self.inner.write_buf_impl(kind, data)
     }
 
@@ -64,6 +149,17 @@ impl ObjectStore for LooseObjectStore {
         data: &[u8],
         id: ObjectId,
     ) -> napi::Result<ObjectId> {
+        if let Ok(guard) = self.op_store.read() {
+            if let Some(op_store) = guard.as_ref() {
+                if let Ok(op_dto) = serde_json::from_slice::<OperationRecordDto>(data) {
+                    let op_rec = op_dto.into_record(id.to_string());
+                    let _ = op_store.write_operation(&op_rec);
+                } else if let Ok(view_dto) = serde_json::from_slice::<ViewRecordDto>(data) {
+                    let view_rec = view_dto.into_record(id.to_string());
+                    let _ = op_store.write_view(&view_rec);
+                }
+            }
+        }
         self.inner.write_buf_with_id_impl(kind, data, id)
     }
 
@@ -80,6 +176,11 @@ impl ObjectStore for LooseObjectStore {
     }
 
     fn read_data_impl(&self, id: &str) -> napi::Result<ObjectStoreReader> {
+        if !self.inner.contains_id(id) {
+            if let Some((kind, data)) = self.maybe_materialize_from_op_store(id) {
+                let _ = self.inner.write_buf_impl(kind, &data);
+            }
+        }
         self.inner.read_data_impl(id)
     }
 
@@ -106,7 +207,24 @@ impl LooseObjectStore {
     ) -> napi::Result<Self> {
         let _ = options;
         let inner = GenericObjectStore::new(objects_directory, object_hash)?;
-        Ok(LooseObjectStore { inner })
+        Ok(LooseObjectStore {
+            inner,
+            op_store: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Enable cache mode backed by the specified `OpStore`.
+    #[napi]
+    pub fn set_op_store(&self, op_store: &OpStore) -> napi::Result<()> {
+        let mut guard = self.op_store.write().map_err(|_| err_str("set_op_store", "lock poisoned"))?;
+        *guard = Some(op_store.get_inner());
+        Ok(())
+    }
+
+    /// Whether this store currently has an active OpStore attached (working in cache mode).
+    #[napi(getter)]
+    pub fn has_op_store(&self) -> bool {
+        self.op_store.read().map(|g| g.is_some()).unwrap_or(false)
     }
 
     /// Whether an object with the given id exists.
@@ -246,6 +364,7 @@ impl LooseObjectStore {
     pub fn fork(&self) -> LooseObjectStore {
         LooseObjectStore {
             inner: self.inner.fork(),
+            op_store: self.op_store.clone(),
         }
     }
 

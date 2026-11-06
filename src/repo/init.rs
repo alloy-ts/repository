@@ -29,6 +29,9 @@ pub struct InitOptions {
     /// `objectFormat` of `"sha256"` so the store also accepts SHA-1 object ids. Git only supports
     /// `"sha1"` here.
     pub compat_object_format: Option<String>,
+    /// When `true` (or configured via `init.storeOp`), initialises the repository with both a
+    /// git object store and an operation store (`op_store`).
+    pub store_op: Option<bool>,
 }
 
 fn to_gix_create_options(o: &InitOptions) -> gix::create::Options {
@@ -135,6 +138,21 @@ impl Repository {
             let r = thread_local(&repo.inner);
             std::fs::write(r.git_dir().join("description"), description.as_bytes())
                 .map_err(|e| err("init_description", e))?;
+        }
+
+        // 6. Check `store_op` or `init.storeOp` configuration.
+        let store_op_enabled = match options.store_op {
+            Some(v) => v,
+            None => {
+                let r = thread_local(&repo.inner);
+                r.config_snapshot()
+                    .boolean("init.storeOp")
+                    .unwrap_or(false)
+            }
+        };
+
+        if store_op_enabled {
+            repo.init_op_repo()?;
         }
 
         Ok(repo)
