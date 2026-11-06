@@ -22,6 +22,12 @@ import {
   SimpleBackend,
   COMMIT_ID_LENGTH,
   CHANGE_ID_LENGTH,
+  Op,
+  ViewId,
+  OperationId,
+  RemoteRef,
+  type RemoteRefState,
+  View,
 } from "../../dist/index.js";
 
 describe("Repository Op and Workspace NAPI bindings", () => {
@@ -171,6 +177,53 @@ describe("Repository Op and Workspace NAPI bindings", () => {
     const commitHash = backend.writeCommit("dummy commit proto");
     expect(backend.readCommit(commitHash)).toBe("dummy commit proto");
     expect(backend.readCommit(backend.rootCommitId())).toBe("root_commit");
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("tests Op, Op.fromCommits, OperationId, ViewId, RemoteRef, and View", () => {
+    const viewId = new ViewId("deadbeef");
+    expect(viewId.hex()).toBe("deadbeef");
+
+    const opId = new OperationId("cafebabe");
+    expect(opId.hex()).toBe("cafebabe");
+
+    const absentRef = RemoteRef.absent();
+    expect(absentRef.isAbsent()).toBe(true);
+    expect(absentRef.isPresent()).toBe(false);
+
+    const normalRef = new RemoteRef({ commitId: "123456" }, 1 as RemoteRefState);
+    expect(normalRef.isAbsent()).toBe(false);
+    expect(normalRef.isPresent()).toBe(true);
+    expect(normalRef.isTracked()).toBe(true);
+
+    const view = View.makeRoot("000000");
+    expect(view.headIds()).toEqual(["000000"]);
+    view.setLocalBookmark("main", { commitId: "123456" });
+    expect(view.getLocalBookmark("main")?.commitId).toBe("123456");
+
+    // Test Op class directly
+    const op = new Op("op-1", "view-1", [], "initial op", { branch: "main" });
+    expect(op.id()).toBe("op-1");
+    expect(op.viewId()).toBe("view-1");
+    expect(op.parents()).toEqual([]);
+    expect(op.description()).toBe("initial op");
+    expect(op.metadata()["branch"]).toBe("main");
+
+    const record = op.toRecord();
+    expect(record.id).toBe("op-1");
+    expect(record.viewId).toBe("view-1");
+
+    // Test Op.fromCommits with a real repository commit
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "op-from-commits-"));
+    const repo = Repository.init(tmpDir);
+    const emptyTreeId = repo.writeTree([]);
+    const commitId = repo.commit("HEAD", "Initial commit for op", emptyTreeId, []);
+
+    const ops = Op.fromCommits(repo, [commitId]);
+    expect(ops.length).toBe(1);
+    expect(ops[0]!.description()).toBe("Initial commit for op");
+    expect(ops[0]!.metadata()["commit_id"]).toBe(commitId);
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });

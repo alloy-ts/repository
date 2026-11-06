@@ -2,7 +2,7 @@
 //!
 //! Mirrors `jj_lib::op_walk` and operation set evaluation semantics.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use napi_derive::napi;
 use thiserror::Error;
@@ -10,8 +10,357 @@ use thiserror::Error;
 pub use crate::backend::*;
 use crate::error::{err, thread_local};
 use crate::object_store::op::OpStore;
-use crate::object_store::op_heads::{OpHeadsStore, OperationRecord};
+use crate::object_store::op_heads::{OpHeadsStore, OperationRecord, ViewRecord};
 use crate::repository::Repository;
+
+/// Identifier for a [`View`] object.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[napi]
+pub struct ViewId {
+    hex: String,
+}
+
+#[napi]
+impl ViewId {
+    #[napi(constructor)]
+    pub fn new(hex: String) -> Self {
+        Self { hex }
+    }
+
+    #[napi]
+    pub fn hex(&self) -> String {
+        self.hex.clone()
+    }
+}
+
+/// Identifier for an [`Operation`] object.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[napi]
+pub struct OperationId {
+    hex: String,
+}
+
+#[napi]
+impl OperationId {
+    #[napi(constructor)]
+    pub fn new(hex: String) -> Self {
+        Self { hex }
+    }
+
+    #[napi]
+    pub fn hex(&self) -> String {
+        self.hex.clone()
+    }
+}
+
+/// Whether a remote reference is tracked or not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[napi]
+pub enum RemoteRefState {
+    New,
+    Tracked,
+}
+
+/// Bookmark or tag target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[napi(object)]
+pub struct RefTarget {
+    /// Resolved target commit ID, or None if absent.
+    pub commit_id: Option<String>,
+    /// Conflict commits if any.
+    pub conflict_commits: Option<Vec<String>>,
+}
+
+impl RefTarget {
+    pub fn absent() -> Self {
+        Self {
+            commit_id: None,
+            conflict_commits: None,
+        }
+    }
+
+    pub fn normal(commit_id: String) -> Self {
+        Self {
+            commit_id: Some(commit_id),
+            conflict_commits: None,
+        }
+    }
+}
+
+/// Remote bookmark or tag.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[napi]
+pub struct RemoteRef {
+    target: RefTarget,
+    state: RemoteRefState,
+}
+
+#[napi]
+impl RemoteRef {
+    #[napi(constructor)]
+    pub fn new(target: RefTarget, state: RemoteRefState) -> Self {
+        Self { target, state }
+    }
+
+    #[napi(factory)]
+    pub fn absent() -> Self {
+        Self {
+            target: RefTarget::absent(),
+            state: RemoteRefState::New,
+        }
+    }
+
+    #[napi]
+    pub fn is_absent(&self) -> bool {
+        self.target.commit_id.is_none()
+    }
+
+    #[napi]
+    pub fn is_present(&self) -> bool {
+        self.target.commit_id.is_some()
+    }
+
+    #[napi]
+    pub fn is_tracked(&self) -> bool {
+        self.state == RemoteRefState::Tracked
+    }
+
+    #[napi]
+    pub fn target(&self) -> RefTarget {
+        self.target.clone()
+    }
+
+    #[napi]
+    pub fn state(&self) -> RemoteRefState {
+        self.state
+    }
+}
+
+/// Represents the state of the remote repository.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[napi]
+pub struct RemoteView {
+    pub(crate) bookmarks: HashMap<String, RemoteRef>,
+    pub(crate) tags: HashMap<String, RemoteRef>,
+}
+
+#[napi]
+impl RemoteView {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[napi]
+    pub fn get_bookmark(&self, name: String) -> Option<RemoteRef> {
+        self.bookmarks.get(&name).cloned()
+    }
+
+    #[napi]
+    pub fn set_bookmark(&mut self, name: String, remote_ref: &RemoteRef) {
+        self.bookmarks.insert(name, remote_ref.clone());
+    }
+
+    #[napi]
+    pub fn get_tag(&self, name: String) -> Option<RemoteRef> {
+        self.tags.get(&name).cloned()
+    }
+
+    #[napi]
+    pub fn set_tag(&mut self, name: String, remote_ref: &RemoteRef) {
+        self.tags.insert(name, remote_ref.clone());
+    }
+}
+
+/// Represents the way the repository looks at a given time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[napi]
+pub struct View {
+    head_ids: Vec<String>,
+    local_bookmarks: HashMap<String, RefTarget>,
+    local_tags: HashMap<String, RefTarget>,
+    git_refs: HashMap<String, RefTarget>,
+    wc_commit_ids: HashMap<String, String>,
+}
+
+#[napi]
+impl View {
+    #[napi(constructor)]
+    pub fn new(head_ids: Vec<String>) -> Self {
+        Self {
+            head_ids,
+            local_bookmarks: HashMap::new(),
+            local_tags: HashMap::new(),
+            git_refs: HashMap::new(),
+            wc_commit_ids: HashMap::new(),
+        }
+    }
+
+    #[napi(factory)]
+    pub fn make_root(root_commit_id: String) -> Self {
+        Self {
+            head_ids: vec![root_commit_id],
+            local_bookmarks: HashMap::new(),
+            local_tags: HashMap::new(),
+            git_refs: HashMap::new(),
+            wc_commit_ids: HashMap::new(),
+        }
+    }
+
+    #[napi]
+    pub fn head_ids(&self) -> Vec<String> {
+        self.head_ids.clone()
+    }
+
+    #[napi]
+    pub fn get_local_bookmark(&self, name: String) -> Option<RefTarget> {
+        self.local_bookmarks.get(&name).cloned()
+    }
+
+    #[napi]
+    pub fn set_local_bookmark(&mut self, name: String, target: RefTarget) {
+        self.local_bookmarks.insert(name, target);
+    }
+
+    #[napi]
+    pub fn get_wc_commit_id(&self, workspace_name: String) -> Option<String> {
+        self.wc_commit_ids.get(&workspace_name).cloned()
+    }
+
+    #[napi]
+    pub fn set_wc_commit_id(&mut self, workspace_name: String, commit_id: String) {
+        self.wc_commit_ids.insert(workspace_name, commit_id);
+    }
+}
+
+/// An operation in the operation graph.
+#[derive(Clone, Debug)]
+#[napi]
+pub struct Op {
+    id: String,
+    view_id: String,
+    parents: Vec<String>,
+    description: String,
+    metadata: HashMap<String, String>,
+}
+
+#[napi]
+impl Op {
+    /// Construct a new Op object.
+    #[napi(constructor)]
+    pub fn new(
+        id: String,
+        view_id: String,
+        parents: Vec<String>,
+        description: String,
+        metadata: Option<HashMap<String, String>>,
+    ) -> Self {
+        Self {
+            id,
+            view_id,
+            parents,
+            description,
+            metadata: metadata.unwrap_or_default(),
+        }
+    }
+
+    #[napi]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    #[napi]
+    pub fn view_id(&self) -> String {
+        self.view_id.clone()
+    }
+
+    #[napi]
+    pub fn parents(&self) -> Vec<String> {
+        self.parents.clone()
+    }
+
+    #[napi]
+    pub fn description(&self) -> String {
+        self.description.clone()
+    }
+
+    #[napi]
+    pub fn metadata(&self) -> HashMap<String, String> {
+        self.metadata.clone()
+    }
+
+    /// Converts Git commits into an array of operations.
+    #[napi]
+    pub fn from_commits(repo: &Repository, commit_ids: Vec<String>) -> napi::Result<Vec<Op>> {
+        let mut ops = Vec::new();
+        let mut last_op_id: Option<String> = None;
+
+        for commit_id in commit_ids {
+            let commit = repo.find_commit(commit_id.clone())?;
+            let parents = if let Some(ref prev) = last_op_id {
+                vec![prev.clone()]
+            } else {
+                Vec::new()
+            };
+
+            let msg = commit.message()?;
+            let author = commit.author()?;
+
+            let op_id = {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(commit_id.as_bytes());
+                hasher.update(msg.as_bytes());
+                hasher.finalize().to_hex().to_string()
+            };
+
+            let view_id = format!("view-{}", op_id);
+            let mut meta = HashMap::new();
+            meta.insert("author".to_string(), author.name);
+            meta.insert("email".to_string(), author.email);
+            meta.insert("commit_id".to_string(), commit_id.clone());
+
+            let op = Op {
+                id: op_id.clone(),
+                view_id,
+                parents,
+                description: msg.trim().to_string(),
+                metadata: meta,
+            };
+
+            last_op_id = Some(op_id);
+            ops.push(op);
+        }
+
+        Ok(ops)
+    }
+
+    /// Convert to an OperationRecord for OpStore persistence.
+    #[napi]
+    pub fn to_record(&self) -> OperationRecord {
+        let mut attributes = BTreeMap::new();
+        for (k, v) in &self.metadata {
+            attributes.insert(k.clone(), v.clone());
+        }
+        OperationRecord {
+            id: self.id.clone(),
+            view_id: self.view_id.clone(),
+            parents: self.parents.clone(),
+            metadata: crate::object_store::op_heads::OpMetadata {
+                description: self.description.clone(),
+                hostname: "localhost".to_string(),
+                username: "jules".to_string(),
+                is_snapshot: false,
+                workspace_name: None,
+                time: crate::object_store::op_heads::OpTimestampRange {
+                    start_millis: napi::bindgen_prelude::BigInt::from(0i64),
+                    end_millis: napi::bindgen_prelude::BigInt::from(1i64),
+                    tz_offset: 0,
+                },
+                attributes,
+            },
+        }
+    }
+}
 
 /// Error that may occur during evaluation or resolution of operation set expressions.
 #[derive(Debug, Error)]
