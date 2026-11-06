@@ -21,8 +21,14 @@ pub mod base;
 pub mod buffered;
 pub mod loose;
 pub mod memory;
+pub mod op_heads;
 pub mod sql;
 
+pub use op_heads::{
+    OpHeadsLock, OpHeadsStore, OpHeadsStoreError, OpHeadsStoreLock, OpHeadsStoreTrait,
+    OpMetadata, OpRefTarget, OpTimestampRange, OperationRecord, ResolvedOpHeads,
+    SimpleOpHeadsStore, SimpleOpHeadsStoreLock, ViewRecord,
+};
 pub use sql::SqlObjectStore;
 
 /// Lower-cased string form of a hash kind (`"sha1"` / `"sha256"`). `gix::hash::Kind` is

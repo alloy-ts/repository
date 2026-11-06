@@ -863,6 +863,44 @@ impl Repository {
         Ok(())
     }
 
+    /// Check whether a Jujutsu repository directory (`.jj`) exists alongside this repository.
+    #[napi]
+    pub fn is_jj_repo(&self) -> bool {
+        let r = thread_local(&self.inner);
+        if let Some(wd) = r.workdir() {
+            wd.join(".jj").is_dir()
+        } else {
+            r.git_dir().join(".jj").is_dir()
+        }
+    }
+
+    /// Obtain the Jujutsu OpHeadsStore handle for this repository.
+    #[napi]
+    pub fn jj_op_heads_store(&self) -> napi::Result<crate::object_store::op_heads::OpHeadsStore> {
+        let r = thread_local(&self.inner);
+        let jj_repo_path = if let Some(wd) = r.workdir() {
+            wd.join(".jj").join("repo")
+        } else {
+            r.git_dir().join(".jj").join("repo")
+        };
+        crate::object_store::op_heads::OpHeadsStore::new(jj_repo_path.to_string_lossy().into_owned())
+    }
+
+    /// Initialise Jujutsu repository metadata (.jj/repo structure and OpHeadsStore)
+    /// backed by this git repository.
+    #[napi]
+    pub fn init_jj(&self) -> napi::Result<crate::object_store::op_heads::OpHeadsStore> {
+        let r = thread_local(&self.inner);
+        let root = if let Some(wd) = r.workdir() {
+            wd.join(".jj")
+        } else {
+            r.git_dir().join(".jj")
+        };
+        let jj_repo = root.join("repo");
+        let head_id = r.head_commit().ok().map(|c| c.id.to_string());
+        crate::object_store::op_heads::OpHeadsStore::init(jj_repo.to_string_lossy().into_owned(), head_id)
+    }
+
     /// Count the commits `HEAD` is ahead of and behind `upstream` (a sha or a ref name).
     /// Mirrors the reference service's `ahead_behind(upstream)`.
     #[napi]
