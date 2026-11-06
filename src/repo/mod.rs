@@ -886,6 +886,19 @@ impl Repository {
         crate::object_store::op_heads::OpHeadsStore::new(jj_repo_path.to_string_lossy().into_owned())
     }
 
+    /// Obtain the Jujutsu OpStore handle for this repository.
+    #[napi]
+    pub fn jj_op_store(&self) -> napi::Result<crate::object_store::op::OpStore> {
+        let r = thread_local(&self.inner);
+        let jj_op_store_path = if let Some(wd) = r.workdir() {
+            wd.join(".jj").join("repo").join("op_store")
+        } else {
+            r.git_dir().join(".jj").join("repo").join("op_store")
+        };
+        let head_id = r.head_commit().ok().map(|c| c.id.to_string());
+        crate::object_store::op::OpStore::new(jj_op_store_path.to_string_lossy().into_owned(), head_id)
+    }
+
     /// Initialise Jujutsu repository metadata (.jj/repo structure and OpHeadsStore)
     /// backed by this git repository.
     #[napi]

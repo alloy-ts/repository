@@ -628,24 +628,24 @@ impl Drop for OpHeadsLock {
 
 // Serialization DTO helpers
 #[derive(serde::Serialize, serde::Deserialize)]
-struct OpMetadataDto {
-    description: String,
-    hostname: String,
-    username: String,
-    is_snapshot: bool,
-    workspace_name: Option<String>,
-    start_millis: i64,
-    end_millis: i64,
-    tz_offset: i32,
-    attributes: BTreeMap<String, String>,
+pub(crate) struct OpMetadataDto {
+    pub description: String,
+    pub hostname: String,
+    pub username: String,
+    pub is_snapshot: bool,
+    pub workspace_name: Option<String>,
+    pub start_millis: i64,
+    pub end_millis: i64,
+    pub tz_offset: i32,
+    pub attributes: BTreeMap<String, String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct OperationRecordDto {
-    id: String,
-    view_id: String,
-    parents: Vec<String>,
-    metadata: OpMetadataDto,
+pub(crate) struct OperationRecordDto {
+    pub id: String,
+    pub view_id: String,
+    pub parents: Vec<String>,
+    pub metadata: OpMetadataDto,
 }
 
 impl From<&OperationRecord> for OperationRecordDto {
@@ -672,7 +672,7 @@ impl From<&OperationRecord> for OperationRecordDto {
 }
 
 impl OperationRecordDto {
-    fn into_record(self, id: String) -> OperationRecord {
+    pub fn into_record(self, id: String) -> OperationRecord {
         OperationRecord {
             id,
             view_id: self.view_id,
@@ -695,10 +695,10 @@ impl OperationRecordDto {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct OpRefTargetDto {
-    adds: Vec<String>,
-    removes: Vec<String>,
-    is_conflict: bool,
+pub(crate) struct OpRefTargetDto {
+    pub adds: Vec<String>,
+    pub removes: Vec<String>,
+    pub is_conflict: bool,
 }
 
 impl From<&OpRefTarget> for OpRefTargetDto {
@@ -722,14 +722,14 @@ impl From<OpRefTargetDto> for OpRefTarget {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct ViewRecordDto {
-    id: String,
-    head_ids: Vec<String>,
-    wc_commit_ids: BTreeMap<String, String>,
-    local_bookmarks: BTreeMap<String, OpRefTargetDto>,
-    local_tags: BTreeMap<String, OpRefTargetDto>,
-    git_refs: BTreeMap<String, OpRefTargetDto>,
-    git_heads: BTreeMap<String, OpRefTargetDto>,
+pub(crate) struct ViewRecordDto {
+    pub id: String,
+    pub head_ids: Vec<String>,
+    pub wc_commit_ids: BTreeMap<String, String>,
+    pub local_bookmarks: BTreeMap<String, OpRefTargetDto>,
+    pub local_tags: BTreeMap<String, OpRefTargetDto>,
+    pub git_refs: BTreeMap<String, OpRefTargetDto>,
+    pub git_heads: BTreeMap<String, OpRefTargetDto>,
 }
 
 impl From<&ViewRecord> for ViewRecordDto {
@@ -747,7 +747,7 @@ impl From<&ViewRecord> for ViewRecordDto {
 }
 
 impl ViewRecordDto {
-    fn into_record(self, id: String) -> ViewRecord {
+    pub fn into_record(self, id: String) -> ViewRecord {
         ViewRecord {
             id,
             head_ids: self.head_ids,

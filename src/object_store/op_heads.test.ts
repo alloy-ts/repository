@@ -66,6 +66,51 @@ describe("OpHeadsStore & Jujutsu (jj) Repository integration", () => {
     expect(heads).toEqual([rootOp]);
   });
 
+  test("test_op_heads behavior matches jj-lib SimpleOpHeadsStore test case", () => {
+    const testDir = join(tmpRoot, "op-heads-parity");
+    const op1 = "1111".padEnd(64, "0");
+    const op2 = "2222".padEnd(64, "0");
+    const op3 = "3333".padEnd(64, "0");
+    const op4 = "4444".padEnd(64, "0");
+
+    // Initial op head is respected
+    const opStore = OpHeadsStore.init(testDir, "commit1");
+    opStore.updateOpHeads(opStore.getOpHeads(), op1);
+    let opHeads = opStore.getOpHeads();
+    expect(opHeads).toEqual([op1]);
+
+    // Simple replacement
+    opStore.updateOpHeads([op1], op2);
+    opHeads = opStore.getOpHeads();
+    expect(opHeads).toEqual([op2]);
+
+    // Duplicating is a no-op
+    opStore.updateOpHeads([], op2);
+    opHeads = opStore.getOpHeads();
+    expect(opHeads).toEqual([op2]);
+
+    // Deleting non-head is a no-op
+    opStore.updateOpHeads([op1], op2);
+    opHeads = opStore.getOpHeads();
+    expect(opHeads).toEqual([op2]);
+
+    // Can create multiple heads
+    opStore.updateOpHeads([], op3);
+    opHeads = opStore.getOpHeads();
+    expect(opHeads).toEqual([op2, op3]);
+
+    // Can replace multiple heads
+    opStore.updateOpHeads([op2, op3], op4);
+    opHeads = opStore.getOpHeads();
+    expect(opHeads).toEqual([op4]);
+
+    // Can replace multiple heads by one of the old heads
+    opStore.updateOpHeads([], op3);
+    opStore.updateOpHeads([op3, op4], op4);
+    opHeads = opStore.getOpHeads();
+    expect(opHeads).toEqual([op4]);
+  });
+
   test("lock acquires and releases lock on op-heads-store", () => {
     const lock = store.lock();
     expect(lock).toBeDefined();
