@@ -168,6 +168,27 @@ impl napi::bindgen_prelude::FromNapiValue for CancellationToken {
     }
 }
 
+/// Registry ownership for tokens allocated by Process or Cluster. Caller-owned
+/// tokens deliberately do not use this guard. Keep one Arc in every owner and
+/// in the execution future so cancellation remains addressable during cleanup.
+pub(crate) struct OwnedCancellation {
+    pub(crate) token: CancellationToken,
+}
+
+impl OwnedCancellation {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            token: create_cancellation_token(),
+        })
+    }
+}
+
+impl Drop for OwnedCancellation {
+    fn drop(&mut self) {
+        registry().lock().unwrap().remove(&self.token.id);
+    }
+}
+
 /// Maximum retained bytes per output stream. `None` means unlimited. Buffer
 /// allocations may slightly exceed a limit because the allocator rounds
 /// capacity, while the retained byte length never exceeds it.
@@ -1248,6 +1269,11 @@ pub async fn run_command(
 pub struct Process {
     execution: tokio::sync::Mutex<Option<tokio::task::JoinHandle<napi::Result<CommandResult>>>>,
     cancellation: CancellationToken,
+    // The future owns another guard until execution/cleanup finishes.
+    _ownership: Option<Arc<OwnedCancellation>>,
+    program: String,
+    args: Vec<String>,
+    cluster_id: Option<u32>,
 }
 
 #[napi]
@@ -1286,13 +1312,36 @@ impl Process {
         Self::start(options, cancellation)
     }
 
+    /// Normalized executable name/path. Reading this does not start execution.
+    #[napi(getter)]
+    pub fn program(&self) -> String {
+        self.program.clone()
+    }
+
+    /// A copy of the arguments supplied to the executable.
+    #[napi(getter)]
+    pub fn args(&self) -> Vec<String> {
+        self.args.clone()
+    }
+
+    /// Stable cluster-local task ID; absent for standalone processes.
+    #[napi(getter)]
+    pub fn id(&self) -> Option<u32> {
+        self.cluster_id
+    }
+
     /// Await the already-started execution. A second call rejects.
     #[napi]
     pub async fn run(&self) -> napi::Result<CommandResult> {
-        let execution = self.execution.lock().await.take().ok_or_else(|| {
-            napi::Error::from_reason("Process.run() may only be called once")
-        })?;
-        execution.await.map_err(|error| napi::Error::from_reason(error.to_string()))?
+        let execution = self
+            .execution
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("Process.run() may only be called once"))?;
+        execution
+            .await
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?
     }
 
     /// Request cancellation, including cleanup of the child process tree.
@@ -1303,16 +1352,42 @@ impl Process {
 }
 
 impl Process {
-    pub(crate) fn start(options: CommandOptions, cancellation: Option<CancellationToken>) -> napi::Result<Self> {
+    pub(crate) fn start(
+        options: CommandOptions,
+        cancellation: Option<CancellationToken>,
+    ) -> napi::Result<Self> {
+        let ownership = cancellation.is_none().then(OwnedCancellation::new);
+        let token = cancellation.unwrap_or_else(|| ownership.as_ref().unwrap().token);
+        Self::start_owned(options, token, ownership, None)
+    }
+
+    pub(crate) fn start_owned(
+        mut options: CommandOptions,
+        cancellation: CancellationToken,
+        ownership: Option<Arc<OwnedCancellation>>,
+        cluster_id: Option<u32>,
+    ) -> napi::Result<Self> {
+        options.program = executable_path(&options.program)?;
         validate_duration(options.timeout_ms)?;
         validate_duration(options.cleanup_timeout_ms)?;
         let (command, input, timeout, limits, cleanup) = prepare(&options);
-        let cancellation = cancellation.unwrap_or_else(create_cancellation_token);
+        let program = options.program;
+        let args = options.args.unwrap_or_default();
         let token = cancellation;
+        let execution_ownership = ownership.clone();
         let execution = napi::bindgen_prelude::spawn(async move {
+            // Bind inside the future: dropping/aborting it also releases the guard.
+            let _ownership = execution_ownership;
             execute(command, input, timeout, limits, cleanup, Some(&token)).await
         });
-        Ok(Self { execution: tokio::sync::Mutex::new(Some(execution)), cancellation })
+        Ok(Self {
+            execution: tokio::sync::Mutex::new(Some(execution)),
+            cancellation,
+            _ownership: ownership,
+            program,
+            args,
+            cluster_id,
+        })
     }
 }
 
@@ -1325,7 +1400,10 @@ impl Drop for Process {
 fn validate_duration(ms: Option<f64>) -> napi::Result<()> {
     if let Some(ms) = ms {
         if !ms.is_finite() || ms < 0.0 || Duration::try_from_secs_f64(ms / 1000.0).is_err() {
-            return Err(napi::Error::new(napi::Status::InvalidArg, "timeout must be finite, nonnegative and representable"));
+            return Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                "timeout must be finite, nonnegative and representable",
+            ));
         }
     }
     Ok(())
@@ -1333,24 +1411,41 @@ fn validate_duration(ms: Option<f64>) -> napi::Result<()> {
 
 fn executable_path(value: &str) -> napi::Result<String> {
     if value.is_empty() || value.contains('\0') {
-        return Err(napi::Error::new(napi::Status::InvalidArg, "executable must be a nonempty path without NUL bytes"));
+        return Err(napi::Error::new(
+            napi::Status::InvalidArg,
+            "executable must be a nonempty path without NUL bytes",
+        ));
     }
     // A drive letter is a path, not a URL scheme.
     if value.contains("://") || value.starts_with("file:") {
         let url = url::Url::parse(value).map_err(|e| napi::Error::from_reason(e.to_string()))?;
         if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
-            return Err(napi::Error::new(napi::Status::InvalidArg, "executable URL must be a file URL without query or fragment"));
+            return Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                "executable URL must be a file URL without query or fragment",
+            ));
         }
-        let path = url.to_file_path().map_err(|_| napi::Error::from_reason("invalid local file URL"))?;
-        return path.into_os_string().into_string().map_err(|_| napi::Error::from_reason("executable path is not UTF-8"));
+        let path = url
+            .to_file_path()
+            .map_err(|_| napi::Error::from_reason("invalid local file URL"))?;
+        return path
+            .into_os_string()
+            .into_string()
+            .map_err(|_| napi::Error::from_reason("executable path is not UTF-8"));
     }
     Ok(value.to_owned())
 }
 
 fn executable_options(value: &str) -> napi::Result<CommandOptions> {
     Ok(CommandOptions {
-        program: executable_path(value)?, args: None, cwd: None, env: None,
-        input: None, timeout_ms: None, cleanup_timeout_ms: None, limits: None,
+        program: executable_path(value)?,
+        args: None,
+        cwd: None,
+        env: None,
+        input: None,
+        timeout_ms: None,
+        cleanup_timeout_ms: None,
+        limits: None,
     })
 }
 
@@ -1436,15 +1531,88 @@ async fn execute(
 }
 
 #[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn owned_registrations_return_to_baseline_after_commands() {
+        let _lock = REGISTRY_TEST_LOCK.lock().await;
+        let baseline = registry().lock().unwrap().len();
+        for _ in 0..16 {
+            let owner = OwnedCancellation::new();
+            let token = owner.token;
+            let execution_owner = Arc::clone(&owner);
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .arg("--list")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let execution = tokio::spawn(async move {
+                let _owner = execution_owner;
+                run(
+                    command,
+                    None,
+                    Some(Duration::from_secs(5)),
+                    Some(&token),
+                    OutputLimits::default(),
+                    Duration::from_secs(1),
+                )
+                .await
+            });
+            assert!(execution.await.unwrap().unwrap().success);
+            // The Process/Cluster owner still keeps the token addressable.
+            assert!(registry().lock().unwrap().contains_key(&token.id));
+            drop(owner);
+            assert_eq!(registry().lock().unwrap().len(), baseline);
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_retains_registration_until_cleanup_finishes() {
+        let _lock = REGISTRY_TEST_LOCK.lock().await;
+        let baseline = registry().lock().unwrap().len();
+        let owner = OwnedCancellation::new();
+        let token = owner.token;
+        let execution_owner = Arc::clone(&owner);
+        drop(owner);
+        assert!(registry().lock().unwrap().contains_key(&token.id));
+        token.cancel();
+        token.cancelled().await;
+        drop(execution_owner);
+        assert_eq!(registry().lock().unwrap().len(), baseline);
+    }
+
+    #[tokio::test]
+    async fn owned_cleanup_preserves_caller_supplied_tokens() {
+        let _lock = REGISTRY_TEST_LOCK.lock().await;
+        let caller = create_cancellation_token();
+        let owner = OwnedCancellation::new();
+        drop(owner);
+        assert!(registry().lock().unwrap().contains_key(&caller.id));
+        caller.cancel();
+        assert!(caller.is_cancelled());
+        registry().lock().unwrap().remove(&caller.id);
+    }
 
     #[test]
     fn executable_inputs_are_local_and_decoded() {
         assert_eq!(executable_path("git").unwrap(), "git");
         #[cfg(unix)]
-        assert_eq!(executable_path("file:///tmp/my%20tool").unwrap(), "/tmp/my tool");
-        for value in ["", "bad\0path", "https://example.com/tool", "file:///tmp/tool?x=1", "file:///tmp/tool#part"] {
+        assert_eq!(
+            executable_path("file:///tmp/my%20tool").unwrap(),
+            "/tmp/my tool"
+        );
+        for value in [
+            "",
+            "bad\0path",
+            "https://example.com/tool",
+            "file:///tmp/tool?x=1",
+            "file:///tmp/tool#part",
+        ] {
             assert!(executable_path(value).is_err(), "{value:?}");
         }
     }
@@ -1459,6 +1627,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_is_sticky_across_waiters() {
+        let _lock = REGISTRY_TEST_LOCK.lock().await;
         let token = create_cancellation_token();
         let waiting = token.clone();
         let task = tokio::spawn(async move { waiting.cancelled().await });
@@ -1514,4 +1683,3 @@ mod tests {
         }
     }
 }
-

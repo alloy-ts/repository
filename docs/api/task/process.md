@@ -54,6 +54,16 @@ A “task object” here means a `CommandOptions` descriptor. A live [Task](./in
 
 Input validation can throw synchronously. OS spawn failures and execution errors are observed by awaiting `run()`. Construction schedules the work; it does not synchronously confirm that the OS has created the child.
 
+### Read-only properties
+
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `program` | `string` | Normalized executable name/path; file URLs are decoded. |
+| `args` | `string[]` | A fresh copy of the launch arguments on each read. Mutating it does not affect the child. |
+| `id` | `number` or `null` | Stable cluster-local task ID for children returned by [Cluster.fork()](./cluster.md); `null` for standalone processes. This is not an OS PID. |
+
+Reading these properties does not launch another execution. Only the normalized program and argument snapshot are retained for inspection, not the input buffer.
+
 ### run(): Promise<CommandResult>
 
 Collects the already-scheduled execution. It does not start a second child. A second call, including a concurrent call, rejects with `Process.run() may only be called once`.
@@ -64,7 +74,7 @@ Keep the instance reachable until its result has been collected. Dropping the na
 
 Requests cancellation through the process's token. Cancellation is sticky and repeated requests are harmless. This method does not wait for cleanup; await the original `run()` promise to inspect the result.
 
-If the constructor received a shared token, `cancel()` also cancels other operations using that token. Otherwise the constructor allocates a token for this instance.
+If the constructor received a shared token, `cancel()` also cancels other operations using that token. Otherwise the constructor allocates an internal token for this instance. Internally allocated registry state is released once execution/cleanup and all Process/Cluster owners finish; caller-supplied shared tokens remain registered.
 
 ## CommandOptions
 

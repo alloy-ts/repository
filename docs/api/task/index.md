@@ -17,6 +17,7 @@ A live Task cannot be passed to the Process constructor. Process accepts command
 
 Submodules under `task`:
 
+- **`cluster`** ([cluster.md](./cluster.md)): Draft subprocess registry with stable task IDs and targeted cancellation.
 - **`thread`** ([thread.md](./thread.md)): Direct OS thread handles (`Thread`, `Builder`, `JoinHandle`) and thread-pool wrappers (`ThreadPool`).
 - **`scheduler`** ([scheduler.md](./scheduler.md)): Task scheduling and dispatching (`Scheduler`, `TaskHandle`) managing worker execution pools.
 - **`promise`** ([promise.md](./promise.md)): Native Promise bridging and deferred resolution (`asyncPlus100`, `processBuffer`, `processBufferOnPool`).

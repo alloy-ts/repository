@@ -51,23 +51,45 @@ describe("Process constructor", () => {
     expect(result.output!.stdout.toString("utf8")).toBe("hello world");
   });
 
+  test("exposes normalized program and independent argument snapshots", async () => {
+    const original = ["-e", "process.stdout.write(process.argv[1])", "original"];
+    const child = new Process({
+      program: pathToFileURL(process.execPath).href,
+      args: original,
+      timeoutMs: 5000,
+    });
+    original[2] = "mutated input";
+    expect(child.program).toBe(process.execPath);
+    const snapshot = child.args;
+    snapshot[2] = "mutated snapshot";
+    expect(child.args[2]).toBe("original");
+    expect(child.id).toBeNull();
+    const result = await child.run();
+    expect(result.output!.stdout.toString("utf8")).toBe("original");
+    await expect(child.run()).rejects.toThrow("only be called once");
+  });
+
   test("starts before run and does not execute again", async () => {
     await withDirectory(async (directory) => {
       const marker = join(directory, "started");
-      const child = new Process(nodeCommand(
-        "require('node:fs').appendFileSync(process.argv[1], 'started\\n')",
-        [marker],
-      ));
+      const child = new Process(
+        nodeCommand("require('node:fs').appendFileSync(process.argv[1], 'started\\n')", [marker]),
+      );
       let completion: ReturnType<Process["run"]> | undefined;
       try {
-        await expect.poll(async () => {
-          try {
-            await access(marker);
-            return true;
-          } catch {
-            return false;
-          }
-        }, { timeout: 4000 }).toBe(true);
+        await expect
+          .poll(
+            async () => {
+              try {
+                await access(marker);
+                return true;
+              } catch {
+                return false;
+              }
+            },
+            { timeout: 4000 },
+          )
+          .toBe(true);
 
         completion = child.run();
         expect((await completion).success).toBe(true);
@@ -116,14 +138,20 @@ describe("Process constructor", () => {
 
   test("rejects invalid execution and cleanup durations synchronously", () => {
     for (const value of [NaN, Infinity, -Infinity, -1, Number.MAX_VALUE]) {
-      expect(() => new Process({
-        ...nodeCommand(""),
-        timeoutMs: value,
-      })).toThrow();
-      expect(() => new Process({
-        ...nodeCommand(""),
-        cleanupTimeoutMs: value,
-      })).toThrow();
+      expect(
+        () =>
+          new Process({
+            ...nodeCommand(""),
+            timeoutMs: value,
+          }),
+      ).toThrow();
+      expect(
+        () =>
+          new Process({
+            ...nodeCommand(""),
+            cleanupTimeoutMs: value,
+          }),
+      ).toThrow();
     }
   });
 
@@ -137,9 +165,9 @@ describe("Process constructor", () => {
 
 describe("Process capture and options", () => {
   test("captures stdout and stderr separately as buffers", async () => {
-    const child = new Process(nodeCommand(
-      "process.stdout.write('hello'); process.stderr.write('diagnostic')",
-    ));
+    const child = new Process(
+      nodeCommand("process.stdout.write('hello'); process.stderr.write('diagnostic')"),
+    );
     const result = await child.run();
     expect(result.success).toBe(true);
     expect(result.failure).toBeUndefined();
@@ -181,7 +209,9 @@ describe("Process capture and options", () => {
       const originalCwd = process.cwd();
       const originalValue = process.env.ALLOY_PROCESS_TEST_VALUE;
       const child = new Process({
-        ...nodeCommand("process.stdout.write(JSON.stringify({ cwd: process.cwd(), value: process.env.ALLOY_PROCESS_TEST_VALUE }))"),
+        ...nodeCommand(
+          "process.stdout.write(JSON.stringify({ cwd: process.cwd(), value: process.env.ALLOY_PROCESS_TEST_VALUE }))",
+        ),
         cwd: directory,
         env: [{ name: "ALLOY_PROCESS_TEST_VALUE", value: "child-only" }],
       });
@@ -211,7 +241,9 @@ describe("Process capture and options", () => {
       expect(failure.stream).toBe(stream);
       expect(failure.limit).toBe(3);
       expect(failure[stream].toString("utf8")).toBe("abc");
-      expect(stream === "stdout" ? failure.capture.stdoutTruncated : failure.capture.stderrTruncated).toBe(true);
+      expect(
+        stream === "stdout" ? failure.capture.stdoutTruncated : failure.capture.stderrTruncated,
+      ).toBe(true);
     });
   }
 
@@ -278,10 +310,10 @@ describe("Process cancellation and timeout", () => {
       const marker = join(directory, "must-not-exist");
       const token = createCancellationToken();
       token.cancel();
-      const child = new Process(nodeCommand(
-        "require('node:fs').writeFileSync(process.argv[1], 'unexpected')",
-        [marker],
-      ), token);
+      const child = new Process(
+        nodeCommand("require('node:fs').writeFileSync(process.argv[1], 'unexpected')", [marker]),
+        token,
+      );
       const result = await child.run();
       expect(result.success).toBe(false);
       expect(result.failure!.kind).toBe("cancelled");
@@ -304,10 +336,9 @@ describe("Process cancellation and timeout", () => {
 describe("runCommand", () => {
   test("executes independently on each call", async () => {
     for (let index = 0; index < 2; index++) {
-      const result = await runCommand(nodeCommand(
-        "process.stdout.write(process.argv[1])",
-        [String(index)],
-      ));
+      const result = await runCommand(
+        nodeCommand("process.stdout.write(process.argv[1])", [String(index)]),
+      );
       expect(result.success).toBe(true);
       expect(result.output!.stdout.toString("utf8")).toBe(String(index));
     }
