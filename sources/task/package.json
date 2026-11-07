@@ -5,5 +5,12 @@
   "type": "module",
   "exports": {
     ".": "./src/main.ts"
+  },
+  "scripts": {
+    "build": "cargo build -p repository-task",
+    "test": "vp -C ../.. test --run --maxWorkers=1 sources/task/src"
+  },
+  "dependencies": {
+    "@alloy-ts/repository-source": "*"
   }
 }

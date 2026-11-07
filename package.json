@@ -27,15 +27,17 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "node --import @oxc-node/core/register build.ts && vp pack",
+    "build": "vp run build:native && vp run --filter '**' --filter '!repository' --concurrency-limit 1 build",
     "dev": "vp pack --watch",
     "start": "vp run dist/index.js",
-    "test": "vp test",
+    "test": "vp run --filter '**' --filter '!repository' --concurrency-limit 1 test",
     "check": "vp check",
     "fmt": "vp fmt",
     "lint": "vp lint",
     "prepublishOnly": "npm run build",
-    "prepare": "vp config"
+    "prepare": "vp config",
+    "build:native": "node --import @oxc-node/core/register build.ts && vp pack",
+    "ready": "vp check && vp run build && vp run test"
   },
   "devDependencies": {
     "@emnapi/core": "^1.11.3",

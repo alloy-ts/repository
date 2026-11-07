@@ -75,3 +75,31 @@ Run `npm install`, `cargo build`, `npm run build`, and `npm test` from the root.
 Use `cargo check --workspace` to validate every domain façade. Generated bindings
 and package artifacts remain in `dist/`; Rust members share `Cargo.lock` and
 `target/` at the root. Tests are discovered under `sources/*/src/`.
+
+### Workspace commands
+
+This follows the [Vite+ monorepo guide](https://viteplus.dev/guide/monorepo):
+shared linting, formatting and staged checks stay in the root Vite configuration,
+package-specific build and test scripts live in each workspace, and root scripts
+coordinate them with `vp run`. The root retains the packaging config for the
+single combined native distribution.
+
+Run `npm run build` (or `vp run build`) to build every workspace. The root first generates
+the shared N-API bindings and package artifacts once, then the workspace task
+builds each workspace's Rust library.
+`npm run build:native` runs only the shared native build and packaging step.
+
+Run `npm test` (or `vp run test`) after building to run each workspace's tests.
+Each task selects only that workspace's source directory. Tasks run sequentially
+and Vitest uses one worker per task to limit native resource use.
+
+`npm run ready` checks formatting, linting and types, then builds and tests the
+workspaces. To target a package, use e.g. `vp run @alloy-ts/repo#build` or
+`vp run @alloy-ts/repo#test`. Direct domain test tasks require generated bindings
+from an earlier build.
+
+Vite Task script caching is disabled so Cargo retains its toolchain and linker
+environment settings and performs its own incremental build checks.
+
+The root scripts select all workspace names with `**` and exclude the root
+`repository` package to prevent the npm build and test scripts calling themselves.

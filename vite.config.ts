@@ -29,6 +29,7 @@ export default defineConfig({
     options: { typeAware: true, typeCheck: true },
   },
   run: {
-    cache: true,
+    // Cargo manages incremental native builds; preserve Rust toolchain environment variables.
+    cache: { scripts: false, tasks: true },
   },
 });
