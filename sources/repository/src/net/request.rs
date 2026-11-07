@@ -1,14 +1,15 @@
 //! Web Fetch API compatible `Request` and `Response` implementations using `http_request`.
 //!
-//! Confirms to https://developer.mozilla.org/en-US/docs/Web/API/Request and
+//! Native buffered transport objects. The public Web-compatible facade is request.ts.
+//! See https://developer.mozilla.org/en-US/docs/Web/API/Request and
 //! https://developer.mozilla.org/en-US/docs/Web/API/Response
 
+use napi::Status;
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use napi::bindgen_prelude::*;
-use napi::Status;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Options for constructing a [`Request`].
 #[napi(object)]
@@ -24,6 +25,7 @@ pub struct RequestInit {
     pub referrer: Option<String>,
     pub integrity: Option<String>,
     pub keepalive: Option<bool>,
+    pub r#type: Option<String>,
 }
 
 /// Options for constructing a [`Response`].
@@ -160,7 +162,9 @@ impl Response {
         })?;
         let mut resp_init = init.unwrap_or_default();
         let mut headers = resp_init.headers.unwrap_or_default();
-        headers.entry("content-type".to_string()).or_insert_with(|| "application/json".to_string());
+        headers
+            .entry("content-type".to_string())
+            .or_insert_with(|| "application/json".to_string());
         resp_init.headers = Some(headers);
         Ok(Response::new(Some(Either::A(json_str)), Some(resp_init)))
     }
@@ -210,7 +214,7 @@ pub(crate) fn response_from_http_response(hr: http_request::HttpResponse, url: S
         headers,
         body,
         url,
-        redirected: hr.is_redirect(),
+        redirected: false,
     }
 }
 
@@ -239,11 +243,22 @@ impl Request {
     ///
     /// Accepts a URL string or an existing `Request` instance, along with optional `RequestInit`.
     #[napi(constructor)]
-    pub fn new(
-        input: Either<String, &Request>,
-        init: Option<RequestInit>,
-    ) -> napi::Result<Self> {
+    pub fn new(input: Either<String, &Request>, init: Option<RequestInit>) -> napi::Result<Self> {
         let mut init = init.unwrap_or_default();
+        if let Either::B(request) = &input {
+            if request.body_used() {
+                return Err(napi::Error::from_reason("body already consumed"));
+            }
+            init.mode = init.mode.or_else(|| Some(request.mode.clone()));
+            init.credentials = init
+                .credentials
+                .or_else(|| Some(request.credentials.clone()));
+            init.cache = init.cache.or_else(|| Some(request.cache.clone()));
+            init.redirect = init.redirect.or_else(|| Some(request.redirect.clone()));
+            init.referrer = init.referrer.or_else(|| Some(request.referrer.clone()));
+            init.integrity = init.integrity.or_else(|| Some(request.integrity.clone()));
+            init.keepalive = init.keepalive.or(Some(request.keepalive));
+        }
         let (url, default_method, default_headers, default_body) = match input {
             Either::A(u) => (u, "GET".to_string(), HashMap::new(), None),
             Either::B(r) => (
@@ -254,11 +269,7 @@ impl Request {
             ),
         };
 
-        let method = init
-            .method
-            .take()
-            .unwrap_or(default_method)
-            .to_uppercase();
+        let method = init.method.take().unwrap_or(default_method).to_uppercase();
 
         let mut headers = default_headers;
         if let Some(h) = init.headers.take() {
@@ -273,13 +284,21 @@ impl Request {
             None => default_body,
         };
 
+        url::Url::parse(&url).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if (method == "GET" || method == "HEAD") && body.is_some() {
+            return Err(napi::Error::from_reason(
+                "GET/HEAD requests cannot have a body",
+            ));
+        }
         Ok(Request {
             url,
             method,
             headers,
             body,
             mode: init.mode.unwrap_or_else(|| "cors".to_string()),
-            credentials: init.credentials.unwrap_or_else(|| "same-origin".to_string()),
+            credentials: init
+                .credentials
+                .unwrap_or_else(|| "same-origin".to_string()),
             cache: init.cache.unwrap_or_else(|| "default".to_string()),
             redirect: init.redirect.unwrap_or_else(|| "follow".to_string()),
             referrer: init.referrer.unwrap_or_else(|| "about:client".to_string()),
@@ -345,8 +364,11 @@ impl Request {
     }
 
     #[napi]
-    pub fn clone(&self) -> Self {
-        Request {
+    pub fn clone(&self) -> napi::Result<Self> {
+        if self.body_used() {
+            return Err(napi::Error::from_reason("body already consumed"));
+        }
+        Ok(Request {
             url: self.url.clone(),
             method: self.method.clone(),
             headers: self.headers.clone(),
@@ -358,43 +380,43 @@ impl Request {
             referrer: self.referrer.clone(),
             integrity: self.integrity.clone(),
             keepalive: self.keepalive,
-            body_used: Arc::new(AtomicBool::new(self.body_used())),
-        }
-    }
-
-    #[napi]
-    pub async fn text(&self) -> napi::Result<String> {
-        self.body_used.store(true, Ordering::SeqCst);
-        match &self.body {
-            Some(b) => String::from_utf8(b.clone()).map_err(|e| {
-                napi::Error::new(Status::GenericFailure, format!("invalid utf-8: {e}"))
-            }),
-            None => Ok(String::new()),
-        }
-    }
-
-    #[napi(js_name = "json")]
-    pub async fn parse_json(&self) -> napi::Result<serde_json::Value> {
-        let t = self.text().await?;
-        serde_json::from_str(&t).map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("failed to parse json: {e}"))
+            body_used: Arc::new(AtomicBool::new(false)),
         })
     }
 
+    fn consume_body(&self) -> napi::Result<Option<Vec<u8>>> {
+        if self.body.is_some() && self.body_used.swap(true, Ordering::SeqCst) {
+            return Err(napi::Error::from_reason("body already consumed"));
+        }
+        Ok(self.body.clone())
+    }
+    #[napi]
+    pub async fn text(&self) -> napi::Result<String> {
+        Ok(String::from_utf8_lossy(&self.consume_body()?.unwrap_or_default()).into_owned())
+    }
+    #[napi(js_name = "json")]
+    pub async fn parse_json(&self) -> napi::Result<serde_json::Value> {
+        serde_json::from_str(&self.text().await?)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
     #[napi]
     pub async fn array_buffer(&self) -> napi::Result<Buffer> {
-        self.body_used.store(true, Ordering::SeqCst);
-        Ok(self.body.clone().unwrap_or_default().into())
+        Ok(self.consume_body()?.unwrap_or_default().into())
+    }
+    #[napi]
+    pub async fn bytes(&self) -> napi::Result<Buffer> {
+        self.array_buffer().await
     }
 
     /// Instance method `start` using `http_request` to execute this Request.
     #[napi]
     pub async fn start(&self) -> napi::Result<Response> {
+        let body = self.consume_body()?;
         execute_http_request_with_redirect(
             &self.method,
             &self.url,
             &self.headers,
-            self.body.as_deref(),
+            body.as_deref(),
             &self.redirect,
         )
         .await
@@ -417,78 +439,120 @@ pub(crate) async fn execute_http_request_with_redirect(
     body: Option<&[u8]>,
     redirect_policy: &str,
 ) -> napi::Result<Response> {
-    use http_request::{HttpRequest, Method, Body};
+    use http_request::{Body, HttpRequest, Method};
+    if !matches!(redirect_policy, "follow" | "manual" | "error") {
+        return Err(napi::Error::from_reason("invalid redirect policy"));
+    }
+    let mut current_url =
+        url::Url::parse(url).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let mut current_method = method.to_uppercase();
+    if current_method.is_empty()
+        || !current_method
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    {
+        return Err(napi::Error::from_reason("invalid HTTP method"));
+    }
 
-    let mut req = match method.to_uppercase().as_str() {
-        "GET" => HttpRequest::get(url),
-        "POST" => HttpRequest::post(url),
-        m => {
-            let mut r = HttpRequest::get(url);
-            let parsed_method = match m {
-                "PUT" => Method::Put,
-                "DELETE" => Method::Delete,
-                "PATCH" => Method::Patch,
-                "HEAD" => Method::Head,
-                "OPTIONS" => Method::Options,
-                "CONNECT" => Method::Connect,
-                "TRACE" => Method::Trace,
-                other => Method::Unknown(other.to_string()),
-            };
-            r.set_method(parsed_method);
-            r
+    let mut headers = headers.clone();
+    let mut body = body.map(<[u8]>::to_vec);
+    let mut redirected = false;
+    for count in 0..=20 {
+        if !matches!(current_url.scheme(), "http" | "https")
+            || !current_url.username().is_empty()
+            || current_url.password().is_some()
+        {
+            return Err(napi::Error::from_reason(
+                "expected an HTTP(S) URL without credentials",
+            ));
         }
-    };
-
-    for (k, v) in headers {
-        req.set_header(k.as_str(), v.as_str());
-    }
-
-    if let Some(b) = body {
-        req.set_body(Body::from_bytes(b.to_vec()));
-    }
-    req.get_mut_config().set_timeout(30_000);
-
-    let url_string = url.to_string();
-
-    let mut current_url = url_string;
-    let mut current_method = method.to_string();
-    let mut redirect_count = 0;
-    let max_redirects = 10;
-
-    loop {
-        let mut cur_req = req.clone();
-        cur_req.set_url(&current_url);
-        let cur_url_str = current_url.clone();
-
-        let outcome = tokio::task::spawn_blocking(move || {
-            cur_req.send()
-        })
-        .await
-        .map_err(|e| napi::Error::new(Status::GenericFailure, format!("tokio spawn failed: {e}")))?
-        .map_err(|e| napi::Error::new(Status::GenericFailure, format!("http request failed: {e:?}")))?;
-
-        let resp = response_from_http_response(outcome, cur_url_str);
-        if resp.status >= 300 && resp.status < 400 {
-            if redirect_policy == "error" {
-                return Err(napi::Error::new(Status::GenericFailure, "redirect error"));
-            } else if redirect_policy == "manual" {
-                return Ok(resp);
-            } else if redirect_policy == "follow" {
-                if let Some(loc) = resp.headers.get("location") {
-                    redirect_count += 1;
-                    if redirect_count > max_redirects {
-                        return Err(napi::Error::new(Status::GenericFailure, "maximum redirect limit exceeded"));
-                    }
-                    current_url = loc.clone();
-                    if resp.status == 303 {
-                        current_method = "GET".to_string();
-                    }
-                    continue;
-                }
+        current_url.set_fragment(None);
+        let mut request = HttpRequest::get(current_url.as_str());
+        request.set_method(match current_method.as_str() {
+            "GET" => Method::Get,
+            "HEAD" => Method::Head,
+            "POST" => Method::Post,
+            "PUT" => Method::Put,
+            "DELETE" => Method::Delete,
+            "PATCH" => Method::Patch,
+            "OPTIONS" => Method::Options,
+            "CONNECT" | "TRACE" | "TRACK" => {
+                return Err(napi::Error::from_reason("forbidden request method"));
+            }
+            other => Method::Unknown(other.to_owned()),
+        });
+        for (key, value) in &headers {
+            if !matches!(
+                key.as_str(),
+                "content-length" | "transfer-encoding" | "connection"
+            ) {
+                request.set_header(key, value);
             }
         }
-        return Ok(resp);
+        request.set_header("connection", "close");
+        request.set_header(
+            "host",
+            current_url[url::Position::BeforeHost..url::Position::AfterPort].to_string(),
+        );
+        if let Some(bytes) = &body {
+            request.set_body(Body::from_bytes(bytes.clone()));
+        }
+        // Honor platform/SSL_CERT_FILE trust in addition to the bundled roots.
+        for cert in rustls_native_certs::load_native_certs().certs {
+            request
+                .add_root_certificate(cert)
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        }
+        request.get_mut_config().set_timeout(30_000);
+        request.get_mut_config().set_redirect(false);
+        let outcome = tokio::task::spawn_blocking(move || request.send())
+            .await
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?
+            .map_err(|e| napi::Error::from_reason(format!("http request failed: {e:?}")))?;
+        let mut response = response_from_http_response(outcome, current_url.to_string());
+        response.redirected = redirected;
+        if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let Some(location) = response.headers.get("location") else {
+            return Ok(response);
+        };
+        if redirect_policy == "manual" {
+            return Ok(response);
+        }
+        if redirect_policy == "error" {
+            return Err(napi::Error::from_reason("redirect error"));
+        }
+        if count == 20 {
+            return Err(napi::Error::from_reason("maximum redirect limit exceeded"));
+        }
+        let next = current_url
+            .join(location)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if next.origin() != current_url.origin() {
+            for key in ["authorization", "proxy-authorization", "cookie", "host"] {
+                headers.remove(key);
+            }
+        }
+        if ((response.status == 301 || response.status == 302) && current_method == "POST")
+            || (response.status == 303 && current_method != "GET" && current_method != "HEAD")
+        {
+            current_method = "GET".to_owned();
+            body = None;
+            for key in [
+                "content-type",
+                "content-length",
+                "content-encoding",
+                "content-language",
+                "content-location",
+            ] {
+                headers.remove(key);
+            }
+        }
+        current_url = next;
+        redirected = true;
     }
+    unreachable!()
 }
 
 pub type RequestOpts = RequestInit;

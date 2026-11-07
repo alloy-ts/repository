@@ -8,7 +8,7 @@ use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::object::{Object, build_object};
 use crate::repository::Repository;
 
-#[napi(namespace = "object")]
+#[napi(namespace = "object", js_name = "GitBlob")]
 pub struct Blob {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,

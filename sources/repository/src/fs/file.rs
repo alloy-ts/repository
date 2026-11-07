@@ -6,11 +6,11 @@
 //! `.bytes()`, `.arrayBuffer()`, `.stream()`.
 //! Default MIME type is `"text/plain;charset=utf-8"`, overridable by passing RequestOpts from src/net/request.rs.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use napi::Status;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use napi::Status;
+use std::fs;
+use std::path::PathBuf;
 
 use crate::net::request::RequestOpts;
 
@@ -36,43 +36,37 @@ impl File {
         options: Option<RequestOpts>,
     ) -> napi::Result<Self> {
         let path_str = match url_or_path {
-            Either::A(s) => {
-                if s.starts_with("file://") {
-                    s.trim_start_matches("file://").to_string()
-                } else {
-                    s
-                }
+            Either::A(s) => s,
+            Either::B(obj) => obj.get_named_property::<String>("href")?,
+        };
+        let path = if path_str.starts_with("file:") {
+            url::Url::parse(&path_str)
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?
+                .to_file_path()
+                .map_err(|_| napi::Error::from_reason("invalid file URL"))?
+        } else {
+            if path_str.contains("://") {
+                return Err(napi::Error::from_reason("expected a file URL"));
             }
-            Either::B(obj) => {
-                // Handle new URL(...) object (e.g. href, pathname)
-                if let Ok(pathname) = obj.get_named_property::<String>("pathname") {
-                    pathname
-                } else if let Ok(href) = obj.get_named_property::<String>("href") {
-                    href.trim_start_matches("file://").to_string()
-                } else {
-                    return Err(napi::Error::new(
-                        Status::InvalidArg,
-                        "expected string path or URL object",
-                    ));
-                }
-            }
+            PathBuf::from(path_str)
         };
 
         let mut mime_type = "text/plain;charset=utf-8".to_string();
         if let Some(opts) = options {
             if let Some(headers) = opts.headers {
-                if let Some(ct) = headers.get("content-type") {
-                    mime_type = ct.clone();
-                } else if let Some(ct) = headers.get("Content-Type") {
-                    mime_type = ct.clone();
+                if let Some((_, value)) = headers
+                    .into_iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+                {
+                    mime_type = value;
                 }
+            }
+            if let Some(value) = opts.r#type {
+                mime_type = value;
             }
         }
 
-        Ok(File {
-            path: PathBuf::from(path_str),
-            mime_type,
-        })
+        Ok(File { path, mime_type })
     }
 
     #[napi(getter)]
@@ -106,9 +100,7 @@ impl File {
     /// Read file content as UTF-8 string.
     #[napi]
     pub async fn text(&self) -> napi::Result<String> {
-        tokio::fs::read_to_string(&self.path).await.map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("failed to read file: {e}"))
-        })
+        Ok(String::from_utf8_lossy(&self.bytes().await?).into_owned())
     }
 
     /// Read and parse file content as JSON.
@@ -134,10 +126,34 @@ impl File {
         self.bytes().await
     }
 
-    /// Stream file content.
+    /// Return a Web ReadableStream synchronously; read disk in bounded chunks.
     #[napi]
-    pub async fn stream(&self) -> napi::Result<Buffer> {
-        self.bytes().await
+    pub fn stream<'env>(&self, env: &'env Env) -> napi::Result<ReadableStream<'env, Buffer>> {
+        use futures::StreamExt;
+        use tokio::io::AsyncReadExt;
+        let stream = futures::stream::try_unfold(
+            (None::<tokio::fs::File>, self.path.clone()),
+            |(file, path)| async move {
+                let mut file = match file {
+                    Some(file) => file,
+                    None => tokio::fs::File::open(&path)
+                        .await
+                        .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+                };
+                let mut bytes = vec![0; 65536];
+                let n = file
+                    .read(&mut bytes)
+                    .await
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+                if n == 0 {
+                    return Ok(None);
+                }
+                bytes.truncate(n);
+                Ok(Some((Buffer::from(bytes), (Some(file), path))))
+            },
+        )
+        .boxed();
+        ReadableStream::new(env, stream)
     }
 
     /// Write content to the file.
@@ -149,7 +165,9 @@ impl File {
         };
         if let Some(parent) = self.path.parent() {
             if !parent.exists() {
-                let _ = tokio::fs::create_dir_all(parent).await;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?;
             }
         }
         tokio::fs::write(&self.path, &bytes).await.map_err(|e| {

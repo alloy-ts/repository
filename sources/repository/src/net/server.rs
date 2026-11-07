@@ -1,178 +1,205 @@
-//! HTTP Server implementation using `rocket` and tokio.
-//!
-//! Provides `Server` NAPI bindings supporting constructor `new(options)` and instance
-//! methods `start()` / `serve()`.
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::oneshot;
-use napi::bindgen_prelude::*;
+//! Rocket transport for the public Server routing adapter (net/server.ts).
+use base64::{Engine, engine::general_purpose::STANDARD};
+use napi::{bindgen_prelude::*, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
-use napi::Status;
+use rocket::{
+    Data, Request, Route,
+    data::ToByteUnit,
+    http::{Header, Method, Status},
+    route::{Handler, Outcome},
+};
+use std::{
+    io::Cursor,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU16, Ordering},
+    },
+};
+use tokio::sync::{Mutex, oneshot};
 
-/// Server configuration and options.
-#[napi(object)]
-#[derive(Default)]
-pub struct ServerOptions {
-    pub port: Option<u16>,
-    pub host: Option<String>,
+type Callback = ThreadsafeFunction<String, Promise<String>, String, napi::Status, false, true>;
+#[derive(Clone)]
+struct Dispatch(Arc<Callback>);
+#[rocket::async_trait]
+impl Handler for Dispatch {
+    async fn handle<'r>(&self, req: &'r Request<'_>, data: Data<'r>) -> Outcome<'r> {
+        let bytes = match data.open(16.mebibytes()).into_bytes().await {
+            Ok(bytes) if bytes.is_complete() => bytes.into_inner(),
+            _ => return Outcome::Error(Status::PayloadTooLarge),
+        };
+        let headers: Vec<_> = req
+            .headers()
+            .iter()
+            .map(|h| (h.name().to_string(), h.value().to_string()))
+            .collect();
+        let input = serde_json::json!({"port":req.rocket().config().port, "method":req.method().as_str(), "path":req.uri().to_string(), "headers":headers, "body":STANDARD.encode(bytes)}).to_string();
+        let result = async {
+            let promise = self.0.call_async_catch(input).await?;
+            promise.await
+        }
+        .await;
+        let output: serde_json::Value = match result.and_then(|s| {
+            serde_json::from_str(&s).map_err(|e| napi::Error::from_reason(e.to_string()))
+        }) {
+            Ok(v) => v,
+            Err(_) => return Outcome::Error(Status::InternalServerError),
+        };
+        let status = output["status"].as_u64().unwrap_or(500) as u16;
+        let body = match STANDARD.decode(output["body"].as_str().unwrap_or("")) {
+            Ok(b) => b,
+            Err(_) => return Outcome::Error(Status::InternalServerError),
+        };
+        let mut response = rocket::Response::build();
+        response.status(Status::new(status));
+        if let Some(headers) = output["headers"].as_array() {
+            for pair in headers {
+                if let (Some(k), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
+                    // Rocket owns transfer framing.
+                    if !matches!(
+                        k.to_ascii_lowercase().as_str(),
+                        "content-length" | "transfer-encoding" | "connection"
+                    ) {
+                        response.header_adjoin(Header::new(k.to_owned(), v.to_owned()));
+                    }
+                }
+            }
+        }
+        response.sized_body(body.len(), Cursor::new(body));
+        Outcome::Success(response.finalize())
+    }
 }
 
-/// HTTP Server class.
-#[napi]
+struct Running {
+    shutdown: rocket::Shutdown,
+    task: tokio::task::JoinHandle<()>,
+}
+#[napi(js_name = "RocketServer")]
 pub struct Server {
     port: Arc<AtomicU16>,
     host: String,
     listening: Arc<AtomicBool>,
-    shutdown_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
-    routes: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
-    default_response: Arc<tokio::sync::Mutex<String>>,
+    callback: Arc<Callback>,
+    running: Mutex<Option<Running>>,
 }
-
 #[napi]
 impl Server {
     #[napi(constructor)]
-    pub fn new(options: Option<Object>) -> napi::Result<Self> {
-        let mut port = 3000;
-        let mut host = "127.0.0.1".to_string();
-        let mut routes_map = HashMap::new();
-        let mut default_resp = "HTTP/1.1 404 Not Found\r\ncontent-length: 9\r\n\r\nNot Found".to_string();
-
-        if let Some(opts) = options {
-            if let Ok(p) = opts.get_named_property::<u16>("port") {
-                port = p;
-            }
-            if let Ok(h) = opts.get_named_property::<String>("host") {
-                host = h;
-            }
-            if let Ok(routes_obj) = opts.get_named_property::<Object>("routes") {
-                let keys = Object::keys(&routes_obj).unwrap_or_default();
-                for key in keys {
-                    // Check if value is a Response object or string
-                    if let Ok(res_obj) = routes_obj.get_named_property::<Object>(&key) {
-                        let status: u16 = res_obj.get_named_property("status").unwrap_or(200);
-                        let body_text: String = "OK".to_string();
-                        let wire = format!("HTTP/1.1 {status} OK\r\ncontent-length: {}\r\n\r\n{}", body_text.len(), body_text);
-                        routes_map.insert(key, wire);
-                    }
-                }
-            }
-            if let Ok(_fetch_fn) = opts.get_named_property::<Function<'_, (), ()>>("fetch") {
-                default_resp = "HTTP/1.1 404 Not Found\r\ncontent-length: 9\r\n\r\nNot Found".to_string();
-            }
-        }
-
-        Ok(Server {
+    pub fn new(
+        port: u16,
+        host: String,
+        handler: Function<String, Promise<String>>,
+    ) -> napi::Result<Self> {
+        Ok(Self {
             port: Arc::new(AtomicU16::new(port)),
             host,
             listening: Arc::new(AtomicBool::new(false)),
-            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            routes: Arc::new(tokio::sync::Mutex::new(routes_map)),
-            default_response: Arc::new(tokio::sync::Mutex::new(default_resp)),
+            callback: Arc::new(
+                handler
+                    .build_threadsafe_function::<String>()
+                    .weak::<true>()
+                    .build()?,
+            ),
+            running: Mutex::new(None),
         })
     }
-
     #[napi(getter)]
     pub fn port(&self) -> u16 {
         self.port.load(Ordering::SeqCst)
     }
-
-    #[napi(getter)]
-    pub fn host(&self) -> String {
-        self.host.clone()
-    }
-
     #[napi(getter)]
     pub fn listening(&self) -> bool {
         self.listening.load(Ordering::SeqCst)
     }
-
-    /// Start the server and bind the socket listener.
     #[napi]
     pub async fn start(&self) -> napi::Result<u16> {
-        let requested_port = self.port.load(Ordering::SeqCst);
-        let addr = format!("{}:{}", self.host, requested_port);
-        let listener = TcpListener::bind(&addr).await.map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("bind failed: {e}"))
-        })?;
-
-        let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(requested_port);
-        self.port.store(bound_port, Ordering::SeqCst);
-        self.listening.store(true, Ordering::SeqCst);
-
-        let (tx, mut rx) = oneshot::channel();
-        let mut shutdown_lock = self.shutdown_tx.lock().await;
-        *shutdown_lock = Some(tx);
-
-        let listening_flag = Arc::clone(&self.listening);
-        let routes = Arc::clone(&self.routes);
-        let default_res = Arc::clone(&self.default_response);
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut rx => {
-                        break;
+        let mut running = self.running.lock().await;
+        if running.is_some() {
+            return Err(napi::Error::from_reason("server already started"));
+        }
+        let address = self
+            .host
+            .parse::<std::net::IpAddr>()
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let mut config = rocket::Config::debug_default();
+        config.address = address;
+        config.port = self.port();
+        config.log_level = rocket::config::LogLevel::Off;
+        config.shutdown.ctrlc = false;
+        config.shutdown.grace = 1;
+        config.shutdown.mercy = 1;
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+        let port = self.port.clone();
+        let listening = self.listening.clone();
+        let routes = [
+            Method::Get,
+            Method::Head,
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Patch,
+            Method::Options,
+        ]
+        .into_iter()
+        .map(|method| Route::new(method, "/<path..>", Dispatch(self.callback.clone())))
+        .collect::<Vec<_>>();
+        let rocket = rocket::custom(config)
+            .mount("/", routes)
+            .attach(rocket::fairing::AdHoc::on_liftoff("ready", move |rocket| {
+                let tx = ready_tx.clone();
+                let port = port.clone();
+                let listening = listening.clone();
+                Box::pin(async move {
+                    port.store(rocket.config().port, Ordering::SeqCst);
+                    listening.store(true, Ordering::SeqCst);
+                    if let Some(tx) = tx.lock().await.take() {
+                        let _ = tx.send(rocket.config().port);
                     }
-                    accept_res = listener.accept() => {
-                        match accept_res {
-                            Ok((mut socket, _)) => {
-                                let routes_c = Arc::clone(&routes);
-                                let default_c = Arc::clone(&default_res);
-                                tokio::spawn(async move {
-                                    let mut buf = [0u8; 4096];
-                                    if let Ok(n) = socket.read(&mut buf).await {
-                                        if n > 0 {
-                                            let req_str = String::from_utf8_lossy(&buf[..n]);
-                                            let path = req_str.split_whitespace().nth(1).unwrap_or("/");
-                                            let lock = routes_c.lock().await;
-                                            let res_payload = match lock.get(path) {
-                                                Some(r) => r.clone(),
-                                                None => {
-                                                    // Check prefix / wildcard
-                                                    let mut matched = None;
-                                                    for (k, v) in lock.iter() {
-                                                        if k.ends_with("/*") && path.starts_with(&k[..k.len()-1]) {
-                                                            matched = Some(v.clone());
-                                                            break;
-                                                        }
-                                                    }
-                                                    matched.unwrap_or_else(|| default_c.try_lock().map(|l| l.clone()).unwrap_or_else(|_| "HTTP/1.1 404 Not Found\r\ncontent-length: 9\r\n\r\nNot Found".to_string()))
-                                                }
-                                            };
-                                            let _ = socket.write_all(res_payload.as_bytes()).await;
-                                        }
-                                    }
-                                });
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                }
+                })
+            }))
+            .ignite()
+            .await
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let shutdown = rocket.shutdown();
+        let flag = self.listening.clone();
+        let task = tokio::spawn(async move {
+            if let Err(error) = rocket.launch().await {
+                eprintln!("Rocket server: {error}");
             }
-            listening_flag.store(false, Ordering::SeqCst);
+            flag.store(false, Ordering::SeqCst);
         });
-
-        Ok(bound_port)
+        match ready_rx.await {
+            Ok(port) => {
+                *running = Some(Running { shutdown, task });
+                Ok(port)
+            }
+            Err(_) => {
+                let _ = task.await;
+                Err(napi::Error::from_reason("Rocket failed to bind"))
+            }
+        }
     }
-
-    /// Start/serve alias.
     #[napi]
     pub async fn serve(&self) -> napi::Result<u16> {
         self.start().await
     }
-
-    /// Stop the server.
     #[napi]
     pub async fn stop(&self) -> napi::Result<()> {
-        self.listening.store(false, Ordering::SeqCst);
-        let mut shutdown_lock = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_lock.take() {
-            let _ = tx.send(());
+        let mut running = self.running.lock().await;
+        if let Some(server) = running.take() {
+            server.shutdown.notify();
+            server
+                .task
+                .await
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         }
         Ok(())
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        if let Some(server) = self.running.get_mut().take() {
+            server.shutdown.notify();
+        }
     }
 }

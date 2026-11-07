@@ -1,72 +1,88 @@
-import { describe, expect, test } from "vite-plus/test";
-import { File } from "../main.ts";
+import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { File, Blob, Response, Object as GitObject } from "../main.ts";
+let dir: string;
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), "alloy-file-"));
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
 
-describe("File (src/fs/file.rs)", () => {
-  test("File pointing to nonexistent file", async () => {
-    const notreal = new File("notreal.txt");
-    expect(notreal.size).toBe(0);
-    expect(notreal.type).toBe("text/plain;charset=utf-8");
-    const exists = await notreal.exists();
-    expect(exists).toBe(false);
+describe("lazy File and Web Blob", () => {
+  test("nonexistent paths, RequestOpts MIME, typed-array writes and metadata", async () => {
+    const file = new File(join(dir, "output.txt"));
+    expect(file).toBeInstanceOf(globalThis.File);
+    expect(file).toBeInstanceOf(Blob);
+    expect(file.size).toBe(0);
+    expect(file.type).toBe("text/plain;charset=utf-8");
+    expect(await file.exists()).toBe(false);
+    expect(await file.write(new TextEncoder().encode("datadatadata"))).toBe(12);
+    expect(file.name).toBe("output.txt");
+    expect(file.lastModified).toBeGreaterThan(0);
+    expect(await file.text()).toBe("datadatadata");
+    expect(await new Response(file).text()).toBe("datadatadata");
+    expect(await file.exists()).toBe(true);
+    expect(await file.arrayBuffer()).toBeInstanceOf(ArrayBuffer);
+    expect(await file.bytes()).toBeInstanceOf(Uint8Array);
+    expect(
+      new File(join(dir, "output.txt"), {
+        headers: new Headers({ "Content-Type": "application/json" }),
+      }).type,
+    ).toBe("application/json");
+    await file.write('{"ok":true}');
+    expect(await file.json()).toEqual({ ok: true });
+    file.delete();
+    expect(await file.exists()).toBe(false);
   });
-
-  test("File write, read, stream, arrayBuffer and delete", async () => {
-    const foo = new File("foo_test.txt");
-    await foo.write("Hello World File");
-    expect(await foo.exists()).toBe(true);
-    expect(foo.size).toBe(16);
-    expect(await foo.text()).toBe("Hello World File");
-
-    const bytes = await foo.bytes();
-    expect(bytes.length).toBe(16);
-
-    const buf = await foo.arrayBuffer();
-    expect(buf.length).toBe(16);
-
-    const stream = foo.stream();
-    const reader = stream.getReader();
-    const { value } = await reader.read();
-    expect(value.length).toBe(16);
-
-    foo.delete();
-    expect(await foo.exists()).toBe(false);
+  test("file URLs decode spaces, percent signs and unicode; invalid schemes reject", async () => {
+    const path = join(dir, "a space % café.txt");
+    const url = pathToFileURL(path);
+    const file = new File(url);
+    await file.write("url");
+    expect(await new File(url.href).text()).toBe("url");
+    expect(() => new File(new URL("https://example.com/file"))).toThrow();
   });
-
-  test("File initialized with URL object", async () => {
-    const src = new File(new URL(import.meta.url));
-    expect(await src.exists()).toBe(true);
-    expect(src.size).toBeGreaterThan(0);
+  test("incremental readable file stream, slice, and recursive deletion", async () => {
+    const file = new File(join(dir, "nested", "large.bin"));
+    const data = new Uint8Array(200_000).fill(42);
+    await file.write(data);
+    const reader = file.stream().getReader();
+    let bytes = 0,
+      chunks = 0;
+    while (true) {
+      const item = await reader.read();
+      if (item.done) break;
+      bytes += item.value.length;
+      chunks++;
+    }
+    expect(bytes).toBe(data.length);
+    expect(chunks).toBeGreaterThan(1);
+    expect(await file.slice(-3).bytes()).toEqual(new Uint8Array([42, 42, 42]));
+    new File(join(dir, "nested")).delete({ recursive: true });
+    expect(await file.exists()).toBe(false);
   });
-
-  test("File write with string and Uint8Array", async () => {
-    const out = new File("output.txt");
-    await out.write(`It was the best of times, it was the worst of times.`);
-    expect(await out.text()).toBe(`It was the best of times, it was the worst of times.`);
-
-    const encoder = new TextEncoder();
-    const data = encoder.encode("datadatadata"); // Uint8Array
-    await new File("output.txt").write(Buffer.from(data));
-    expect(await new File("output.txt").text()).toBe("datadatadata");
-
-    new File("output.txt").delete();
-    expect(await new File("output.txt").exists()).toBe(false);
-  });
-
-  test("File recursive delete", async () => {
-    const dir = new File("test_dir_to_delete");
-    await new File("test_dir_to_delete/subfile.txt").write("hello");
-    expect(await new File("test_dir_to_delete/subfile.txt").exists()).toBe(true);
-
-    new File("test_dir_to_delete").delete({ recursive: true });
-    expect(await dir.exists()).toBe(false);
+  test("Blob parts, slice defaults, streams and ArrayBuffer", async () => {
+    const blob = new Blob(["hello", new Uint8Array([33])], { type: "TEXT/PLAIN" });
+    expect(blob.type).toBe("text/plain");
+    expect(blob.size).toBe(6);
+    expect(blob.slice(0, 2).type).toBe("");
+    expect(await blob.slice(-1).text()).toBe("!");
+    expect(await blob.arrayBuffer()).toBeInstanceOf(ArrayBuffer);
+    expect(await new globalThis.Response(blob.stream()).text()).toBe("hello!");
+    expect(typeof (GitObject as any).Blob).toBe("function");
   });
 });
 
-test("Web Blob works as expected and Object.Blob exists", async () => {
-  const { Blob, Object: GitObject } = await import("../main.ts");
-  const b = new Blob(["test blob"], { type: "text/plain" });
-  expect(b.size).toBe(9);
-  expect(b.type).toBe("text/plain");
-  expect(await b.text()).toBe("test blob");
-  expect(typeof (GitObject as any).Blob).toBe("function");
+test("native File and Blob return real Web streams", async () => {
+  const native = await import("../../../../dist/index.js");
+  const path = join(dir, "native.bin");
+  const file = new native.File(path);
+  await file.write("native stream");
+  expect(await new globalThis.Response(file.stream()).text()).toBe("native stream");
+  const blob = new native.Blob(["native blob"]);
+  expect(await new globalThis.Response(blob.stream()).text()).toBe("native blob");
 });

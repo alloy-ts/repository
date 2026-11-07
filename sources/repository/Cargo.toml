@@ -31,7 +31,7 @@ gix-filter = "0.36.0"
 gix-imara-diff = "0.3.1"
 gix-protocol = { version = "0.67.0", features = ["blocking-client", "fetch"] }
 filetime = "0.2.29"
-napi = { version = "=3.16.0", features = ["serde-json", "tokio_rt", "napi6"] }
+napi = { version = "=3.16.0", features = ["serde-json", "tokio_rt", "napi6", "web_stream"] }
 napi-derive = "=3.7.0"
 futures = { version = "0.3.34", features = ["async-await", "executor"] }
 futures-executor = { version = "0.3.34", features = ["thread-pool"] }
@@ -83,6 +83,8 @@ crc32fast = "1"
 fusevm = { version = "=0.26.10", default-features = false }
 itertools = "0.13.0"
 
+rustls-native-certs = "0.8"
+url = "2.5"
 http-request = "22.2.0"
 rocket = "0.5.2"
 

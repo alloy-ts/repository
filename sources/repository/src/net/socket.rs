@@ -1,27 +1,28 @@
 //! NAPI bindings providing a Node.js `node:net` compatible API.
 //!
 //! Exposes `Socket`, `NetServer`, `createNetServer`, `connectSocket`.
-//! Conforms to https://nodejs.org/api/net.html
+//! Native TCP primitives. The public Node-compatible stream/event API is in main.ts.
 
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use tokio::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
+use tokio::sync::Mutex;
 
 /// A TCP socket wrapping independent read and write halves.
 #[napi]
 pub struct Socket {
     read_half: Arc<Mutex<Option<OwnedReadHalf>>>,
     write_half: Arc<Mutex<Option<OwnedWriteHalf>>>,
-    local_address: Option<String>,
+    local_address: Arc<std::sync::RwLock<Option<String>>>,
     local_port: Arc<AtomicU16>,
-    remote_address: Option<String>,
+    remote_address: Arc<std::sync::RwLock<Option<String>>>,
     remote_port: Arc<AtomicU16>,
     destroyed: Arc<AtomicBool>,
+    cancelled: tokio::sync::watch::Sender<bool>,
 }
 
 #[napi]
@@ -31,11 +32,12 @@ impl Socket {
         Socket {
             read_half: Arc::new(Mutex::new(None)),
             write_half: Arc::new(Mutex::new(None)),
-            local_address: None,
+            local_address: Arc::new(std::sync::RwLock::new(None)),
             local_port: Arc::new(AtomicU16::new(0)),
-            remote_address: None,
+            remote_address: Arc::new(std::sync::RwLock::new(None)),
             remote_port: Arc::new(AtomicU16::new(0)),
             destroyed: Arc::new(AtomicBool::new(false)),
+            cancelled: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -46,11 +48,12 @@ impl Socket {
         Socket {
             read_half: Arc::new(Mutex::new(Some(rh))),
             write_half: Arc::new(Mutex::new(Some(wh))),
-            local_address: local.map(|a| a.ip().to_string()),
+            local_address: Arc::new(std::sync::RwLock::new(local.map(|a| a.ip().to_string()))),
             local_port: Arc::new(AtomicU16::new(local.map(|a| a.port()).unwrap_or(0))),
-            remote_address: peer.map(|a| a.ip().to_string()),
+            remote_address: Arc::new(std::sync::RwLock::new(peer.map(|a| a.ip().to_string()))),
             remote_port: Arc::new(AtomicU16::new(peer.map(|a| a.port()).unwrap_or(0))),
             destroyed: Arc::new(AtomicBool::new(false)),
+            cancelled: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -61,7 +64,7 @@ impl Socket {
 
     #[napi(getter)]
     pub fn remote_address(&self) -> Option<String> {
-        self.remote_address.clone()
+        self.remote_address.read().ok()?.clone()
     }
 
     #[napi(getter)]
@@ -72,7 +75,7 @@ impl Socket {
 
     #[napi(getter)]
     pub fn local_address(&self) -> Option<String> {
-        self.local_address.clone()
+        self.local_address.read().ok()?.clone()
     }
 
     #[napi(getter)]
@@ -83,11 +86,7 @@ impl Socket {
 
     /// Connect to a remote TCP server.
     #[napi]
-    pub async fn connect(
-        &self,
-        port: u16,
-        host: Option<String>,
-    ) -> napi::Result<()> {
+    pub async fn connect(&self, port: u16, host: Option<String>) -> napi::Result<()> {
         let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
         let addr = format!("{}:{}", host, port);
         let stream = TcpStream::connect(&addr).await.map_err(|e| {
@@ -95,9 +94,11 @@ impl Socket {
         })?;
 
         if let Ok(local) = stream.local_addr() {
+            *self.local_address.write().unwrap() = Some(local.ip().to_string());
             self.local_port.store(local.port(), Ordering::SeqCst);
         }
         if let Ok(peer) = stream.peer_addr() {
+            *self.remote_address.write().unwrap() = Some(peer.ip().to_string());
             self.remote_port.store(peer.port(), Ordering::SeqCst);
         }
 
@@ -106,6 +107,7 @@ impl Socket {
         *r_lock = Some(rh);
         let mut w_lock = self.write_half.lock().await;
         *w_lock = Some(wh);
+        self.cancelled.send_replace(false);
         self.destroyed.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -114,7 +116,10 @@ impl Socket {
     #[napi]
     pub async fn write(&self, data: Either<String, Buffer>) -> napi::Result<u32> {
         if self.destroyed.load(Ordering::SeqCst) {
-            return Err(napi::Error::new(napi::Status::GenericFailure, "socket is destroyed"));
+            return Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                "socket is destroyed",
+            ));
         }
         let bytes = match data {
             Either::A(s) => s.into_bytes(),
@@ -124,7 +129,15 @@ impl Socket {
         let stream = lock.as_mut().ok_or_else(|| {
             napi::Error::new(napi::Status::GenericFailure, "socket not connected")
         })?;
-        stream.write_all(&bytes).await.map_err(|e| {
+        let mut cancelled = self.cancelled.subscribe();
+        if *cancelled.borrow() {
+            return Err(napi::Error::from_reason("socket is destroyed"));
+        }
+        tokio::select! {
+            _ = cancelled.changed() => return Err(napi::Error::from_reason("socket is destroyed")),
+            result = stream.write_all(&bytes) => result,
+        }
+        .map_err(|e| {
             napi::Error::new(napi::Status::GenericFailure, format!("write failed: {e}"))
         })?;
         Ok(bytes.len() as u32)
@@ -139,12 +152,21 @@ impl Socket {
         let sz = size.unwrap_or(65536) as usize;
         let mut buf = vec![0u8; sz];
         let mut lock = self.read_half.lock().await;
+        if self.destroyed.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
         let stream = lock.as_mut().ok_or_else(|| {
             napi::Error::new(napi::Status::GenericFailure, "socket not connected")
         })?;
-        let n = stream.read(&mut buf).await.map_err(|e| {
-            napi::Error::new(napi::Status::GenericFailure, format!("read failed: {e}"))
-        })?;
+        let mut cancelled = self.cancelled.subscribe();
+        if *cancelled.borrow() {
+            return Ok(None);
+        }
+        let n = tokio::select! {
+            _ = cancelled.changed() => return Ok(None),
+            result = stream.read(&mut buf) => result,
+        }
+        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, format!("read failed: {e}")))?;
         if n == 0 {
             Ok(None)
         } else {
@@ -163,24 +185,18 @@ impl Socket {
         if let Some(mut stream) = lock.take() {
             let _ = stream.shutdown().await;
         }
-        self.destroyed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     /// Destroy the socket immediately and close the TCP connection.
     #[napi]
-    pub fn destroy(&self) -> napi::Result<()> {
+    pub async fn destroy(&self) -> napi::Result<()> {
         self.destroyed.store(true, Ordering::SeqCst);
-        let rh = Arc::clone(&self.read_half);
-        let wh = Arc::clone(&self.write_half);
-        tokio::spawn(async move {
-            let mut r = rh.lock().await;
-            *r = None;
-            let mut w = wh.lock().await;
-            if let Some(mut stream) = w.take() {
-                let _ = stream.shutdown().await;
-            }
-        });
+        self.cancelled.send_replace(true);
+        *self.read_half.lock().await = None;
+        if let Some(mut stream) = self.write_half.lock().await.take() {
+            let _ = stream.shutdown().await;
+        }
         Ok(())
     }
 }
@@ -188,9 +204,11 @@ impl Socket {
 /// A TCP server wrapping `tokio::net::TcpListener`.
 #[napi]
 pub struct NetServer {
-    listener: Arc<Mutex<Option<TcpListener>>>,
+    accepting: tokio::sync::RwLock<()>,
+    listener: Arc<Mutex<Option<Arc<TcpListener>>>>,
     listening: Arc<AtomicBool>,
     port: Arc<AtomicU16>,
+    cancelled: tokio::sync::watch::Sender<bool>,
 }
 
 #[napi]
@@ -198,9 +216,11 @@ impl NetServer {
     #[napi(constructor)]
     pub fn new() -> Self {
         NetServer {
+            accepting: tokio::sync::RwLock::new(()),
             listener: Arc::new(Mutex::new(None)),
             listening: Arc::new(AtomicBool::new(false)),
             port: Arc::new(AtomicU16::new(0)),
+            cancelled: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -227,7 +247,11 @@ impl NetServer {
         let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
         self.port.store(bound_port, Ordering::SeqCst);
         let mut l = self.listener.lock().await;
-        *l = Some(listener);
+        if l.is_some() {
+            return Err(napi::Error::from_reason("server already listening"));
+        }
+        *l = Some(Arc::new(listener));
+        self.cancelled.send_replace(false);
         self.listening.store(true, Ordering::SeqCst);
 
         Ok(bound_port)
@@ -236,15 +260,26 @@ impl NetServer {
     /// Accept the next incoming connection.
     #[napi]
     pub async fn accept(&self) -> napi::Result<Socket> {
+        let _accepting = self.accepting.read().await;
         if !self.listening.load(Ordering::SeqCst) {
-            return Err(napi::Error::new(napi::Status::GenericFailure, "server not listening"));
+            return Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                "server not listening",
+            ));
         }
-        let mut lock = self.listener.lock().await;
-        let listener = lock.as_mut().ok_or_else(|| {
+        let listener = self.listener.lock().await.clone().ok_or_else(|| {
             napi::Error::new(napi::Status::GenericFailure, "server not listening")
         })?;
 
-        let (stream, _peer) = listener.accept().await.map_err(|e| {
+        let mut cancelled = self.cancelled.subscribe();
+        if *cancelled.borrow() {
+            return Err(napi::Error::from_reason("server closed"));
+        }
+        let (stream, _peer) = tokio::select! {
+            _ = cancelled.changed() => return Err(napi::Error::from_reason("server closed")),
+            result = listener.accept() => result,
+        }
+        .map_err(|e| {
             napi::Error::new(napi::Status::GenericFailure, format!("accept failed: {e}"))
         })?;
 
@@ -253,14 +288,12 @@ impl NetServer {
 
     /// Close the server and drop the listener socket immediately so port is released.
     #[napi]
-    pub fn close(&self) -> napi::Result<()> {
+    pub async fn close(&self) -> napi::Result<()> {
         self.listening.store(false, Ordering::SeqCst);
         self.port.store(0, Ordering::SeqCst);
-        let l = Arc::clone(&self.listener);
-        tokio::spawn(async move {
-            let mut lock = l.lock().await;
-            *lock = None;
-        });
+        self.cancelled.send_replace(true);
+        let _accepting = self.accepting.write().await;
+        *self.listener.lock().await = None;
         Ok(())
     }
 }

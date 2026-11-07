@@ -105,7 +105,7 @@ describe("Repository blobs", () => {
   test("getBlob resolves a file at a path in HEAD (git show HEAD:path)", () => {
     const blob = repo.getBlob("HEAD", "Cargo.toml");
     expect(Buffer.isBuffer(blob.content())).toBe(true);
-    expect(blob.content().toString()).toContain("[package]");
+    expect(blob.content()).toEqual(execSync("git show HEAD:Cargo.toml", { cwd: cloneDir }));
   });
 
   test("getBlob accepts a branch name and an object id (same blob either way)", () => {

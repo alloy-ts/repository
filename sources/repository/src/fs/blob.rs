@@ -4,7 +4,6 @@
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use napi::Status;
 
 /// Options for constructing a [`Blob`].
 #[napi(object)]
@@ -82,16 +81,14 @@ impl Blob {
 
         Blob {
             data: sliced,
-            mime_type: content_type.unwrap_or_else(|| self.mime_type.clone()),
+            mime_type: content_type.unwrap_or_default(),
         }
     }
 
     /// Returns a promise that resolves with a string containing the contents of the blob.
     #[napi]
     pub async fn text(&self) -> napi::Result<String> {
-        String::from_utf8(self.data.clone()).map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("invalid utf-8: {e}"))
-        })
+        Ok(String::from_utf8_lossy(&self.data).into_owned())
     }
 
     /// Read and parse blob content as JSON.
@@ -115,9 +112,12 @@ impl Blob {
         Ok(self.data.clone().into())
     }
 
-    /// Returns a ReadableStream/Buffer representation of the blob.
+    /// Return a Web stream, rather than Promise<Buffer>.
     #[napi]
-    pub async fn stream(&self) -> napi::Result<Buffer> {
-        Ok(self.data.clone().into())
+    pub fn stream<'env>(&self, env: &'env Env) -> napi::Result<ReadableStream<'env, Buffer>> {
+        ReadableStream::new(
+            env,
+            futures::stream::iter(vec![Ok(Buffer::from(self.data.clone()))]),
+        )
     }
 }
