@@ -180,6 +180,11 @@ pub(crate) fn push_index_entry(
     let mode = string_to_index_mode(entry.mode.as_deref().unwrap_or("100644"));
     let oid = parse_oid(&entry.id)?;
     let path = gix::bstr::BString::from(entry.path.as_bytes());
+    while let Some(i) =
+        file.entry_index_by_path_and_stage(path.as_ref(), gix::index::entry::Stage::Unconflicted)
+    {
+        file.remove_entry_at_index(i);
+    }
     file.dangerously_push_entry(
         gix::index::entry::Stat::default(),
         oid,
