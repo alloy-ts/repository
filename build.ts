@@ -30,7 +30,7 @@ async function run() {
   // The `ssh`/`xmss` features are still on the pre-migration code (ring/sha2/ssh-key/pq-xmss) and
   // don't compile yet — Phase 2. Once migrated, restore:
   //   features: ["ssh", "xmss"],
-  await cli.build({
+  const { task } = await cli.build({
     platform: true,
     esm: true,
     outputDir: "./dist",
@@ -40,6 +40,9 @@ async function run() {
     crossCompile,
     useCross,
   });
+
+  // The API returns before compilation and binding generation finish.
+  await task;
 
   if (silent) return;
 
