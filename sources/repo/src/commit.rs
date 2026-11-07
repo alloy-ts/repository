@@ -181,13 +181,13 @@ fn prettify_message(message: &str, comment_char: Option<u8>) -> String {
 }
 
 /// A git commit exposed to TypeScript.
-#[napi]
+#[napi(namespace = "object")]
 pub struct Commit {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,
 }
 
-#[napi]
+#[napi(namespace = "object")]
 impl Commit {
     /// The object id of this commit.
     #[napi(getter)]

@@ -59,3 +59,12 @@ describe("File (src/fs/file.rs)", () => {
     expect(await dir.exists()).toBe(false);
   });
 });
+
+test("Web Blob works as expected and Object.Blob exists", async () => {
+  const { Blob, Object: GitObject } = await import("../main.ts");
+  const b = new Blob(["test blob"], { type: "text/plain" });
+  expect(b.size).toBe(9);
+  expect(b.type).toBe("text/plain");
+  expect(await b.text()).toBe("test blob");
+  expect(typeof (GitObject as any).Blob).toBe("function");
+});

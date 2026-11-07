@@ -112,13 +112,13 @@ impl TreeEntry {
 /// database — which is itself prolly-backed under the hood, so the bytes live
 /// in prolly while every consumer sees plain git. There is no "prolly-backed
 /// tree" mode: git compatibility and prolly storage are the same object here.
-#[napi]
+#[napi(namespace = "object")]
 pub struct Tree {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) oid: gix::ObjectId,
 }
 
-#[napi]
+#[napi(namespace = "object")]
 impl Tree {
     /// Create a new tree from a flat array of [`Entry`] objects, returning a [`Tree`]
     /// with its freshly assigned id.
@@ -1703,7 +1703,7 @@ pub(crate) fn build_prolly_tree_from_tree(
     build_prolly_tree_values(prolly, pairs, what)
 }
 
-#[napi]
+#[napi(namespace = "object")]
 impl Tree {
     /// Canonicalise (normalise) this tree into a content-addressed fingerprint.
     ///
