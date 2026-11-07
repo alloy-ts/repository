@@ -735,7 +735,7 @@ fn map_spawn_error(error: io::Error) -> Error {
     // ENOENT can refer to the configured working directory just as readily
     // as the executable. The OS error alone cannot prove Git is absent.
     Error::Io {
-        message: format!("failed to spawn git: {error}"),
+        message: format!("failed to spawn command: {error}"),
         source: error,
     }
 }
@@ -1228,6 +1228,8 @@ pub async fn run_command(
     options: CommandOptions,
     cancellation: Option<CancellationToken>,
 ) -> napi::Result<CommandResult> {
+    validate_duration(options.timeout_ms)?;
+    validate_duration(options.cleanup_timeout_ms)?;
     let (command, input, timeout, limits, cleanup) = prepare(&options);
     execute(
         command,
@@ -1240,38 +1242,116 @@ pub async fn run_command(
     .await
 }
 
-/// A spawnable, cancellable, byte-bounded subprocess.
-///
-/// Construct with [`CommandOptions`] and an optional [`CancellationToken`]; call
-/// [`Process::run`] to start it and await the captured result. The token passed
-/// to the constructor is honored for the lifetime of every `run` call.
+/// A subprocess started on construction. `run()` collects its result once.
+/// This controls a child, not the host Node.js global `process` object.
 #[napi]
 pub struct Process {
-    options: CommandOptions,
-    cancellation: Option<CancellationToken>,
+    execution: tokio::sync::Mutex<Option<tokio::task::JoinHandle<napi::Result<CommandResult>>>>,
+    cancellation: CancellationToken,
 }
 
 #[napi]
 impl Process {
-    /// Prepare a process from options and an optional cancellation token.
+    /// Accept an executable path, a file URL (string or URL object), or a
+    /// task descriptor using CommandOptions (`{ program, args, ... }`).
+    /// Network URLs are rejected: executables must already exist locally.
     #[napi(constructor)]
-    pub fn new(options: CommandOptions, cancellation: Option<CancellationToken>) -> Self {
-        Self {
-            options,
-            cancellation,
-        }
+    pub fn new(
+        input: napi::bindgen_prelude::Either<String, napi::bindgen_prelude::Object>,
+        cancellation: Option<CancellationToken>,
+    ) -> napi::Result<Self> {
+        use napi::bindgen_prelude::{Either, JsObjectValue};
+        let options = match input {
+            Either::A(path) => executable_options(&path)?,
+            Either::B(object) => {
+                if object.has_named_property("program")? {
+                    let mut options = CommandOptions {
+                        program: object.get_named_property("program")?,
+                        args: object.get_named_property("args")?,
+                        cwd: object.get_named_property("cwd")?,
+                        env: object.get_named_property("env")?,
+                        input: object.get_named_property("input")?,
+                        timeout_ms: object.get_named_property("timeoutMs")?,
+                        cleanup_timeout_ms: object.get_named_property("cleanupTimeoutMs")?,
+                        limits: object.get_named_property("limits")?,
+                    };
+                    options.program = executable_path(&options.program)?;
+                    options
+                } else {
+                    let href: String = object.get_named_property("href")?;
+                    executable_options(&href)?
+                }
+            }
+        };
+        Self::start(options, cancellation)
     }
 
-    /// Start the command and resolve with its captured output or a structured
-    /// [`ExecutionFailure`]. Execution failures (timeout, cancellation, capture
-    /// limit, read error) resolve with `success: false`; spawn I/O and
-    /// configuration errors reject the promise.
+    /// Await the already-started execution. A second call rejects.
     #[napi]
     pub async fn run(&self) -> napi::Result<CommandResult> {
-        let (command, input, timeout, limits, cleanup) = prepare(&self.options);
-        let token_ref = self.cancellation.as_ref();
-        execute(command, input, timeout, limits, cleanup, token_ref).await
+        let execution = self.execution.lock().await.take().ok_or_else(|| {
+            napi::Error::from_reason("Process.run() may only be called once")
+        })?;
+        execution.await.map_err(|error| napi::Error::from_reason(error.to_string()))?
     }
+
+    /// Request cancellation, including cleanup of the child process tree.
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+}
+
+impl Process {
+    pub(crate) fn start(options: CommandOptions, cancellation: Option<CancellationToken>) -> napi::Result<Self> {
+        validate_duration(options.timeout_ms)?;
+        validate_duration(options.cleanup_timeout_ms)?;
+        let (command, input, timeout, limits, cleanup) = prepare(&options);
+        let cancellation = cancellation.unwrap_or_else(create_cancellation_token);
+        let token = cancellation;
+        let execution = napi::bindgen_prelude::spawn(async move {
+            execute(command, input, timeout, limits, cleanup, Some(&token)).await
+        });
+        Ok(Self { execution: tokio::sync::Mutex::new(Some(execution)), cancellation })
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+fn validate_duration(ms: Option<f64>) -> napi::Result<()> {
+    if let Some(ms) = ms {
+        if !ms.is_finite() || ms < 0.0 || Duration::try_from_secs_f64(ms / 1000.0).is_err() {
+            return Err(napi::Error::new(napi::Status::InvalidArg, "timeout must be finite, nonnegative and representable"));
+        }
+    }
+    Ok(())
+}
+
+fn executable_path(value: &str) -> napi::Result<String> {
+    if value.is_empty() || value.contains('\0') {
+        return Err(napi::Error::new(napi::Status::InvalidArg, "executable must be a nonempty path without NUL bytes"));
+    }
+    // A drive letter is a path, not a URL scheme.
+    if value.contains("://") || value.starts_with("file:") {
+        let url = url::Url::parse(value).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
+            return Err(napi::Error::new(napi::Status::InvalidArg, "executable URL must be a file URL without query or fragment"));
+        }
+        let path = url.to_file_path().map_err(|_| napi::Error::from_reason("invalid local file URL"))?;
+        return path.into_os_string().into_string().map_err(|_| napi::Error::from_reason("executable path is not UTF-8"));
+    }
+    Ok(value.to_owned())
+}
+
+fn executable_options(value: &str) -> napi::Result<CommandOptions> {
+    Ok(CommandOptions {
+        program: executable_path(value)?, args: None, cwd: None, env: None,
+        input: None, timeout_ms: None, cleanup_timeout_ms: None, limits: None,
+    })
 }
 
 /// Build a configured [`Command`] (stdout/stderr piped) plus the decoded input,
@@ -1359,6 +1439,24 @@ async fn execute(
 mod tests {
     use super::*;
 
+    #[test]
+    fn executable_inputs_are_local_and_decoded() {
+        assert_eq!(executable_path("git").unwrap(), "git");
+        #[cfg(unix)]
+        assert_eq!(executable_path("file:///tmp/my%20tool").unwrap(), "/tmp/my tool");
+        for value in ["", "bad\0path", "https://example.com/tool", "file:///tmp/tool?x=1", "file:///tmp/tool#part"] {
+            assert!(executable_path(value).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_timeouts_return_errors() {
+        for value in [f64::NAN, f64::INFINITY, -1.0, f64::MAX] {
+            assert!(validate_duration(Some(value)).is_err());
+        }
+        assert!(validate_duration(Some(0.0)).is_ok());
+    }
+
     #[tokio::test]
     async fn cancellation_is_sticky_across_waiters() {
         let token = create_cancellation_token();
@@ -1416,3 +1514,4 @@ mod tests {
         }
     }
 }
+

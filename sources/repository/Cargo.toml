@@ -8,6 +8,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+url = "2"
 gix = { version = "0.89.0", features = [
   "revision",
   "merge",

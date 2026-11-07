@@ -89,3 +89,50 @@ describe("Process", () => {
     expect(typeof cleanup.waitTimedOut).toBe("boolean");
   });
 });
+
+describe("Process constructor inputs", () => {
+  test("accepts an executable string", async () => {
+    const result = await new Process(process.execPath).run();
+    expect(result.success).toBe(true);
+  });
+
+  test("accepts file URL objects and strings", async () => {
+    const { pathToFileURL } = await import("node:url");
+    const url = pathToFileURL(process.execPath);
+    for (const input of [url, url.href]) {
+      expect((await new Process(input).run()).success).toBe(true);
+    }
+  });
+
+  test("starts before run is called and only executes once", async () => {
+    const { mkdtemp, access, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const directory = await mkdtemp(join(tmpdir(), "alloy-process-"));
+    const marker = join(directory, "started");
+    const proc = new Process({
+      program: process.execPath,
+      args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'started')", marker],
+    });
+    try {
+      await expect.poll(async () => {
+        try { await access(marker); return true; } catch { return false; }
+      }).toBe(true);
+      expect((await proc.run()).success).toBe(true);
+      await expect(proc.run()).rejects.toThrow("only be called once");
+    } finally {
+      proc.cancel();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects invalid input before starting", () => {
+    for (const input of ["", "https://example.com/program", new URL("https://example.com")]) {
+      expect(() => new Process(input)).toThrow();
+    }
+    for (const timeoutMs of [NaN, Infinity, -1]) {
+      expect(() => new Process({ program: process.execPath, timeoutMs })).toThrow();
+    }
+  });
+});
+
