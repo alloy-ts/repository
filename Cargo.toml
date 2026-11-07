@@ -88,6 +88,7 @@ pgp = "0.21.0"
 blake3 = "1"
 crc32fast = "1"
 fusevm = { version = "=0.26.10", default-features = false }
+itertools = "0.13.0"
 
 [build-dependencies]
 napi-build = "2.6.0"

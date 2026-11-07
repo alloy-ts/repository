@@ -56,9 +56,12 @@ pub mod status;
 pub mod submodule;
 pub mod tag;
 pub mod testament;
+pub mod trailer;
 pub mod tree;
 pub mod workspace;
 pub mod worktree;
+
+pub use trailer::*;
 
 use std::sync::Arc;
 

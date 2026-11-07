@@ -23,6 +23,7 @@ use crate::log::{CommitInfo, log_summary};
 use crate::mailmap::Mailmap;
 use crate::object::{Object, build_object};
 use crate::repository::Repository;
+use crate::trailer::Trailer;
 use crate::tree::{Tree, TreeStore, build_tree};
 
 fn lossy(b: &[u8]) -> String {
@@ -142,28 +143,6 @@ pub fn message_prettify(message: String, comment_char: Option<String>) -> napi::
     Ok(prettify_message(&message, comment_char))
 }
 
-/// Parse the `git interpret-trailers` trailers of an arbitrary message, rather
-/// than one attached to a commit. Everything after a `---` cut line is ignored,
-/// like git does.
-///
-/// Mirrors libgit2's `git_message_trailers_strs`. JS strings are always UTF-8, so
-/// there is no separate bytes variant (`git_message_trailers_bytes`).
-#[napi]
-pub fn message_trailers(message: String) -> napi::Result<Vec<Trailer>> {
-    let cut = cut_at_line(&message, "---");
-    let parsed = gix::objs::commit::MessageRef::from_bytes(cut.as_bytes());
-    Ok(match parsed.body() {
-        Some(body) => body
-            .trailers()
-            .map(|trailer| Trailer {
-                token: lossy(trailer.token),
-                value: lossy(trailer.value.as_ref()),
-            })
-            .collect(),
-        None => Vec::new(),
-    })
-}
-
 /// git's message cleanup: strip comment lines, trim trailing whitespace from each
 /// line, collapse runs of blank lines to one, drop leading/trailing blank lines,
 /// and ensure exactly one trailing newline (an empty result stays empty).
@@ -199,20 +178,6 @@ fn prettify_message(message: &str, comment_char: Option<u8>) -> String {
     let mut out = kept.join("\n");
     out.push('\n');
     out
-}
-
-/// `message` truncated before the first line that is exactly `sep`.
-fn cut_at_line<'a>(message: &'a str, separator: &str) -> &'a str {
-    let mut offset = 0;
-    for chunk in message.split_inclusive('\n') {
-        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if line == separator {
-            return &message[..offset];
-        }
-        offset += chunk.len();
-    }
-    message
 }
 
 /// A git commit exposed to TypeScript.
@@ -774,7 +739,7 @@ impl Commit {
             Some(body) => body
                 .trailers()
                 .map(|trailer| Trailer {
-                    token: lossy(trailer.token),
+                    key: lossy(trailer.token),
                     value: lossy(trailer.value.as_ref()),
                 })
                 .collect(),
@@ -788,7 +753,7 @@ impl Commit {
         Ok(self
             .trailers()?
             .into_iter()
-            .filter(|trailer| trailer.token.eq_ignore_ascii_case("co-authored-by"))
+            .filter(|trailer| trailer.key.eq_ignore_ascii_case("co-authored-by"))
             .collect())
     }
 }
@@ -883,37 +848,6 @@ pub struct CommitTime {
     /// Offset from UTC in **seconds** (consistent with `Signature.timezoneOffset`).
     /// Note that git2/libgit2 reports this in minutes.
     pub offset: i32,
-}
-
-/// A single `git interpret-trailers` trailer from a commit message.
-#[napi(object)]
-pub struct Trailer {
-    /// The trailer token, e.g. `Co-authored-by`.
-    pub token: String,
-    /// The trailer value, with leading and trailing whitespace trimmed and
-    /// multi-line values unfolded.
-    pub value: String,
-}
-
-/// Render a single trailer as `token<separator>value`, mirroring the pasted
-/// `Trailer::display`. The default separator is `": "`.
-#[napi]
-pub fn format_trailer(trailer: Trailer, separator: Option<String>) -> String {
-    let sep = separator.unwrap_or_else(|| ": ".to_string());
-    format!("{}{}{}", trailer.token, sep, trailer.value)
-}
-
-/// Render each trailer as `token<separator>value`, one per line (no trailing
-/// newline), mirroring the pasted `Trailers::to_string`. The default separator
-/// is `": "`.
-#[napi]
-pub fn format_trailers(trailers: Vec<Trailer>, separator: Option<String>) -> String {
-    let sep = separator.unwrap_or_else(|| ": ".to_string());
-    trailers
-        .iter()
-        .map(|t| format!("{}{}{}", t.token, sep, t.value))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Fields to replace when amending a commit; `null` keeps the original value.
