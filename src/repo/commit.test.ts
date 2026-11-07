@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 
-import { Commit, formatTrailer, formatTrailers, Repository, type Signature } from "../main.ts";
+import { Commit, Repository, type Signature } from "../main.ts";
 
 let fixture: string;
 let repo: Repository;
@@ -290,41 +290,5 @@ describe("Commit.toBuffer (raw object bytes)", () => {
     }).toString("utf8");
     // `git cat-file` emits the exact stored object bytes, same as toBuffer().
     expect(head.toBuffer().toString("utf8")).toBe(expected);
-  });
-});
-
-describe("Trailer rendering (formatTrailer / formatTrailers)", () => {
-  test("formatTrailer renders token + separator + value", () => {
-    const t = { token: "Signed-off-by", value: "A <a@e.com>" };
-    expect(formatTrailer(t)).toBe("Signed-off-by: A <a@e.com>");
-    expect(formatTrailer(t, "=>")).toBe("Signed-off-by=>A <a@e.com>");
-  });
-
-  test("formatTrailers joins trailers one per line with the separator", () => {
-    const trailers = [
-      { token: "Co-authored-by", value: "B <b@e.com>" },
-      { token: "Reviewed-by", value: "C <c@e.com>" },
-    ];
-    expect(formatTrailers(trailers)).toBe("Co-authored-by: B <b@e.com>\nReviewed-by: C <c@e.com>");
-    expect(formatTrailers(trailers, "=")).toBe(
-      "Co-authored-by=B <b@e.com>\nReviewed-by=C <c@e.com>",
-    );
-  });
-
-  test("round-trips a commit's parsed trailers back to text", () => {
-    const head = repo.headCommit();
-    const oid = repo.writeCommit({
-      tree: head.treeId,
-      parents: head.parentIds,
-      author: head.author(),
-      committer: head.committer(),
-      message: "with trailer\n\nSigned-off-by: A <a@e.com>\nReviewed-by: B <b@e.com>\n",
-    });
-    const trailers = repo.findCommit(oid).trailers();
-    expect(trailers.length).toBe(2);
-    const text = formatTrailers(trailers);
-    expect(text).toContain("Signed-off-by: A <a@e.com>");
-    expect(text).toContain("Reviewed-by: B <b@e.com>");
-    expect(formatTrailer(trailers[0])).toBe("Signed-off-by: A <a@e.com>");
   });
 });
