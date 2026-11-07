@@ -16,8 +16,8 @@ The operation heads store (`OpHeadsStore`) tracks the current leaf heads of this
 
 ### Detection and Initialisation
 
-- `repo.isOpRepo()` / `repo.hasOpStore()`: Returns `true` if `<git-dir>/ops`, configured `init.opsDir`, or `core.dbUrl` exists.
-- `repo.dbUrl()`: Returns the effective SQLite database URL (`core.dbUrl` if configured, or default `file:<opsDir>/store.db`).
+- `repo.isOpRepo()` / `repo.hasOpStore()`: Returns `true` if `<git-dir>/ops`, configured `init.opsDir`, or `core.dbUrl` exists and is initialized.
+- `repo.dbUrl()`: Returns the effective SQLite database URL (`core.dbUrl` if configured to a `.db` file, or default `file:<opsDir>/store.db`).
 - `repo.initOpRepo()`: Initialises `<git-dir>/ops/op_store/`, `<git-dir>/ops/op_heads/`, and `<git-dir>/ops/store.db` under SQLite WAL mode.
 - `repo.initOpRepoAt(opsDir)`: Initialises operation store files at the designated directory.
 - `InitOptions.storeOp`: When set to `true` during `Repository.initOpts({ storeOp: true, opsDir?: string })`, initialises the repository with both a Git object store and an op store.
@@ -25,7 +25,7 @@ The operation heads store (`OpHeadsStore`) tracks the current leaf heads of this
 
 ### Automatic Initialisation without `init`
 
-If `core.dbUrl` is configured or `init.storeOp` is set to `true`, `repo.isOpRepo()` automatically checks and initializes `opsDir`, `op_heads`, and the SQLite database (`store.db`) under WAL mode, ensuring that op storage is immediately usable even when opening a standard repository without calling an explicit `init` method.
+When `init.storeOp` is `true` (and **only** when `init.storeOp` is `true`), `repo.isOpRepo()` automatically checks and initializes `opsDir`, `op_heads`, and the SQLite database (`store.db` or `core.dbUrl` if configured to a `.db` file) under WAL mode, ensuring that op storage is immediately usable even when opening a standard repository without calling an explicit `init` method.
 
 ### SQLite WAL Mode as Default OpStore Backend
 

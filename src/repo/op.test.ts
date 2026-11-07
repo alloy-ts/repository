@@ -70,23 +70,37 @@ describe("Repository Op and Workspace NAPI bindings", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("supports core.dbUrl and auto-initializes opsDir and store.db even without running init", () => {
+  it("auto-initializes opsDir and store.db outside init only when init.storeOp is true and core.dbUrl ends in .db", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-dburl-test-"));
     // Standard git init without storeOp
     const repo = Repository.init(tmpDir);
     expect(repo.isOpRepo()).toBe(false);
 
-    // Set core.dbUrl in config
     const customDb = path.join(tmpDir, "custom.db");
     repo.configSet("core.dbUrl", `file:${customDb}`);
 
-    // Reopen repository: isOpRepo auto-detects and initializes opsDir and store.db
+    // When init.storeOp is not provided or false, core.dbUrl means object store (NOT op store) and does NOT auto-initialize op repo
+    const repoDbOnly = Repository.open(tmpDir);
+    expect(repoDbOnly.isOpRepo()).toBe(false);
+    expect(fs.existsSync(customDb)).toBe(false);
+
+    // init.storeOp alone without a .db core.dbUrl applies to init only
+    const repoStoreOpOnlyDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-storeop-alone-"));
+    const repoStoreOpAlone = Repository.init(repoStoreOpOnlyDir);
+    repoStoreOpAlone.configSet("init.storeOp", "true");
+    const reopenedAlone = Repository.open(repoStoreOpOnlyDir);
+    // Since init already finished and core.dbUrl is not configured to a .db file, it does not auto-initialize outside init
+    expect(reopenedAlone.isOpRepo()).toBe(false);
+
+    // When core.dbUrl is configured to a file with .db extension AND init.storeOp is true, auto-initializes opsDir and store.db
+    repo.configSet("init.storeOp", "true");
     const reopened = Repository.open(tmpDir);
-    expect(reopened.dbUrl()).toBe(`file:${customDb}`);
     expect(reopened.isOpRepo()).toBe(true);
+    expect(reopened.dbUrl()).toBe(`file:${customDb}`);
     expect(fs.existsSync(customDb)).toBe(true);
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(repoStoreOpOnlyDir, { recursive: true, force: true });
   });
 
   it("tests OpStoreOpts with custom opsDir and recursive creation", () => {

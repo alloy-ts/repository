@@ -601,7 +601,7 @@ impl Repository {
         git_dir.join("ops")
     }
 
-    /// Resolve effective SQLite database URL (`core.dbUrl` if configured, otherwise `file:<opsDir>/store.db`).
+    /// Resolve effective SQLite database URL (`core.dbUrl` if configured to a .db file, otherwise `file:<opsDir>/store.db`).
     #[napi]
     pub fn db_url(&self) -> String {
         let r = thread_local(&self.inner);
@@ -610,31 +610,47 @@ impl Repository {
             .string("core.dbUrl")
             .map(|v| String::from_utf8_lossy(&v).into_owned())
         {
-            return url;
+            let path_part = url.trim_start_matches("file:");
+            if path_part.ends_with(".db") && !std::path::Path::new(path_part).is_dir() {
+                return url;
+            }
         }
         let ops_dir = self.ops_dir_path();
         format!("file:{}/store.db", ops_dir.to_string_lossy())
     }
 
-    /// Check whether an op store directory exists, automatically ensuring initialization if `core.dbUrl` is configured or `init.storeOp` is true.
+    /// Check whether an op store directory exists.
+    ///
+    /// When `core.dbUrl` is configured to a file with `.db` extension (not directory) AND `init.storeOp` is true,
+    /// auto-initializes `opsDir` and SQLite `store.db` under WAL mode if not existing, even outside repository init.
+    /// `init.storeOp` alone applies only to init only otherwise.
+    /// When `init.storeOp` is not provided or is false (default), `core.dbUrl` means object store, otherwise it means op store.
     #[napi]
     pub fn is_op_repo(&self) -> bool {
         let r = thread_local(&self.inner);
         let config_store_op = r.config_snapshot().boolean("init.storeOp").unwrap_or(false);
-        let config_db_url = r.config_snapshot().string("core.dbUrl");
+        let config_db_url = r
+            .config_snapshot()
+            .string("core.dbUrl")
+            .map(|v| String::from_utf8_lossy(&v).into_owned());
 
-        // If core.dbUrl or init.storeOp is set, ensure opsDir and store.db are initialized even when not running init
-        if config_store_op || config_db_url.is_some() {
-            let base_dir = self.ops_dir_path();
-            if !base_dir.join("op_heads").is_dir() {
-                let _ = self.init_op_repo();
+        // When core.dbUrl is configured to be a file with .db extension (not directory) AND init.storeOp is true,
+        // auto-initializes opsDir and SQLite store.db under WAL mode if not existing, even outside repository init.
+        if config_store_op {
+            if let Some(ref url) = config_db_url {
+                let path_part = url.trim_start_matches("file:");
+                let p = std::path::Path::new(path_part);
+                if path_part.ends_with(".db") && !p.is_dir() {
+                    let base_dir = self.ops_dir_path();
+                    if !base_dir.join("op_heads").is_dir() {
+                        let _ = self.init_op_repo();
+                    }
+                    if !p.exists() {
+                        let _ = crate::object_store::op::SqlBackend::init(url.clone());
+                    }
+                    return true;
+                }
             }
-            let db_url = self.db_url();
-            let db_path = db_url.trim_start_matches("file:");
-            if !std::path::Path::new(db_path).exists() {
-                let _ = crate::object_store::op::SqlBackend::init(db_url);
-            }
-            return true;
         }
 
         let git_dir = r.git_dir();
@@ -645,15 +661,19 @@ impl Repository {
 
         if let Some(custom) = config_ops_dir {
             let p = std::path::PathBuf::from(custom);
-            if p.exists() {
+            if p.join("op_store").is_dir() || p.join("op_heads").is_dir() {
                 return true;
             }
         }
-        if git_dir.join("ops").is_dir() || git_dir.join("repo").join("op_store").is_dir() {
+        if git_dir.join("ops").join("op_heads").is_dir()
+            || git_dir.join("ops").join("op_store").is_dir()
+            || git_dir.join("repo").join("op_store").is_dir()
+        {
             return true;
         }
         if let Some(wd) = r.workdir() {
-            wd.join(".git").join("ops").is_dir()
+            wd.join(".git").join("ops").join("op_heads").is_dir()
+                || wd.join(".git").join("ops").join("op_store").is_dir()
                 || wd.join(".git").join("repo").join("op_store").is_dir()
                 || wd.join(".jj").is_dir()
         } else {
@@ -730,7 +750,12 @@ impl Repository {
             .string("core.dbUrl")
             .map(|v| String::from_utf8_lossy(&v).into_owned())
         {
-            url
+            let path_part = url.trim_start_matches("file:");
+            if path_part.ends_with(".db") && !std::path::Path::new(path_part).is_dir() {
+                url
+            } else {
+                format!("file:{}/store.db", base_dir.to_string_lossy())
+            }
         } else {
             format!("file:{}/store.db", base_dir.to_string_lossy())
         };
