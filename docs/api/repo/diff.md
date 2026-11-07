@@ -1,6 +1,6 @@
 # Diff API
 
-Two layers of diffing live in `src/repo/diff.rs`:
+Two layers of diffing live in `workspaces/repository/src/repo/diff.rs`:
 
 - **Line/text diff** — the `diff()` free function, backed by `gix-imara-diff`.
   Picks one of three string-editing algorithms (`Histogram`, `Myers`,

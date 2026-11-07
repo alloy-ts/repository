@@ -53,3 +53,16 @@ npm run start
 ```bash
 npm run test
 ```
+
+## Workspace layout
+
+The root coordinates npm and Cargo workspaces. The existing Rust/N-API library,
+TypeScript entry points, and tests live in `workspaces/repository/src/`; its
+Cargo manifest and native build script live in `workspaces/repository/`.
+The private npm member is named `@alloy-ts/repository-source`. npm discovers
+packages under `packages/*`, `crates/*`, `workspaces/*`, and `modules/*`. Add
+new Rust members to the root Cargo workspace's `members` list.
+
+Run `npm install`, `cargo build`, `npm run build`, and `npm test` from the
+repository root. Generated bindings and package artifacts remain in `dist/`,
+and all Rust members share the root `Cargo.lock` and `target/` directory.

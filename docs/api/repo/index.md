@@ -170,7 +170,7 @@ exactly that internally.
 ## End-to-end example
 
 ```ts
-import { indexStatIsRacy, Repository } from "./src/main.ts";
+import { indexStatIsRacy, Repository } from "./workspaces/repository/src/main.ts";
 
 const repo = Repository.open(".");
 const idx = repo.index();

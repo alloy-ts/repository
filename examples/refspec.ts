@@ -1,4 +1,4 @@
-import { MatchGroup, RefSpec, RefSpecOperation } from "../src/main.ts";
+import { MatchGroup, RefSpec, RefSpecOperation } from "../workspaces/repository/src/main.ts";
 
 // Refspecs are the mapping rules remotes use during fetch and push, e.g.
 // `+refs/heads/*:refs/remotes/origin/*`. Everything in this example is stateless:

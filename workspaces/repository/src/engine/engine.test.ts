@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { Engine } from "../../dist/index.mjs";
+import { Engine } from "../../../../dist/index.mjs";
 
 describe("Engine (FuseVM + NAPI-RS)", () => {
   test("basic arithmetic and operator precedence", () => {

@@ -12,7 +12,7 @@ import {
   pathRelativizeWithPrefix,
   pathToNativeSeparators,
   pathToUnixSeparators,
-} from "../src/main.ts";
+} from "../workspaces/repository/src/main.ts";
 
 // Path utilities are pure string operations — no repository required. They mirror
 // git's own handling: virtual `..` elimination without touching the filesystem,

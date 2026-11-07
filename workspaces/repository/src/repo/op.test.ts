@@ -33,7 +33,7 @@ import {
   Store,
   COMMIT_CACHE_CAPACITY,
   TREE_CACHE_CAPACITY,
-} from "../../dist/index.js";
+} from "../../../../dist/index.js";
 
 describe("Repository Op and Workspace NAPI bindings", () => {
   it("initializes an op repo with default opsDir <git-dir>/ops and queries head operations and op resolution", () => {

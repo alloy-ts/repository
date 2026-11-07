@@ -14,6 +14,12 @@
     "type": "git",
     "url": "git+https://repo.chen.software/yumin-chen/repository.git"
   },
+  "workspaces": [
+    "packages/*",
+    "crates/*",
+    "workspaces/*",
+    "modules/*"
+  ],
   "type": "module",
   "exports": {
     ".": "./dist/index.mjs",

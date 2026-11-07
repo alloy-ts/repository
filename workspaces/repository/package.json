@@ -1,0 +1,10 @@
+{
+  "name": "@alloy-ts/repository-source",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/main.ts",
+    "./sql": "./src/sql/mod.ts"
+  }
+}

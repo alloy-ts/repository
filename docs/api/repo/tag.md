@@ -117,7 +117,7 @@ A decoded annotated tag object:
 ## End-to-end example
 
 ```ts
-import { Repository, tagNameIsValid } from "./src/main.ts";
+import { Repository, tagNameIsValid } from "./workspaces/repository/src/main.ts";
 
 const repo = Repository.open(".");
 

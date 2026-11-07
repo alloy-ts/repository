@@ -10,7 +10,7 @@ import {
   Protocol,
   Repository,
   SymmetricCryptoKey,
-} from "../src/main.ts";
+} from "../workspaces/repository/src/main.ts";
 
 // 1. SymmetricCryptoKey: ChaCha20-Poly1305 symmetric encryption
 const key = SymmetricCryptoKey.generateRandom();
