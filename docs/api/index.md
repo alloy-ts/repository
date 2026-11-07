@@ -46,6 +46,7 @@ Core Git and Gitoxide (`gix`) bindings:
 
 - **[Task](./task/index.md)**: Worker thread execution, message passing (`postMessage`), and event loops.
 - **[Process](./task/process.md)**: Async child processes, command execution, and cancellation tokens.
+- **[Cluster](./task/cluster.md)**: Process clustering, task worker pools, scheduling policies, and IPC.
 - **[Thread](./task/thread.md)**: OS threads (`Thread`, `Builder`, `JoinHandle`) and libuv thread pool inspection.
 - **[Scheduler](./task/scheduler.md)**: Task scheduling, dispatching, and queue handles.
 - **[Promise](./task/promise.md)**: Asynchronous promise bridging with Rust worker pools.
