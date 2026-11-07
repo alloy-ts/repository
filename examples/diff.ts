@@ -1,4 +1,4 @@
-import { Algorithm, diff, DiffHunk, Repository } from "../workspaces/repository/src/main.ts";
+import { Algorithm, diff, DiffHunk, Repository } from "../sources/repository/src/main.ts";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

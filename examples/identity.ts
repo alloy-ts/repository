@@ -5,7 +5,7 @@ import {
   parseSignature,
   signatureToIdentity,
   signatureToRaw,
-} from "../workspaces/repository/src/main.ts";
+} from "../sources/repository/src/main.ts";
 
 // IdentityRef::from_bytes(b" Taylor Example < taylor@example.com >").unwrap().trim()
 const actor = parseIdentity(" Taylor Example < taylor@example.com >");

@@ -4,7 +4,7 @@ Parsing, formatting, and manipulating Git commit message trailers (`Signed-off-b
 
 ## Overview
 
-The `trailer` module (`workspaces/repository/src/repo/trailer.rs`) provides the `Trailer` class and standalone helpers to parse, extract, and format trailers from commit message descriptions.
+The `trailer` module (`sources/repo/src/trailer.rs`) provides the `Trailer` class and standalone helpers to parse, extract, and format trailers from commit message descriptions.
 
 ## Functions
 

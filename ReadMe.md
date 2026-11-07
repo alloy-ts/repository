@@ -56,13 +56,22 @@ npm run test
 
 ## Workspace layout
 
-The root coordinates npm and Cargo workspaces. The existing Rust/N-API library,
-TypeScript entry points, and tests live in `workspaces/repository/src/`; its
-Cargo manifest and native build script live in `workspaces/repository/`.
-The private npm member is named `@alloy-ts/repository-source`. npm discovers
-packages under `packages/*`, `crates/*`, `workspaces/*`, and `modules/*`. Add
-new Rust members to the root Cargo workspace's `members` list.
+The root coordinates npm and Cargo workspaces. Domain implementations and tests
+live in `sources/{repo,crypto,object_store,sql,task,engine}/src/`. Each domain has
+its own private npm `package.json` and Rust `Cargo.toml`, with shared package
+metadata and dependencies defined in the root Cargo manifest.
 
-Run `npm install`, `cargo build`, `npm run build`, and `npm test` from the
-repository root. Generated bindings and package artifacts remain in `dist/`,
-and all Rust members share the root `Cargo.lock` and `target/` directory.
+`sources/repository` is the integration crate and combined TypeScript entry point.
+It compiles the domain implementation modules into one N-API library, preserving
+shared native types and existing cross-domain references. Domain Rust crates
+provide façades over that library; their npm entry points re-export the combined
+bindings. These are workspace boundaries, not independent native addons. This
+avoids Cargo dependency cycles between the repository, object store, and task APIs.
+
+npm discovers packages under `packages/*`, `crates/*`, `workspaces/*`, `modules/*`,
+and `sources/*`. Cargo discovers members under `sources/*`.
+
+Run `npm install`, `cargo build`, `npm run build`, and `npm test` from the root.
+Use `cargo check --workspace` to validate every domain façade. Generated bindings
+and package artifacts remain in `dist/`; Rust members share `Cargo.lock` and
+`target/` at the root. Tests are discovered under `sources/*/src/`.

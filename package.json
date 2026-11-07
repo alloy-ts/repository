@@ -18,7 +18,8 @@
     "packages/*",
     "crates/*",
     "workspaces/*",
-    "modules/*"
+    "modules/*",
+    "sources/*"
   ],
   "type": "module",
   "exports": {

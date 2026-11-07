@@ -142,7 +142,7 @@ For SQLite, changes to column types or nullability trigger the standard table-re
 
 ---
 
-## SQL QueryDsl & RunQueryDsl (`workspaces/repository/src/sql/query.rs`)
+## SQL QueryDsl & RunQueryDsl (`sources/sql/src/query.rs`)
 
 The `query` module provides chainable SQL query building and execution via SQLite connection and transaction wrappers.
 

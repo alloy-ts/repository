@@ -8,7 +8,7 @@ import {
   formatTrailers,
   Repository,
   type Signature,
-} from "../workspaces/repository/src/main.ts";
+} from "../sources/repository/src/main.ts";
 
 // Demonstrates the Commit API exposed in src/commit.rs: reading commit fields,
 // walking parents and history, inspecting the tree and headers, writing new

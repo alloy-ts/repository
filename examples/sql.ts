@@ -7,7 +7,7 @@ import {
   enumType,
   table,
   defineSchema,
-} from "../workspaces/repository/src/sql/mod.ts";
+} from "../sources/sql/src/mod.ts";
 
 console.log("1. Constructing Schema using DSL...");
 const userRole = enumType("user_role", ["admin", "editor", "viewer"]);

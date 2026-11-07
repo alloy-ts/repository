@@ -8,7 +8,7 @@ management, and GPG / OpenPGP operations backed by `rPGP`.
 The cryptography capabilities in `@alloy-ts/repository` consist of two primary
 areas:
 
-1. **Symmetric Repository Encryption & Key Vault (`workspaces/repository/src/crypto/mod.rs`)**:
+1. **Symmetric Repository Encryption & Key Vault (`sources/crypto/src/mod.rs`)**:
    - `CryptoMode`: Modes for repository encryption — `Filter` (0), `EntireRepo`
      (1), and default `Hybrid` (2).
    - `SymmetricCryptoKey`: ChaCha20-Poly1305 / AES 256-bit symmetric
@@ -24,7 +24,7 @@ areas:
    - `CryptFilterOptions`: Configuration for `clean`, `smudge`, and `diff` Git
      filters.
 
-2. **OpenPGP & GPG Keyring Operations (`workspaces/repository/src/crypto/gpg.rs`)**:
+2. **OpenPGP & GPG Keyring Operations (`sources/crypto/src/gpg.rs`)**:
    - `Context`: High-level cryptographic operations including encryption,
      decryption, signing, and signature verification.
    - `Key`: Inspection of OpenPGP public and secret keys (key ID, fingerprint,
@@ -47,7 +47,7 @@ areas:
 
 ---
 
-## GPG / OpenPGP Subsystem (`workspaces/repository/src/crypto/gpg.rs`)
+## GPG / OpenPGP Subsystem (`sources/crypto/src/gpg.rs`)
 
 ### `Protocol`
 
@@ -141,7 +141,7 @@ function gpg_decrypt_from_file(filename: string): Uint8Array;
 
 ---
 
-## Symmetric Encryption Subsystem (`workspaces/repository/src/crypto/mod.rs`)
+## Symmetric Encryption Subsystem (`sources/crypto/src/mod.rs`)
 
 ### `CryptoMode`
 

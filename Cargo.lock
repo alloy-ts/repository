@@ -5748,6 +5748,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "repository-crypto"
+version = "0.1.0"
+dependencies = [
+ "repository",
+]
+
+[[package]]
+name = "repository-engine"
+version = "0.1.0"
+dependencies = [
+ "repository",
+]
+
+[[package]]
+name = "repository-object-store"
+version = "0.1.0"
+dependencies = [
+ "repository",
+]
+
+[[package]]
+name = "repository-repo"
+version = "0.1.0"
+dependencies = [
+ "repository",
+]
+
+[[package]]
+name = "repository-sql"
+version = "0.1.0"
+dependencies = [
+ "repository",
+]
+
+[[package]]
+name = "repository-task"
+version = "0.1.0"
+dependencies = [
+ "repository",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

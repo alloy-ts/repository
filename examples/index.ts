@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { indexStatIsRacy, indexStatMatches, Repository } from "../workspaces/repository/src/main.ts";
+import { indexStatIsRacy, indexStatMatches, Repository } from "../sources/repository/src/main.ts";
 
 const repo = Repository.open(process.argv[2] ?? process.cwd());
 

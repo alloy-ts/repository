@@ -15,7 +15,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["workspaces/*/src/**/*.{test,spec}.ts"],
+    include: ["sources/*/src/**/*.{test,spec}.ts"],
     hookTimeout: 180_000,
     testTimeout: 60_000,
   },

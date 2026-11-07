@@ -1,4 +1,4 @@
-import { Repository } from "../workspaces/repository/src/main.ts";
+import { Repository } from "../sources/repository/src/main.ts";
 
 const repoPath = process.argv[2] ?? process.cwd();
 

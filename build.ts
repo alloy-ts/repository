@@ -31,7 +31,7 @@ async function run() {
   // don't compile yet — Phase 2. Once migrated, restore:
   //   features: ["ssh", "xmss"],
   const { task } = await cli.build({
-    manifestPath: "./workspaces/repository/Cargo.toml",
+    manifestPath: "./sources/repository/Cargo.toml",
     platform: true,
     esm: true,
     outputDir: "./dist",

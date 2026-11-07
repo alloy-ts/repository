@@ -4,7 +4,7 @@ Welcome to the `@alloy-ts/repository` API documentation. The repository provides
 
 ## Documentation Sections
 
-### 1. [Git Repository API](./repo/index.md) (`workspaces/repository/src/repo/`)
+### 1. [Git Repository API](./repo/index.md) (`sources/repo/src/`)
 
 Core Git and Gitoxide (`gix`) bindings:
 
@@ -26,23 +26,23 @@ Core Git and Gitoxide (`gix`) bindings:
 - **[Attributes](./repo/attributes.md)**: `.gitattributes` query and pattern checking.
 - **[Describe](./repo/describe.md)**: Human-readable commit naming (`git describe`).
 
-### 2. [Cryptography & Vault API](./crypto/index.md) (`workspaces/repository/src/crypto/`)
+### 2. [Cryptography & Vault API](./crypto/index.md) (`sources/crypto/src/`)
 
 - **[Crypto](./crypto/index.md)**: Symmetric encryption (`SymmetricCryptoKey`), git-crypt filters, and git-remote-gcrypt entire repository encryption.
 - **[OpenPGP / GPG](./crypto/index.md#gpg--openpgp-subsystem-srccryptogpgrs)**: OpenPGP signing, verification, encryption, and system keyring lookup via `rPGP`.
 - **[Vault & Secret Storage](./crypto/vault.md)**: Encrypted password-protected vaults (`Vault`), local KV store (`KvVault`), and repository key managers (`KeyManager`).
 
-### 3. [Object Store API](./object_store/index.md) (`workspaces/repository/src/object_store/`)
+### 3. [Object Store API](./object_store/index.md) (`sources/object_store/src/`)
 
 - **[Object Stores](./object_store/index.md)**: Repository-independent object databases, loose stores (`ObjectStore`), and pack-aware cached databases (`ObjectDatabase`).
 - **[Op-Heads & OpStore](./object_store/op-heads-store.md)**: Jujutsu (`jj`) operation DAG logging, views, operations, and SQLite WAL storage.
 
-### 4. [SQL Compiler & QueryDSL](./sql/index.md) (`workspaces/repository/src/sql/`)
+### 4. [SQL Compiler & QueryDSL](./sql/index.md) (`sources/sql/src/`)
 
 - **[Schema Compiler](./sql/index.md)**: Intermediate Representation (IR), Diesel tables, Rust models, NAPI-RS classes, and migration generator.
 - **[QueryDSL & RunQueryDsl](./sql/index.md#sql-querydsl--runquerydsl-srcsqlqueryrs)**: Type-safe, chainable query builder and SQLite connection executor.
 
-### 5. [Task & Threading API](./task/index.md) (`workspaces/repository/src/task/`)
+### 5. [Task & Threading API](./task/index.md) (`sources/task/src/`)
 
 - **[Task](./task/index.md)**: Worker thread execution, message passing (`postMessage`), and event loops.
 - **[Process](./task/process.md)**: Async child processes, command execution, and cancellation tokens.
@@ -50,6 +50,6 @@ Core Git and Gitoxide (`gix`) bindings:
 - **[Scheduler](./task/scheduler.md)**: Task scheduling, dispatching, and queue handles.
 - **[Promise](./task/promise.md)**: Asynchronous promise bridging with Rust worker pools.
 
-### 6. [Engine Language Runtime](./engine/index.md) (`workspaces/repository/src/engine/`)
+### 6. [Engine Language Runtime](./engine/index.md) (`sources/engine/src/`)
 
 - **[Engine & FuseVM](./engine/index.md)**: Bytecode compiler and virtual machine runtime for the custom Engine programming language.
