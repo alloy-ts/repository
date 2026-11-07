@@ -15,14 +15,14 @@ pub struct BlobPropertyBag {
 }
 
 /// A Web-compatible `Blob` object.
-#[napi(js_name = "FileBlob")]
-pub struct WebBlob {
+#[napi]
+pub struct Blob {
     data: Vec<u8>,
     mime_type: String,
 }
 
 #[napi]
-impl WebBlob {
+impl Blob {
     #[napi(constructor)]
     pub fn new(
         blob_parts: Option<Vec<Either<String, Buffer>>>,
@@ -41,7 +41,7 @@ impl WebBlob {
             .and_then(|o| o.r#type)
             .unwrap_or_else(|| "".to_string());
 
-        WebBlob { data, mime_type }
+        Blob { data, mime_type }
     }
 
     #[napi(getter)]
@@ -80,7 +80,7 @@ impl WebBlob {
             Vec::new()
         };
 
-        WebBlob {
+        Blob {
             data: sliced,
             mime_type: content_type.unwrap_or_else(|| self.mime_type.clone()),
         }

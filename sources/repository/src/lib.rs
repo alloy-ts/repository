@@ -44,4 +44,4 @@ pub(crate) mod record;
 
 // Filesystem-seam napi bindings, wrapping `crate::vfs` without modifying it.
 pub mod fs;
-pub use fs::{File, WebBlob as FileBlob};
+pub use fs::{File, Blob};

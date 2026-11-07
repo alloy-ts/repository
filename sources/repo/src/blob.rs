@@ -1,3 +1,4 @@
+pub type Blob = GitBlob;
 use std::sync::Arc;
 
 use gix::objs::Write;
@@ -8,14 +9,14 @@ use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::object::{Object, build_object};
 use crate::repository::Repository;
 
-#[napi]
-pub struct Blob {
+#[napi(js_name = "GitBlob")]
+pub struct GitBlob {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,
 }
 
 #[napi]
-impl Blob {
+impl GitBlob {
     #[napi(constructor)]
     pub fn new(repo: Option<&Repository>, content: Either<String, Buffer>) -> napi::Result<Self> {
         let inner = match repo {

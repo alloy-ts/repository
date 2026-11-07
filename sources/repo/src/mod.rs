@@ -940,3 +940,5 @@ fn count_from(
         .map_err(|e| err("ancestors", e))?;
     Ok(walk.filter_map(|r| r.ok()).count() as u32)
 }
+pub use blob::GitBlob;
+pub type Blob = GitBlob;
