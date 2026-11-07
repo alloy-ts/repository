@@ -1,5 +1,10 @@
-import { describe, expect, test } from "vite-plus/test";
-import { formatTrailer, formatTrailers, messageTrailers, Trailer } from "../main.ts";
+import { execSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
+
+import { formatTrailer, formatTrailers, messageTrailers, Repository, Trailer } from "../main.ts";
 
 describe("Trailer class and utilities (src/repo/trailer.rs)", () => {
   test("Trailer constructor, properties, format()", () => {
@@ -81,5 +86,63 @@ describe("Trailer class and utilities (src/repo/trailer.rs)", () => {
     expect(formatTrailers(list)).toBe(
       "Signed-off-by: A <a@e.com>\nReviewed-by: B <b@e.com>\nChange-Id: 123",
     );
+  });
+});
+
+describe("Trailer rendering (formatTrailer / formatTrailers)", () => {
+  let fixture: string;
+  let repo: Repository;
+
+  beforeAll(() => {
+    fixture = mkdtempSync(join(tmpdir(), "repository-trailer-"));
+    mkdirSync(fixture, { recursive: true });
+    execSync("git init --initial-branch=main", { cwd: fixture, stdio: "ignore" });
+    execSync("git config user.email a@e.com", { cwd: fixture, stdio: "ignore" });
+    execSync("git config user.name A", { cwd: fixture, stdio: "ignore" });
+    execSync("git config commit.gpgsign false", { cwd: fixture, stdio: "ignore" });
+
+    writeFileSync(join(fixture, "a.txt"), "a\n");
+    execSync("git add a.txt", { cwd: fixture, stdio: "ignore" });
+    execSync('git commit -m "Initial commit"', { cwd: fixture, stdio: "ignore" });
+
+    repo = Repository.open(fixture);
+  });
+
+  afterAll(() => {
+    rmSync(fixture, { recursive: true, force: true });
+  });
+
+  test("formatTrailer renders token + separator + value", () => {
+    const t = { token: "Signed-off-by", value: "A <a@e.com>" };
+    expect(formatTrailer(t)).toBe("Signed-off-by: A <a@e.com>");
+    expect(formatTrailer(t, "=>")).toBe("Signed-off-by=>A <a@e.com>");
+  });
+
+  test("formatTrailers joins trailers one per line with the separator", () => {
+    const trailers = [
+      { token: "Co-authored-by", value: "B <b@e.com>" },
+      { token: "Reviewed-by", value: "C <c@e.com>" },
+    ];
+    expect(formatTrailers(trailers)).toBe("Co-authored-by: B <b@e.com>\nReviewed-by: C <c@e.com>");
+    expect(formatTrailers(trailers, "=")).toBe(
+      "Co-authored-by=B <b@e.com>\nReviewed-by=C <c@e.com>",
+    );
+  });
+
+  test("round-trips a commit's parsed trailers back to text", () => {
+    const head = repo.headCommit();
+    const oid = repo.writeCommit({
+      tree: head.treeId,
+      parents: head.parentIds,
+      author: head.author(),
+      committer: head.committer(),
+      message: "with trailer\n\nSigned-off-by: A <a@e.com>\nReviewed-by: B <b@e.com>\n",
+    });
+    const trailers = repo.findCommit(oid).trailers();
+    expect(trailers.length).toBe(2);
+    const text = formatTrailers(trailers);
+    expect(text).toContain("Signed-off-by: A <a@e.com>");
+    expect(text).toContain("Reviewed-by: B <b@e.com>");
+    expect(formatTrailer(trailers[0])).toBe("Signed-off-by: A <a@e.com>");
   });
 });
