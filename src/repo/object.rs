@@ -874,6 +874,7 @@ impl Repository {
     }
 
     /// Write a raw object of the given `kind` (`Commit`, `Tree`, `Blob`, `Tag`) and return its id.
+    /// If an op store is present, also writes to the op store as source of truth.
     #[napi]
     pub fn write_object(&self, kind: ObjectType, data: Buffer) -> napi::Result<String> {
         let r = thread_local(&self.inner);
@@ -883,6 +884,97 @@ impl Repository {
         let id = r
             .write_stream(kind, data.len() as u64, &mut buf)
             .map_err(|e| err("write_object", e))?;
+
+        if self.is_op_repo() {
+            if let Ok(op_store) = self.op_store() {
+                let id_str = id.to_string();
+                let op_heads = self.op_heads_store().ok();
+                let parent_op_ids = op_heads
+                    .as_ref()
+                    .and_then(|heads_store| heads_store.get_op_heads().ok())
+                    .unwrap_or_default();
+
+                // If op history is not empty, compute diff against last view
+                let (last_view, last_description) = if let Some(last_op_id) = parent_op_ids.first() {
+                    if let Ok(last_op) = op_store.read_operation(last_op_id.clone()) {
+                        let view = op_store.read_view(last_op.view_id).ok();
+                        (view, Some(last_op.metadata.description))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                };
+
+                let now_millis = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+
+                let mut new_view = last_view.unwrap_or_else(|| crate::object_store::op_heads::ViewRecord {
+                    id: String::new(),
+                    head_ids: vec![],
+                    wc_commit_ids: std::collections::BTreeMap::new(),
+                    local_bookmarks: std::collections::BTreeMap::new(),
+                    local_tags: std::collections::BTreeMap::new(),
+                    git_refs: std::collections::BTreeMap::new(),
+                    git_heads: std::collections::BTreeMap::new(),
+                });
+
+                let mut diff_summary = Vec::new();
+                if kind == gix::object::Kind::Commit {
+                    if !new_view.head_ids.contains(&id_str) {
+                        new_view.head_ids.push(id_str.clone());
+                        diff_summary.push(format!("add commit head {id_str}"));
+                    }
+                    new_view.wc_commit_ids.insert("default".to_string(), id_str.clone());
+                } else if kind == gix::object::Kind::Tree {
+                    diff_summary.push(format!("update tree {id_str}"));
+                } else if kind == gix::object::Kind::Blob {
+                    diff_summary.push(format!("update blob {id_str}"));
+                } else if kind == gix::object::Kind::Tag {
+                    diff_summary.push(format!("update tag {id_str}"));
+                }
+
+                let desc = if diff_summary.is_empty() {
+                    format!("write git {} {}", kind, id_str)
+                } else {
+                    format!("diff vs last op ({:?}): {}", last_description.as_deref().unwrap_or("none"), diff_summary.join(", "))
+                };
+
+                new_view.id = String::new();
+                if let Ok(new_view_id) = op_store.write_view(new_view) {
+                    let mut attributes = std::collections::BTreeMap::new();
+                    attributes.insert("object_id".to_string(), id_str.clone());
+                    attributes.insert("object_kind".to_string(), format!("{:?}", kind));
+
+                    let op_rec = crate::object_store::op_heads::OperationRecord {
+                        id: String::new(),
+                        view_id: new_view_id,
+                        parents: parent_op_ids.clone(),
+                        metadata: crate::object_store::op_heads::OpMetadata {
+                            description: desc,
+                            hostname: "localhost".to_string(),
+                            username: "git".to_string(),
+                            is_snapshot: false,
+                            workspace_name: Some("default".to_string()),
+                            time: crate::object_store::op_heads::OpTimestampRange {
+                                start_millis: napi::bindgen_prelude::BigInt::from(now_millis),
+                                end_millis: napi::bindgen_prelude::BigInt::from(now_millis),
+                                tz_offset: 0,
+                            },
+                            attributes,
+                        },
+                    };
+                    if let Ok(new_op_id) = op_store.write_operation(op_rec) {
+                        if let Some(heads_store) = op_heads {
+                            let _ = heads_store.update_op_heads(parent_op_ids, new_op_id);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(id.to_string())
     }
 

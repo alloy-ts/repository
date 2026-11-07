@@ -21,8 +21,20 @@ pub mod base;
 pub mod buffered;
 pub mod loose;
 pub mod memory;
+pub mod op;
+pub mod op_heads;
 pub mod sql;
 
+pub use op::{
+    BackendError, OpPrefixResolution, OpStore, OpStoreError, OpStoreOpts, OpStoreTrait,
+    OperationStore, RootOperationData, SimpleBackend, SimpleOpStore, SqlBackend, CHANGE_ID_LENGTH,
+    COMMIT_ID_LENGTH,
+};
+pub use op_heads::{
+    OpHeadsLock, OpHeadsStore, OpHeadsStoreError, OpHeadsStoreLock, OpHeadsStoreTrait,
+    OpMetadata, OpRefTarget, OpTimestampRange, OperationRecord, ResolvedOpHeads,
+    SimpleOpHeadsStore, SimpleOpHeadsStoreLock, ViewRecord,
+};
 pub use sql::SqlObjectStore;
 
 /// Lower-cased string form of a hash kind (`"sha1"` / `"sha256"`). `gix::hash::Kind` is

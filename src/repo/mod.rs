@@ -31,6 +31,7 @@ pub mod namespace;
 pub mod negotiate;
 pub mod note;
 pub mod object;
+pub mod op;
 pub mod pack;
 pub mod patch;
 pub mod path;
@@ -56,6 +57,7 @@ pub mod submodule;
 pub mod tag;
 pub mod testament;
 pub mod tree;
+pub mod workspace;
 pub mod worktree;
 
 use std::sync::Arc;
@@ -861,6 +863,26 @@ impl Repository {
         self.add_all(&mut idx)?;
         idx.write(None)?;
         Ok(())
+    }
+
+    /// Return a [`crate::object_store::loose::LooseObjectStore`] for this repository.
+    /// If an op store is present (.git/repo/op_store/ or configured via `init.storeOp`),
+    /// the returned loose object store automatically runs in cache mode backed by the op store.
+    #[napi]
+    pub fn loose_object_store(&self) -> napi::Result<crate::object_store::loose::LooseObjectStore> {
+        let r = thread_local(&self.inner);
+        let objects_dir = r.git_dir().join("objects");
+        let loose = crate::object_store::loose::LooseObjectStore::new(
+            objects_dir.to_string_lossy().into_owned(),
+            Some(self.object_format()),
+            None,
+        )?;
+        if self.has_op_store() {
+            if let Ok(op_store) = self.op_store() {
+                loose.set_op_store(&op_store)?;
+            }
+        }
+        Ok(loose)
     }
 
     /// Count the commits `HEAD` is ahead of and behind `upstream` (a sha or a ref name).
