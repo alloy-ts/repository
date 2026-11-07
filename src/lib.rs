@@ -2,6 +2,12 @@ pub mod repo;
 pub use self::repo::*;
 pub(crate) use repo as repository;
 
+pub mod fs;
+pub use fs::{File, FsBlob};
+
+pub mod net;
+pub use net::*;
+
 mod content;
 #[cfg(feature = "crypto")]
 pub mod crypto;
@@ -35,6 +41,3 @@ pub(crate) mod content_store;
 #[cfg(feature = "record")]
 pub(crate) mod record;
 
-// Filesystem-seam napi bindings, wrapping `crate::vfs` without modifying it.
-#[cfg(feature = "fs")]
-pub(crate) mod fs;
