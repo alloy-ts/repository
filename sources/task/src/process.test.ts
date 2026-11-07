@@ -1,138 +1,315 @@
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "vite-plus/test";
-import { CancellationToken, createCancellationToken, Process } from "../../repository/src/main.ts";
+import { createCancellationToken, Process, runCommand } from "../../repository/src/main.ts";
 
-// `yes`/`sleep`/`echo`/`cat` are POSIX utilities; the tests below assume a
-// POSIX shell is on PATH (macOS/Linux). The Windows equivalents are noted where
-// relevant but the fixture set is intentionally POSIX-centric.
-const longRunning = () =>
-  process.platform === "win32"
-    ? { program: "ping", args: ["-n", "2", "127.0.0.1"] }
-    : { program: "sleep", args: ["5"] };
+// Use the running Node executable instead of platform-specific shell utilities.
+// Bound fixture lifetimes even when the behavior under test fails.
+const nodeCommand = (source: string, args: string[] = []) => ({
+  program: process.execPath,
+  args: ["-e", source, ...args],
+  timeoutMs: 5000,
+});
+const longRunning = () => nodeCommand("setInterval(() => {}, 1000)");
 
-describe("Process", () => {
-  test("runs a command and captures stdout", async () => {
-    const proc = new Process({ program: "echo", args: ["hello", "world"] });
-    const result = await proc.run();
+async function withDirectory(run: (directory: string) => Promise<void>) {
+  const directory = await mkdtemp(join(tmpdir(), "alloy-process-"));
+  try {
+    await run(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+describe("Process constructor", () => {
+  test("accepts an executable path string", async () => {
+    // Without arguments Node reads stdin, which Process connects to null.
+    const child = new Process(process.execPath);
+    const result = await child.run();
+    expect(result.success).toBe(true);
+    expect(result.output!.exitCode).toBe(0);
+  });
+
+  test("accepts file URL strings and URL objects", async () => {
+    const url = pathToFileURL(process.execPath);
+    for (const input of [url.href, url]) {
+      const child = new Process(input);
+      const result = await child.run();
+      expect(result.success).toBe(true);
+      expect(result.output!.success).toBe(true);
+    }
+  });
+
+  test("accepts a command descriptor with a file URL program", async () => {
+    const child = new Process({
+      ...nodeCommand("process.stdout.write(process.argv[1])", ["hello world"]),
+      program: pathToFileURL(process.execPath).href,
+    });
+    const result = await child.run();
+    expect(result.output!.stdout.toString("utf8")).toBe("hello world");
+  });
+
+  test("starts before run and does not execute again", async () => {
+    await withDirectory(async (directory) => {
+      const marker = join(directory, "started");
+      const child = new Process(nodeCommand(
+        "require('node:fs').appendFileSync(process.argv[1], 'started\\n')",
+        [marker],
+      ));
+      let completion: ReturnType<Process["run"]> | undefined;
+      try {
+        await expect.poll(async () => {
+          try {
+            await access(marker);
+            return true;
+          } catch {
+            return false;
+          }
+        }, { timeout: 4000 }).toBe(true);
+
+        completion = child.run();
+        expect((await completion).success).toBe(true);
+        await expect(child.run()).rejects.toThrow("only be called once");
+        expect(await readFile(marker, "utf8")).toBe("started\n");
+      } finally {
+        child.cancel();
+        // Collect cleanup even if the startup assertion failed.
+        await (completion ?? child.run());
+      }
+    });
+  });
+
+  test("allows only one concurrent result collector", async () => {
+    const child = new Process(nodeCommand("setTimeout(() => {}, 100)"));
+    const results = await Promise.allSettled([child.run(), child.run()]);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    if (rejected[0].status === "rejected") {
+      expect(String(rejected[0].reason)).toContain("only be called once");
+    }
+  });
+
+  test("rejects empty, NUL-containing, remote and decorated URL inputs", () => {
+    const executable = pathToFileURL(process.execPath).href;
+    const inputs = [
+      "",
+      "bad\0path",
+      "https://example.invalid/program",
+      new URL("https://example.invalid/program"),
+      executable + "?argument=1",
+      executable + "#fragment",
+    ];
+    for (const input of inputs) {
+      expect(() => new Process(input)).toThrow();
+    }
+  });
+
+  test("rejects TaskOptions rather than treating entries as a command", () => {
+    // Exercise malformed JS input without pretending this is a supported type.
+    const invalid = { entries: "postMessage('hello')" };
+    expect(() => new Process(invalid as never)).toThrow();
+  });
+
+  test("rejects invalid execution and cleanup durations synchronously", () => {
+    for (const value of [NaN, Infinity, -Infinity, -1, Number.MAX_VALUE]) {
+      expect(() => new Process({
+        ...nodeCommand(""),
+        timeoutMs: value,
+      })).toThrow();
+      expect(() => new Process({
+        ...nodeCommand(""),
+        cleanupTimeoutMs: value,
+      })).toThrow();
+    }
+  });
+
+  test("reports missing executables through run rejection", async () => {
+    await withDirectory(async (directory) => {
+      const child = new Process({ program: join(directory, "missing-executable") });
+      await expect(child.run()).rejects.toThrow();
+    });
+  });
+});
+
+describe("Process capture and options", () => {
+  test("captures stdout and stderr separately as buffers", async () => {
+    const child = new Process(nodeCommand(
+      "process.stdout.write('hello'); process.stderr.write('diagnostic')",
+    ));
+    const result = await child.run();
     expect(result.success).toBe(true);
     expect(result.failure).toBeUndefined();
-    const out = result.output!;
-    expect(Buffer.isBuffer(out.stdout)).toBe(true);
-    expect(out.stdout.toString().trim()).toBe("hello world");
+    const output = result.output!;
+    expect(Buffer.isBuffer(output.stdout)).toBe(true);
+    expect(Buffer.isBuffer(output.stderr)).toBe(true);
+    expect(output.stdout.toString("utf8")).toBe("hello");
+    expect(output.stderr.toString("utf8")).toBe("diagnostic");
+    expect(output.status.kind).toBe("exited");
+    expect(output.status.code).toBe(0);
+    expect(output.exitCode).toBe(0);
+    expect(output.success).toBe(true);
   });
 
-  test("treats a non-zero exit as a successful capture", async () => {
-    const proc = new Process({ program: "sh", args: ["-c", "exit 7"] });
-    const result = await proc.run();
+  test("distinguishes completed capture from a successful child exit", async () => {
+    const child = new Process(nodeCommand("process.exitCode = 7"));
+    const result = await child.run();
     expect(result.success).toBe(true);
-    // `status` shape comes from `crate::output::ProcessStatus`; we only assert
-    // it is present and non-trivial here to stay independent of its fields.
-    expect(result.output!.status).toBeTruthy();
+    expect(result.failure).toBeUndefined();
+    expect(result.output!.success).toBe(false);
+    expect(result.output!.exitCode).toBe(7);
+    expect(result.output!.status.kind).toBe("exited");
+    expect(result.output!.status.code).toBe(7);
   });
 
-  test("writes stdin when input is provided", async () => {
-    const proc = new Process({
-      program: "cat",
-      input: Buffer.from("piped input\n"),
+  test("preserves binary stdin and closes the input pipe", async () => {
+    const input = Buffer.from([0, 1, 127, 128, 255, 10]);
+    const child = new Process({
+      ...nodeCommand("process.stdin.pipe(process.stdout)"),
+      input,
     });
-    const result = await proc.run();
+    const result = await child.run();
     expect(result.success).toBe(true);
-    expect(result.output!.stdout.toString()).toBe("piped input\n");
+    expect(result.output!.stdout).toEqual(input);
   });
 
-  test("returns a structured failure on timeout", async () => {
-    const proc = new Process({ ...longRunning(), timeoutMs: 200 });
-    const result = await proc.run();
+  test("applies cwd and env overrides without changing the host", async () => {
+    await withDirectory(async (directory) => {
+      const originalCwd = process.cwd();
+      const originalValue = process.env.ALLOY_PROCESS_TEST_VALUE;
+      const child = new Process({
+        ...nodeCommand("process.stdout.write(JSON.stringify({ cwd: process.cwd(), value: process.env.ALLOY_PROCESS_TEST_VALUE }))"),
+        cwd: directory,
+        env: [{ name: "ALLOY_PROCESS_TEST_VALUE", value: "child-only" }],
+      });
+      const result = await child.run();
+      expect(result.success).toBe(true);
+      const output = JSON.parse(result.output!.stdout.toString("utf8"));
+      // realpath accounts for aliases such as /var -> /private/var on macOS.
+      const { realpath } = await import("node:fs/promises");
+      expect(await realpath(output.cwd)).toBe(await realpath(directory));
+      expect(output.value).toBe("child-only");
+      expect(process.cwd()).toBe(originalCwd);
+      expect(process.env.ALLOY_PROCESS_TEST_VALUE).toBe(originalValue);
+    });
+  });
+
+  for (const stream of ["stdout", "stderr"] as const) {
+    test("enforces the " + stream + " byte limit", async () => {
+      const child = new Process({
+        ...nodeCommand("process." + stream + ".write('abcdef')"),
+        limits: { [stream]: 3 },
+      });
+      const result = await child.run();
+      expect(result.success).toBe(false);
+      expect(result.output).toBeUndefined();
+      const failure = result.failure!;
+      expect(failure.kind).toBe("output limit exceeded");
+      expect(failure.stream).toBe(stream);
+      expect(failure.limit).toBe(3);
+      expect(failure[stream].toString("utf8")).toBe("abc");
+      expect(stream === "stdout" ? failure.capture.stdoutTruncated : failure.capture.stderrTruncated).toBe(true);
+    });
+  }
+
+  test("does not treat an exact output cap as an overflow", async () => {
+    const child = new Process({
+      ...nodeCommand("process.stdout.write('abc')"),
+      limits: { stdout: 3 },
+    });
+    const result = await child.run();
+    expect(result.success).toBe(true);
+    expect(result.output!.stdout.toString("utf8")).toBe("abc");
+  });
+});
+
+describe("Process cancellation and timeout", () => {
+  test("returns structured timeout and cleanup observations", async () => {
+    const child = new Process({
+      ...longRunning(),
+      timeoutMs: 100,
+      cleanupTimeoutMs: 1000,
+    });
+    const result = await child.run();
     expect(result.success).toBe(false);
     expect(result.output).toBeUndefined();
-    expect(result.failure!.kind).toBe("timed out");
-    expect(result.failure!.timeoutMs).toBeGreaterThan(0);
+    const failure = result.failure!;
+    expect(failure.kind).toBe("timed out");
+    expect(failure.timeoutMs).toBe(100);
+    expect(Buffer.isBuffer(failure.stdout)).toBe(true);
+    expect(Buffer.isBuffer(failure.stderr)).toBe(true);
+    expect(typeof failure.cleanup.directChildReaped).toBe("boolean");
+    expect(typeof failure.cleanup.directChildKillRequested).toBe("boolean");
+    expect(typeof failure.cleanup.processTree).toBe("string");
+    expect(typeof failure.cleanup.waitTimedOut).toBe("boolean");
+    expect(typeof failure.capture.stdoutPipeEof).toBe("boolean");
+    expect(typeof failure.capture.stderrPipeEof).toBe("boolean");
   });
 
-  test("stops early when the cancellation token is signalled", async () => {
-    const token = createCancellationToken();
-    const proc = new Process(longRunning(), token);
-    const promise = proc.run();
-    token.cancel();
-    const result = await promise;
+  test("cancels through Process.cancel without an explicit token", async () => {
+    const child = new Process(longRunning());
+    const completion = child.run();
+    child.cancel();
+    child.cancel();
+    const result = await completion;
     expect(result.success).toBe(false);
     expect(result.failure!.kind).toBe("cancelled");
   });
 
-  test("honors per-stream output byte limits", async () => {
-    // `yes` prints `y\n` forever; cap stdout at 16 bytes.
-    if (process.platform === "win32") {
-      return; // no `yes` on Windows
+  test("cancels all processes sharing a token", async () => {
+    const token = createCancellationToken();
+    const first = new Process(longRunning(), token);
+    const second = new Process(longRunning(), token);
+    const completions = [first.run(), second.run()];
+    first.cancel();
+    const results = await Promise.all(completions);
+    expect(token.isCancelled()).toBe(true);
+    for (const result of results) {
+      expect(result.success).toBe(false);
+      expect(result.failure!.kind).toBe("cancelled");
     }
-    const proc = new Process({
-      program: "yes",
-      args: [],
-      limits: { stdout: 16 },
-      timeoutMs: 2000,
-    });
-    const result = await proc.run();
-    expect(result.success).toBe(false);
-    expect(result.failure!.kind).toBe("output limit exceeded");
-    expect(result.failure!.stream).toBe("stdout");
-    expect(result.failure!.limit).toBe(16);
-    expect(result.failure!.capture.stdoutTruncated).toBe(true);
-    // Only the retained prefix up to the limit is present.
-    expect(result.failure!.stdout.length).toBeLessThanOrEqual(16);
   });
 
-  test("exposes cleanup observations on a stopped execution", async () => {
-    const proc = new Process({ ...longRunning(), timeoutMs: 200 });
-    const result = await proc.run();
-    expect(result.success).toBe(false);
-    const cleanup = result.failure!.cleanup;
-    expect(typeof cleanup.directChildReaped).toBe("boolean");
-    expect(typeof cleanup.processTree).toBe("string");
-    expect(typeof cleanup.waitTimedOut).toBe("boolean");
+  test("does not spawn when the token was already cancelled", async () => {
+    await withDirectory(async (directory) => {
+      const marker = join(directory, "must-not-exist");
+      const token = createCancellationToken();
+      token.cancel();
+      const child = new Process(nodeCommand(
+        "require('node:fs').writeFileSync(process.argv[1], 'unexpected')",
+        [marker],
+      ), token);
+      const result = await child.run();
+      expect(result.success).toBe(false);
+      expect(result.failure!.kind).toBe("cancelled");
+      await expect(access(marker)).rejects.toThrow();
+    });
+  });
+
+  test("tokens stay cancelled and notify current and later waiters", async () => {
+    const token = createCancellationToken();
+    expect(token.isCancelled()).toBe(false);
+    const firstWaiter = token.cancelled();
+    token.cancel();
+    token.cancel();
+    await firstWaiter;
+    await token.cancelled();
+    expect(token.isCancelled()).toBe(true);
   });
 });
 
-describe("Process constructor inputs", () => {
-  test("accepts an executable string", async () => {
-    const result = await new Process(process.execPath).run();
-    expect(result.success).toBe(true);
-  });
-
-  test("accepts file URL objects and strings", async () => {
-    const { pathToFileURL } = await import("node:url");
-    const url = pathToFileURL(process.execPath);
-    for (const input of [url, url.href]) {
-      expect((await new Process(input).run()).success).toBe(true);
-    }
-  });
-
-  test("starts before run is called and only executes once", async () => {
-    const { mkdtemp, access, rm } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-    const directory = await mkdtemp(join(tmpdir(), "alloy-process-"));
-    const marker = join(directory, "started");
-    const proc = new Process({
-      program: process.execPath,
-      args: ["-e", "require('node:fs').writeFileSync(process.argv[1], 'started')", marker],
-    });
-    try {
-      await expect.poll(async () => {
-        try { await access(marker); return true; } catch { return false; }
-      }).toBe(true);
-      expect((await proc.run()).success).toBe(true);
-      await expect(proc.run()).rejects.toThrow("only be called once");
-    } finally {
-      proc.cancel();
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects invalid input before starting", () => {
-    for (const input of ["", "https://example.com/program", new URL("https://example.com")]) {
-      expect(() => new Process(input)).toThrow();
-    }
-    for (const timeoutMs of [NaN, Infinity, -1]) {
-      expect(() => new Process({ program: process.execPath, timeoutMs })).toThrow();
+describe("runCommand", () => {
+  test("executes independently on each call", async () => {
+    for (let index = 0; index < 2; index++) {
+      const result = await runCommand(nodeCommand(
+        "process.stdout.write(process.argv[1])",
+        [String(index)],
+      ));
+      expect(result.success).toBe(true);
+      expect(result.output!.stdout.toString("utf8")).toBe(String(index));
     }
   });
 });
-
