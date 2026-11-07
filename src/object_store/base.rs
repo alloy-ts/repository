@@ -225,7 +225,7 @@ pub const TREE_CACHE_CAPACITY: u32 = 1000;
 /// Wraps a low-level backend (`SimpleBackend`) adding commit and tree caching.
 #[napi]
 pub struct Store {
-    backend: Arc<crate::backend::SimpleBackend>,
+    backend: Arc<crate::object_store::op::SimpleBackend>,
     commit_cache: Mutex<std::collections::HashMap<String, String>>,
     tree_cache: Mutex<std::collections::HashMap<String, String>>,
 }
@@ -234,7 +234,7 @@ pub struct Store {
 impl Store {
     /// Creates a store wrapping `backend`.
     #[napi(constructor)]
-    pub fn new(backend: &crate::backend::SimpleBackend) -> Self {
+    pub fn new(backend: &crate::object_store::op::SimpleBackend) -> Self {
         Self {
             backend: Arc::new(backend.clone()),
             commit_cache: Mutex::new(std::collections::HashMap::new()),
@@ -245,7 +245,7 @@ impl Store {
     /// Initialize a store with a backend at `store_path`.
     #[napi(factory)]
     pub fn init(store_path: String) -> napi::Result<Store> {
-        let backend = crate::backend::SimpleBackend::init(store_path)?;
+        let backend = crate::object_store::op::SimpleBackend::init(store_path)?;
         Ok(Self {
             backend: Arc::new(backend),
             commit_cache: Mutex::new(std::collections::HashMap::new()),

@@ -7,9 +7,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use napi_derive::napi;
 use thiserror::Error;
 
-pub use crate::backend::*;
 use crate::error::{err, thread_local};
 use crate::object_store::op::OpStore;
+pub use crate::object_store::op::{
+    BackendError, SimpleBackend, SqlBackend, CHANGE_ID_LENGTH, COMMIT_ID_LENGTH,
+};
 use crate::object_store::op_heads::{OpHeadsStore, OperationRecord, ViewRecord};
 use crate::repository::Repository;
 
@@ -662,7 +664,10 @@ impl Repository {
         };
         let r = thread_local(&self.inner);
         let head_id = r.head_commit().ok().map(|c| c.id.to_string());
-        OpStore::new(op_store_path.to_string_lossy().into_owned(), head_id)
+        OpStore::new(
+            napi::bindgen_prelude::Either::A(op_store_path.to_string_lossy().into_owned()),
+            head_id,
+        )
     }
 
     #[napi]

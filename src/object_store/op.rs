@@ -409,6 +409,16 @@ impl OpStoreTrait for SimpleOpStore {
     }
 }
 
+/// Options for configuring / opening an OpStore.
+#[derive(Clone, Debug, Default)]
+#[napi(object)]
+pub struct OpStoreOpts {
+    /// Directory or database path for the operation store.
+    pub ops_dir: Option<String>,
+    /// Whether to recursively create the directory if it does not already exist. Defaults to `true`.
+    pub create: Option<bool>,
+}
+
 /// NAPI-exposed handle to an OpStore.
 #[derive(Clone)]
 #[napi]
@@ -428,11 +438,33 @@ pub type OperationStore = OpStore;
 
 #[napi]
 impl OpStore {
-    /// Bind an `OpStore` to a directory or file URL (e.g. `.git/repo/op_store`).
+    /// Bind an `OpStore` to a directory, file URL, or options object.
+    ///
+    /// Accepts a path string, `file://` URL, or `OpStoreOpts` (`{ opsDir?: string, create?: boolean }`).
+    /// If `create` is `true` (the default), parent directories are created automatically.
     #[napi(constructor)]
-    pub fn new(store_path: String, root_commit_id: Option<String>) -> napi::Result<Self> {
-        let store_path = parse_file_path_or_url(&store_path);
-        let p = PathBuf::from(store_path);
+    pub fn new(
+        store_path_or_opts: napi::bindgen_prelude::Either<String, OpStoreOpts>,
+        root_commit_id: Option<String>,
+    ) -> napi::Result<Self> {
+        let (raw_path, should_create) = match store_path_or_opts {
+            napi::bindgen_prelude::Either::A(path_str) => (path_str, true),
+            napi::bindgen_prelude::Either::B(opts) => {
+                let p = opts
+                    .ops_dir
+                    .unwrap_or_else(|| ".git/ops/op_store".to_string());
+                let c = opts.create.unwrap_or(true);
+                (p, c)
+            }
+        };
+
+        let store_path = parse_file_path_or_url(&raw_path);
+        let p = PathBuf::from(&store_path);
+
+        if should_create && !p.exists() {
+            fs::create_dir_all(&p).map_err(|e| err("create_ops_dir", e))?;
+        }
+
         let root_data = RootOperationData {
             root_commit_id: root_commit_id.unwrap_or_else(|| "0".repeat(40)),
         };
@@ -444,17 +476,39 @@ impl OpStore {
     }
 
     /// Factory constructor function to initiate an op store at a designated file or directory
-    /// (argument can be a path string or `file://` URL).
+    /// (argument can be a path string, `file://` URL, or `OpStoreOpts`).
     #[napi(factory)]
-    pub fn open(store_path: String, root_commit_id: Option<String>) -> napi::Result<Self> {
-        Self::new(store_path, root_commit_id)
+    pub fn open(
+        store_path_or_opts: napi::bindgen_prelude::Either<String, OpStoreOpts>,
+        root_commit_id: Option<String>,
+    ) -> napi::Result<Self> {
+        Self::new(store_path_or_opts, root_commit_id)
     }
 
-    /// Initialise a new `SimpleOpStore` at `store_path` (file path or file URL).
+    /// Initialise a new `SimpleOpStore` at `store_path` (file path, file URL, or `OpStoreOpts`).
     #[napi]
-    pub fn init(store_path: String, root_commit_id: Option<String>) -> napi::Result<Self> {
-        let store_path = parse_file_path_or_url(&store_path);
+    pub fn init(
+        store_path_or_opts: napi::bindgen_prelude::Either<String, OpStoreOpts>,
+        root_commit_id: Option<String>,
+    ) -> napi::Result<Self> {
+        let (raw_path, should_create) = match store_path_or_opts {
+            napi::bindgen_prelude::Either::A(path_str) => (path_str, true),
+            napi::bindgen_prelude::Either::B(opts) => {
+                let p = opts
+                    .ops_dir
+                    .unwrap_or_else(|| ".git/ops/op_store".to_string());
+                let c = opts.create.unwrap_or(true);
+                (p, c)
+            }
+        };
+
+        let store_path = parse_file_path_or_url(&raw_path);
         let p = PathBuf::from(&store_path);
+
+        if should_create && !p.exists() {
+            fs::create_dir_all(&p).map_err(|e| err("create_ops_dir", e))?;
+        }
+
         let root_data = RootOperationData {
             root_commit_id: root_commit_id.unwrap_or_else(|| "0".repeat(40)),
         };
@@ -565,4 +619,430 @@ fn compute_view_hash(view: &ViewRecord) -> String {
     }
     let hash = hasher.finalize();
     hex::encode(hash.as_bytes())
+}
+
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
+use std::sync::Mutex;
+
+/// Commit ID byte length in SimpleBackend (64 bytes / Blake2b-512).
+#[napi]
+pub const COMMIT_ID_LENGTH: u32 = 64;
+
+/// Change ID byte length in SimpleBackend (16 bytes).
+#[napi]
+pub const CHANGE_ID_LENGTH: u32 = 16;
+
+/// Backend error types mirroring Jujutsu's backend error semantics.
+#[derive(Debug, Error)]
+pub enum BackendError {
+    #[error("Object not found ({object_type}): {hash}")]
+    ObjectNotFound { object_type: String, hash: String },
+    #[error("Failed to read object ({object_type}) {hash}: {details}")]
+    ReadObject {
+        object_type: String,
+        hash: String,
+        details: String,
+    },
+    #[error("Unsupported backend operation: {0}")]
+    Unsupported(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<BackendError> for napi::Error {
+    fn from(e: BackendError) -> Self {
+        napi::Error::from_reason(e.to_string())
+    }
+}
+
+/// Map an I/O error into a BackendError for missing or unreadable objects.
+pub fn map_not_found_err(err: std::io::Error, object_type: &str, hash: &str) -> BackendError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        BackendError::ObjectNotFound {
+            object_type: object_type.to_string(),
+            hash: hash.to_string(),
+        }
+    } else {
+        BackendError::ReadObject {
+            object_type: object_type.to_string(),
+            hash: hash.to_string(),
+            details: err.to_string(),
+        }
+    }
+}
+
+/// Simple filesystem-based backend for commits, trees, files, symlinks, and conflicts.
+#[derive(Clone)]
+#[napi]
+pub struct SimpleBackend {
+    pub(crate) path: PathBuf,
+    root_commit_id: String,
+    root_change_id: String,
+    empty_tree_id: String,
+}
+
+#[napi]
+impl SimpleBackend {
+    #[napi]
+    pub fn name(&self) -> String {
+        "Simple".to_string()
+    }
+
+    #[napi(factory)]
+    pub fn init(store_path: String) -> napi::Result<SimpleBackend> {
+        let p = PathBuf::from(&store_path);
+        fs::create_dir_all(p.join("commits")).map_err(|e| err("init_simple_backend", e))?;
+        fs::create_dir_all(p.join("trees")).map_err(|e| err("init_simple_backend", e))?;
+        fs::create_dir_all(p.join("files")).map_err(|e| err("init_simple_backend", e))?;
+        fs::create_dir_all(p.join("symlinks")).map_err(|e| err("init_simple_backend", e))?;
+        fs::create_dir_all(p.join("conflicts")).map_err(|e| err("init_simple_backend", e))?;
+        Ok(Self::load(store_path))
+    }
+
+    #[napi(factory)]
+    pub fn load(store_path: String) -> SimpleBackend {
+        let root_commit_id = "0".repeat((COMMIT_ID_LENGTH * 2) as usize);
+        let root_change_id = "0".repeat((CHANGE_ID_LENGTH * 2) as usize);
+        let empty_tree_id =
+            "482ae5a29fbe856c7272f2071b8b0f0359ee2d89ff392b8a900643fbd0836eccd067b8bf41909e206c90d45d6e7d8b6686b93ecaee5fe1a9060d87b672101310".to_string();
+        SimpleBackend {
+            path: PathBuf::from(store_path),
+            root_commit_id,
+            root_change_id,
+            empty_tree_id,
+        }
+    }
+
+    #[napi]
+    pub fn commit_id_length(&self) -> u32 {
+        COMMIT_ID_LENGTH
+    }
+
+    #[napi]
+    pub fn change_id_length(&self) -> u32 {
+        CHANGE_ID_LENGTH
+    }
+
+    #[napi]
+    pub fn root_commit_id(&self) -> String {
+        self.root_commit_id.clone()
+    }
+
+    #[napi]
+    pub fn root_change_id(&self) -> String {
+        self.root_change_id.clone()
+    }
+
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        self.empty_tree_id.clone()
+    }
+
+    #[napi]
+    pub fn concurrency(&self) -> u32 {
+        1
+    }
+
+    #[napi]
+    pub fn read_file(&self, id: String) -> napi::Result<String> {
+        let file_p = self.path.join("files").join(&id);
+        fs::read_to_string(&file_p).map_err(|e| map_not_found_err(e, "file", &id).into())
+    }
+
+    #[napi]
+    pub fn write_file(&self, contents: String) -> napi::Result<String> {
+        let bytes = contents.as_bytes();
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(bytes);
+        let id = hasher.try_finalize().map_err(|e| err("write_file", e))?;
+        let hash_id = id.to_hex().to_string();
+        let file_p = self.path.join("files").join(&hash_id);
+        fs::write(&file_p, bytes).map_err(|e| err("write_file", e))?;
+        Ok(hash_id)
+    }
+
+    #[napi]
+    pub fn read_symlink(&self, id: String) -> napi::Result<String> {
+        let p = self.path.join("symlinks").join(&id);
+        fs::read_to_string(&p).map_err(|e| map_not_found_err(e, "symlink", &id).into())
+    }
+
+    #[napi]
+    pub fn write_symlink(&self, target: String) -> napi::Result<String> {
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(target.as_bytes());
+        let id = hasher.try_finalize().map_err(|e| err("write_symlink", e))?;
+        let hash_id = id.to_hex().to_string();
+        let p = self.path.join("symlinks").join(&hash_id);
+        fs::write(&p, target.as_bytes()).map_err(|e| err("write_symlink", e))?;
+        Ok(hash_id)
+    }
+
+    #[napi]
+    pub fn read_tree(&self, id: String) -> napi::Result<String> {
+        let p = self.path.join("trees").join(&id);
+        fs::read_to_string(&p).map_err(|e| map_not_found_err(e, "tree", &id).into())
+    }
+
+    #[napi]
+    pub fn write_tree(&self, contents: String) -> napi::Result<String> {
+        let bytes = contents.as_bytes();
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(bytes);
+        let id = hasher.try_finalize().map_err(|e| err("write_tree", e))?;
+        let hash_id = id.to_hex().to_string();
+        let p = self.path.join("trees").join(&hash_id);
+        fs::write(&p, bytes).map_err(|e| err("write_tree", e))?;
+        Ok(hash_id)
+    }
+
+    #[napi]
+    pub fn read_commit(&self, id: String) -> napi::Result<String> {
+        if id == self.root_commit_id {
+            return Ok("root_commit".to_string());
+        }
+        let p = self.path.join("commits").join(&id);
+        fs::read_to_string(&p).map_err(|e| map_not_found_err(e, "commit", &id).into())
+    }
+
+    #[napi]
+    pub fn write_commit(&self, commit_data: String) -> napi::Result<String> {
+        let bytes = commit_data.as_bytes();
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(bytes);
+        let id = hasher.try_finalize().map_err(|e| err("write_commit", e))?;
+        let hash_id = id.to_hex().to_string();
+        let p = self.path.join("commits").join(&hash_id);
+        fs::write(&p, bytes).map_err(|e| err("write_commit", e))?;
+        Ok(hash_id)
+    }
+}
+
+/// SQLite-backed SQL storage backend configured with WAL (Write-Ahead Logging) mode.
+#[napi]
+pub struct SqlBackend {
+    conn: Mutex<SqliteConnection>,
+    database_url: String,
+    root_commit_id: String,
+    root_change_id: String,
+    empty_tree_id: String,
+}
+
+#[napi]
+impl SqlBackend {
+    #[napi]
+    pub fn name(&self) -> String {
+        "SqlBackend".to_string()
+    }
+
+    #[napi(factory)]
+    pub fn init(database_url: String) -> napi::Result<SqlBackend> {
+        let mut conn =
+            SqliteConnection::establish(&database_url).map_err(|e| err("init_sql_backend", e))?;
+
+        // Enable SQLite WAL mode and normal synchronous for optimal concurrent read/write
+        conn.batch_execute(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             CREATE TABLE IF NOT EXISTS objects (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 kind TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS operations (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 view_id TEXT NOT NULL,
+                 data TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS views (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .map_err(|e| err("init_sql_backend_schema", e))?;
+
+        Ok(Self::load(database_url)?)
+    }
+
+    #[napi(factory)]
+    pub fn load(database_url: String) -> napi::Result<SqlBackend> {
+        let mut conn =
+            SqliteConnection::establish(&database_url).map_err(|e| err("load_sql_backend", e))?;
+        conn.batch_execute("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+            .map_err(|e| err("load_sql_backend_wal", e))?;
+
+        let root_commit_id = "0".repeat((COMMIT_ID_LENGTH * 2) as usize);
+        let root_change_id = "0".repeat((CHANGE_ID_LENGTH * 2) as usize);
+        let empty_tree_id =
+            "482ae5a29fbe856c7272f2071b8b0f0359ee2d89ff392b8a900643fbd0836eccd067b8bf41909e206c90d45d6e7d8b6686b93ecaee5fe1a9060d87b672101310".to_string();
+
+        Ok(SqlBackend {
+            conn: Mutex::new(conn),
+            database_url,
+            root_commit_id,
+            root_change_id,
+            empty_tree_id,
+        })
+    }
+
+    #[napi]
+    pub fn is_wal_mode(&self) -> napi::Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        #[derive(QueryableByName)]
+        struct JournalMode {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            journal_mode: String,
+        }
+        let mode: Vec<JournalMode> = diesel::sql_query("PRAGMA journal_mode;")
+            .load(&mut *conn)
+            .map_err(|e| err("is_wal_mode", e))?;
+        Ok(mode
+            .first()
+            .map(|m| m.journal_mode.to_uppercase() == "WAL")
+            .unwrap_or(false))
+    }
+
+    #[napi]
+    pub fn commit_id_length(&self) -> u32 {
+        COMMIT_ID_LENGTH
+    }
+
+    #[napi]
+    pub fn change_id_length(&self) -> u32 {
+        CHANGE_ID_LENGTH
+    }
+
+    #[napi]
+    pub fn root_commit_id(&self) -> String {
+        self.root_commit_id.clone()
+    }
+
+    #[napi]
+    pub fn root_change_id(&self) -> String {
+        self.root_change_id.clone()
+    }
+
+    #[napi]
+    pub fn empty_tree_id(&self) -> String {
+        self.empty_tree_id.clone()
+    }
+
+    #[napi]
+    pub fn concurrency(&self) -> u32 {
+        4
+    }
+
+    #[napi]
+    pub fn read_file(&self, id: String) -> napi::Result<String> {
+        self.read_object(&id, "file")
+    }
+
+    #[napi]
+    pub fn write_file(&self, contents: String) -> napi::Result<String> {
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(contents.as_bytes());
+        let id = hasher
+            .try_finalize()
+            .map_err(|e| err("write_file", e))?
+            .to_hex()
+            .to_string();
+        self.write_object(&id, "file", &contents)?;
+        Ok(id)
+    }
+
+    #[napi]
+    pub fn read_symlink(&self, id: String) -> napi::Result<String> {
+        self.read_object(&id, "symlink")
+    }
+
+    #[napi]
+    pub fn write_symlink(&self, target: String) -> napi::Result<String> {
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(target.as_bytes());
+        let id = hasher
+            .try_finalize()
+            .map_err(|e| err("write_symlink", e))?
+            .to_hex()
+            .to_string();
+        self.write_object(&id, "symlink", &target)?;
+        Ok(id)
+    }
+
+    #[napi]
+    pub fn read_tree(&self, id: String) -> napi::Result<String> {
+        self.read_object(&id, "tree")
+    }
+
+    #[napi]
+    pub fn write_tree(&self, contents: String) -> napi::Result<String> {
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(contents.as_bytes());
+        let id = hasher
+            .try_finalize()
+            .map_err(|e| err("write_tree", e))?
+            .to_hex()
+            .to_string();
+        self.write_object(&id, "tree", &contents)?;
+        Ok(id)
+    }
+
+    #[napi]
+    pub fn read_commit(&self, id: String) -> napi::Result<String> {
+        if id == self.root_commit_id {
+            return Ok("root_commit".to_string());
+        }
+        self.read_object(&id, "commit")
+    }
+
+    #[napi]
+    pub fn write_commit(&self, commit_data: String) -> napi::Result<String> {
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(commit_data.as_bytes());
+        let id = hasher
+            .try_finalize()
+            .map_err(|e| err("write_commit", e))?
+            .to_hex()
+            .to_string();
+        self.write_object(&id, "commit", &commit_data)?;
+        Ok(id)
+    }
+
+    fn read_object(&self, id: &str, kind: &str) -> napi::Result<String> {
+        let mut conn = self.conn.lock().unwrap();
+        #[derive(QueryableByName)]
+        struct ObjectRow {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            data: String,
+        }
+
+        let rows: Vec<ObjectRow> =
+            diesel::sql_query("SELECT data FROM objects WHERE id = ? AND kind = ? LIMIT 1")
+                .bind::<diesel::sql_types::Text, _>(id)
+                .bind::<diesel::sql_types::Text, _>(kind)
+                .load(&mut *conn)
+                .map_err(|e| err("read_object", e))?;
+
+        if let Some(row) = rows.first() {
+            Ok(row.data.clone())
+        } else {
+            Err(BackendError::ObjectNotFound {
+                object_type: kind.to_string(),
+                hash: id.to_string(),
+            }
+            .into())
+        }
+    }
+
+    fn write_object(&self, id: &str, kind: &str, data: &str) -> napi::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        diesel::sql_query("INSERT OR REPLACE INTO objects (id, kind, data) VALUES (?, ?, ?)")
+            .bind::<diesel::sql_types::Text, _>(id)
+            .bind::<diesel::sql_types::Text, _>(kind)
+            .bind::<diesel::sql_types::Text, _>(data)
+            .execute(&mut *conn)
+            .map_err(|e| err("write_object", e))?;
+        Ok(())
+    }
 }

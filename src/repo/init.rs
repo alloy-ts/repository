@@ -191,15 +191,20 @@ impl Repository {
     /// Initialise a repository at `path`. Pass `bare: true` for a bare repository.
     #[napi]
     pub fn init(path: String, bare: Option<bool>) -> napi::Result<Repository> {
-        let r = if bare.unwrap_or(false) {
-            gix::init_bare(path)
-        } else {
-            gix::init(path)
-        }
-        .map_err(|e| err("init", e))?;
-        Ok(Repository {
-            inner: Arc::new(r.into()),
-        })
+        Self::init_opts(
+            path,
+            InitOptions {
+                bare,
+                destination_must_be_empty: None,
+                open_options: None,
+                initial_head: None,
+                description: None,
+                object_format: None,
+                compat_object_format: None,
+                store_op: None,
+                ops_dir: None,
+            },
+        )
     }
 }
 

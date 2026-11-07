@@ -22,6 +22,14 @@ The operation heads store (`OpHeadsStore`) tracks the current leaf heads of this
 - `InitOptions.storeOp`: When set to `true` during `Repository.initOpts({ storeOp: true, opsDir?: string })`, initialises the repository with both a Git object store and an op store.
 - `InitOptions.opsDir`: Customises operation store directory path, defaulting to `<git-dir>/ops` (persisted in config `init.opsDir`).
 
+### SQLite WAL Mode as OpStore Backend
+
+SQLite with WAL mode (`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`) is supported and configured as the default backend in `default_backend_factories()` and `default_op_store_initializer()`.
+
+- **Atomic Operations & Views:** Operations and views commit together in SQLite transactions with zero torn writes.
+- **Concurrent Access:** WAL mode allows concurrent readers to query head operations without locking or stalling writers.
+- **Fast Append Writes:** Operations append sequentially to `<db>-wal` avoiding directory scan and fsync bottlenecks.
+
 ### Loose Object Store Cache Mode
 
 When an op store is present:
@@ -31,6 +39,21 @@ When an op store is present:
 - Writing an object writes directly to the op store and records state changes.
 
 ## Classes and Types
+
+### `OpStore` & `OpStoreOpts`
+
+```ts
+interface OpStoreOpts {
+  opsDir?: string;
+  create?: boolean;
+}
+
+class OpStore {
+  constructor(storePathOrOpts: string | OpStoreOpts, rootCommitId?: string);
+  static open(storePathOrOpts: string | OpStoreOpts, rootCommitId?: string): OpStore;
+  static init(storePathOrOpts: string | OpStoreOpts, rootCommitId?: string): OpStore;
+}
+```
 
 ### `Operation`
 
@@ -69,66 +92,14 @@ class Operation {
 }
 ```
 
-### `ViewId` & `OperationId`
+### `SqlBackend` & `SimpleBackend`
 
 ```ts
-class ViewId {
-  constructor(hex: string);
-  hex(): string;
-}
-
-class OperationId {
-  constructor(hex: string);
-  hex(): string;
-}
-```
-
-### `RefTarget`, `RemoteRef`, `RemoteView`, and `View`
-
-```ts
-interface RefTarget {
-  commitId?: string;
-  conflictCommits?: string[];
-}
-
-enum RemoteRefState {
-  New = 0,
-  Tracked = 1,
-}
-
-class RemoteRef {
-  constructor(target: RefTarget, state: RemoteRefState);
-  static absent(): RemoteRef;
-  isAbsent(): boolean;
-  isPresent(): boolean;
-  isTracked(): boolean;
-  target(): RefTarget;
-  state(): RemoteRefState;
-}
-
-class View {
-  constructor(headIds: string[]);
-  static makeRoot(rootCommitId: string): View;
-  headIds(): string[];
-  getLocalBookmark(name: string): RefTarget | null;
-  setLocalBookmark(name: string, target: RefTarget): void;
-  getWcCommitId(workspaceName: string): string | null;
-  setWcCommitId(workspaceName: string, commitId: string): void;
-}
-```
-
-### `SimpleBackend` & `Store`
-
-```ts
-const COMMIT_ID_LENGTH: number = 64;
-const CHANGE_ID_LENGTH: number = 16;
-const COMMIT_CACHE_CAPACITY: number = 100;
-const TREE_CACHE_CAPACITY: number = 1000;
-
-class SimpleBackend {
-  static init(storePath: string): SimpleBackend;
-  static load(storePath: string): SimpleBackend;
+class SqlBackend {
+  static init(databaseUrl: string): SqlBackend;
+  static load(databaseUrl: string): SqlBackend;
   name(): string;
+  isWalMode(): boolean;
   commitIdLength(): number;
   changeIdLength(): number;
   rootCommitId(): string;
@@ -143,46 +114,5 @@ class SimpleBackend {
   writeTree(contents: string): string;
   readCommit(id: string): string;
   writeCommit(commitData: string): string;
-}
-
-class Store {
-  constructor(backend: SimpleBackend);
-  static init(storePath: string): Store;
-  commitIdLength(): number;
-  changeIdLength(): number;
-  rootCommitId(): string;
-  rootChangeId(): string;
-  emptyTreeId(): string;
-  concurrency(): number;
-  getCommit(id: string): string;
-  writeCommit(commitData: string): string;
-  getTree(id: string): string;
-  writeTree(contents: string): string;
-  readFile(id: string): string;
-  writeFile(contents: string): string;
-  readSymlink(id: string): string;
-  writeSymlink(contents: string): string;
-  clearCaches(): void;
-}
-```
-
-### `Workspace` & `WorkspaceLoader`
-
-```ts
-class Workspace {
-  static initSimple(workspaceRoot: string, workspaceName?: string): Workspace;
-  static initWorkspaceWithExistingRepo(
-    workspaceRoot: string,
-    repoPath: string,
-    workspaceName?: string,
-  ): Workspace;
-  static load(workspaceRoot: string): Workspace;
-
-  workspaceRoot(): string;
-  workspaceName(): string;
-  repoPath(): string;
-  repo(): Repository;
-  startWorkingCopyMutation(): LockedWorkspace;
-  checkOut(operationId: string, commitId?: string): CheckoutStats;
 }
 ```

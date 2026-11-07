@@ -144,9 +144,11 @@ impl StoreFactories {
 #[napi]
 pub fn default_backend_factories() -> StoreFactories {
     let mut factories = StoreFactories::new();
+    factories.add_backend("sql".to_string());
     factories.add_backend("simple".to_string());
     factories.add_backend("git".to_string());
     factories.add_workspace_store("simple".to_string());
+    factories.add_op_store("sql".to_string());
     factories.add_op_store("simple".to_string());
     factories.add_op_heads_store("simple".to_string());
     factories.add_index_store("default".to_string());
@@ -171,7 +173,7 @@ pub fn default_workspace_store_initializer() -> String {
 /// Returns the default operation store initializer identifier.
 #[napi]
 pub fn default_op_store_initializer() -> String {
-    "simple".to_string()
+    "sql".to_string()
 }
 
 /// Returns the default operation heads store initializer identifier.

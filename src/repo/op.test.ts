@@ -20,6 +20,8 @@ import {
   resolveOpForLoad,
   resolveOpWithRepo,
   SimpleBackend,
+  SqlBackend,
+  OpStore,
   COMMIT_ID_LENGTH,
   CHANGE_ID_LENGTH,
   Operation,
@@ -64,6 +66,40 @@ describe("Repository Op and Workspace NAPI bindings", () => {
 
     const directHeads = getCurrentHeadOps(headsStore, opStore);
     expect(directHeads.length).toBe(headOps.length);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("tests OpStoreOpts with custom opsDir and recursive creation", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "opstore-opts-test-"));
+    const nestedOpsDir = path.join(tmpDir, "nested", "deep", "ops_store");
+
+    const store = new OpStore({ opsDir: nestedOpsDir, create: true });
+    expect(store).toBeDefined();
+    expect(fs.existsSync(nestedOpsDir)).toBe(true);
+
+    const opened = OpStore.open({ opsDir: nestedOpsDir, create: true });
+    expect(opened).toBeDefined();
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("tests SqlBackend with SQLite WAL mode", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sql-backend-test-"));
+    const dbPath = path.join(tmpDir, "ops.sqlite");
+
+    const sqlBackend = SqlBackend.init(dbPath);
+    expect(sqlBackend.name()).toBe("SqlBackend");
+    expect(sqlBackend.isWalMode()).toBe(true);
+
+    const fId = sqlBackend.writeFile("sql backend file content");
+    expect(sqlBackend.readFile(fId)).toBe("sql backend file content");
+
+    const tId = sqlBackend.writeTree("sql tree content");
+    expect(sqlBackend.readTree(tId)).toBe("sql tree content");
+
+    const cId = sqlBackend.writeCommit("sql commit content");
+    expect(sqlBackend.readCommit(cId)).toBe("sql commit content");
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -145,7 +181,7 @@ describe("Repository Op and Workspace NAPI bindings", () => {
     expect(wcFactories["local"]).toBe("LocalWorkingCopyFactory");
 
     expect(defaultWorkspaceStoreInitializer()).toBe("simple");
-    expect(defaultOpStoreInitializer()).toBe("simple");
+    expect(defaultOpStoreInitializer()).toBe("sql");
     expect(defaultOpHeadsStoreInitializer()).toBe("simple");
     expect(defaultIndexStoreInitializer()).toBe("default");
     expect(defaultSubmoduleStoreInitializer()).toBe("default");

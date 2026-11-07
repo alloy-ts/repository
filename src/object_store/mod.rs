@@ -26,8 +26,9 @@ pub mod op_heads;
 pub mod sql;
 
 pub use op::{
-    OpPrefixResolution, OpStore, OpStoreError, OpStoreTrait, OperationStore, RootOperationData,
-    SimpleOpStore,
+    BackendError, OpPrefixResolution, OpStore, OpStoreError, OpStoreOpts, OpStoreTrait,
+    OperationStore, RootOperationData, SimpleBackend, SimpleOpStore, SqlBackend, CHANGE_ID_LENGTH,
+    COMMIT_ID_LENGTH,
 };
 pub use op_heads::{
     OpHeadsLock, OpHeadsStore, OpHeadsStoreError, OpHeadsStoreLock, OpHeadsStoreTrait,
