@@ -76,7 +76,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, EngineError> {
             }
 
             if !terminated {
-                return Err(EngineError::lex("Unterminated string literal", token_line, token_col));
+                return Err(EngineError::lex(
+                    "Unterminated string literal",
+                    token_line,
+                    token_col,
+                ));
             }
 
             tokens.push(Token::new(TokenKind::StringLit(s), token_line, token_col));
@@ -88,7 +92,13 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, EngineError> {
             let start = i;
             let mut is_float = false;
 
-            while i < chars.len() && (chars[i].is_ascii_digit() || (chars[i] == '.' && !is_float && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())) {
+            while i < chars.len()
+                && (chars[i].is_ascii_digit()
+                    || (chars[i] == '.'
+                        && !is_float
+                        && i + 1 < chars.len()
+                        && chars[i + 1].is_ascii_digit()))
+            {
                 if chars[i] == '.' {
                     is_float = true;
                 }
@@ -101,7 +111,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, EngineError> {
                 let val = num_str.parse::<f64>().map_err(|e| {
                     EngineError::lex(format!("Invalid float: {e}"), token_line, token_col)
                 })?;
-                tokens.push(Token::new(TokenKind::FloatNumber(val), token_line, token_col));
+                tokens.push(Token::new(
+                    TokenKind::FloatNumber(val),
+                    token_line,
+                    token_col,
+                ));
             } else {
                 let val = num_str.parse::<i64>().map_err(|e| {
                     EngineError::lex(format!("Invalid integer: {e}"), token_line, token_col)
@@ -138,7 +152,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, EngineError> {
         }
 
         // Two-character operators or single-character
-        let next_c = if i + 1 < chars.len() { Some(chars[i + 1]) } else { None };
+        let next_c = if i + 1 < chars.len() {
+            Some(chars[i + 1])
+        } else {
+            None
+        };
 
         let (kind, consumed) = match (c, next_c) {
             ('=', Some('=')) => (TokenKind::EqualEqual, 2),
@@ -160,7 +178,11 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, EngineError> {
             (',', _) => (TokenKind::Comma, 1),
             (';', _) => (TokenKind::Semicolon, 1),
             _ => {
-                return Err(EngineError::lex(format!("Unexpected character: '{c}'"), token_line, token_col));
+                return Err(EngineError::lex(
+                    format!("Unexpected character: '{c}'"),
+                    token_line,
+                    token_col,
+                ));
             }
         };
 

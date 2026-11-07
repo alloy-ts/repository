@@ -1,9 +1,10 @@
-pub mod async_run;
 pub mod ast;
+pub mod async_run;
 pub mod compiler;
 pub mod errors;
 pub mod functions;
 pub mod host;
+pub mod lexer;
 pub mod parser;
 pub mod symbols;
 pub mod token;
@@ -12,17 +13,18 @@ pub mod value;
 #[cfg(test)]
 mod compiler_tests;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use fusevm::{Chunk, VM, VMResult, Value};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::engine::async_run::RunAsyncTask;
 use crate::engine::compiler::Compiler;
-use crate::engine::host::{HostRegistry, HostRuntime};
-use crate::engine::parser::{tokenize, Parser};
 use crate::engine::errors::EngineError;
+use crate::engine::host::{HostRegistry, HostRuntime};
+use crate::engine::lexer::tokenize;
+use crate::engine::parser::Parser;
 use crate::engine::value::EngineValue;
 
 fn create_engine_error(env: &Env, err: &EngineError) -> napi::Error {
@@ -104,7 +106,8 @@ impl Program {
         let result_value = match vm_res {
             VMResult::Ok(val) => EngineValue::from_fusevm(&val),
             VMResult::Error(e) => {
-                let mut err = napi::Error::new(Status::GenericFailure, format!("Runtime error: {e}"));
+                let mut err =
+                    napi::Error::new(Status::GenericFailure, format!("Runtime error: {e}"));
                 err.status = Status::GenericFailure;
                 return Err(napi::Error::from_reason(format!("Runtime error: {e}")));
             }
@@ -120,8 +123,15 @@ impl Program {
         })
     }
 
-    #[napi(ts_args_type = "globals?: Record<string, any>", ts_return_type = "Promise<RunResult>")]
-    pub fn run_async(&self, env: Env, globals: Option<Object>) -> Result<PromiseRaw<'static, Object<'static>>> {
+    #[napi(
+        ts_args_type = "globals?: Record<string, any>",
+        ts_return_type = "Promise<RunResult>"
+    )]
+    pub fn run_async(
+        &self,
+        env: Env,
+        globals: Option<Object>,
+    ) -> Result<PromiseRaw<'static, Object<'static>>> {
         if self.uses_host_functions {
             return Err(napi::Error::new(
                 Status::InvalidArg,
@@ -187,24 +197,25 @@ impl Engine {
     }
 
     #[napi]
-    pub fn compile(&self, env: Env, source: String, globals_keys: Option<Vec<String>>) -> Result<Program> {
-        let tokens = tokenize(&source).map_err(|e| {
-            create_engine_error(&env, &e)
-        })?;
+    pub fn compile(
+        &self,
+        env: Env,
+        source: String,
+        globals_keys: Option<Vec<String>>,
+    ) -> Result<Program> {
+        let tokens = tokenize(&source).map_err(|e| create_engine_error(&env, &e))?;
 
         let mut parser = Parser::new(tokens);
-        let stmts = parser.parse().map_err(|e| {
-            create_engine_error(&env, &e)
-        })?;
+        let stmts = parser.parse().map_err(|e| create_engine_error(&env, &e))?;
 
         let host_lock = self.host_registry.lock().unwrap();
         let host_names: HashSet<String> = host_lock.names().into_iter().collect();
         let global_names = globals_keys.unwrap_or_default();
 
         let compiler = Compiler::new(host_names.clone(), global_names);
-        let chunk = compiler.compile(&stmts).map_err(|e| {
-            create_engine_error(&env, &e)
-        })?;
+        let chunk = compiler
+            .compile(&stmts)
+            .map_err(|e| create_engine_error(&env, &e))?;
 
         // Determine if program uses any host functions
         let uses_host = chunk.names.iter().any(|n| host_names.contains(n));

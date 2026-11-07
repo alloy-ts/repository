@@ -36,7 +36,9 @@ impl SymbolTable {
     pub fn declare(&mut self, name: &str) -> Result<u16, String> {
         if let Some(current_scope) = self.scopes.last_mut() {
             if current_scope.slots.contains_key(name) {
-                return Err(format!("Variable already declared in current scope: {name}"));
+                return Err(format!(
+                    "Variable already declared in current scope: {name}"
+                ));
             }
             let slot = self.next_slot;
             self.next_slot = self

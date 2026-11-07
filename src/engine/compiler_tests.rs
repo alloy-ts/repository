@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use fusevm::{VM, VMResult, Value};
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
-    use fusevm::{VM, VMResult, Value};
 
     use crate::engine::compiler::{Compiler, EXT_HOST_CALL_BASE};
-    use crate::engine::parser::{tokenize, Parser};
+    use crate::engine::parser::{Parser, tokenize};
 
     fn compile_and_run(source: &str) -> (Value, String) {
         let tokens = tokenize(source).expect("tokenize");

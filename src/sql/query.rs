@@ -31,8 +31,8 @@ impl JsSqlConnection {
     /// Open a new connection (e.g. `":memory:"` or a file path).
     #[napi(constructor)]
     pub fn new(database_url: String) -> Result<Self> {
-        let mut conn = SqliteConnection::establish(&database_url)
-            .map_err(|e| err("SqlConnection::new", e))?;
+        let mut conn =
+            SqliteConnection::establish(&database_url).map_err(|e| err("SqlConnection::new", e))?;
         conn.batch_execute(
             r#"
             PRAGMA foreign_keys = ON;
@@ -132,7 +132,10 @@ impl JsQueryBuilder {
         };
 
         let distinct_clause = if self.distinct { "DISTINCT " } else { "" };
-        let mut sql = format!("SELECT {distinct_clause}{select_clause} FROM {}", self.table);
+        let mut sql = format!(
+            "SELECT {distinct_clause}{select_clause} FROM {}",
+            self.table
+        );
 
         if !self.conditions.is_empty() {
             sql.push_str(" WHERE ");
@@ -201,10 +204,7 @@ impl JsQueryBuilder {
         let mut conn = self.conn.lock().unwrap();
         let cols = self.get_columns(&mut *conn)?;
 
-        let json_obj_args: Vec<String> = cols
-            .iter()
-            .map(|col| format!("'{col}', {col}"))
-            .collect();
+        let json_obj_args: Vec<String> = cols.iter().map(|col| format!("'{col}', {col}")).collect();
         let json_obj = if json_obj_args.is_empty() {
             "json_object()".to_string()
         } else {
@@ -212,9 +212,7 @@ impl JsQueryBuilder {
         };
 
         let query = self.to_sql_internal();
-        let json_sql = format!(
-            "SELECT json_group_array({json_obj}) AS json_str FROM ({query})"
-        );
+        let json_sql = format!("SELECT json_group_array({json_obj}) AS json_str FROM ({query})");
 
         let res: Option<JsonRow> = diesel::sql_query(json_sql)
             .get_result::<JsonRow>(&mut *conn)
@@ -267,7 +265,10 @@ fn json_to_sql_literal(v: &Value) -> String {
             let items: Vec<String> = arr.iter().map(json_to_sql_literal).collect();
             format!("'[{}]'", items.join(","))
         }
-        Value::Object(_) => format!("'{}'", serde_json::to_string(v).unwrap().replace('\'', "''")),
+        Value::Object(_) => format!(
+            "'{}'",
+            serde_json::to_string(v).unwrap().replace('\'', "''")
+        ),
     }
 }
 

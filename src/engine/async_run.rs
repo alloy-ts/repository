@@ -1,8 +1,8 @@
+use fusevm::{Chunk, VM, VMResult, Value};
+use napi::Env;
+use napi::bindgen_prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use fusevm::{Chunk, VM, VMResult, Value};
-use napi::bindgen_prelude::*;
-use napi::Env;
 
 use crate::engine::value::EngineValue;
 

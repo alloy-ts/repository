@@ -47,7 +47,9 @@ impl ModelDecorator for ModelEmitterOptions {
         }
         if self.diesel {
             let rust_name = resolve_enum_type_name(enum_name, None);
-            attrs.push_str(&format!("#[ExistingTypePath = \"crate::sql_types::{rust_name}\"]\n"));
+            attrs.push_str(&format!(
+                "#[ExistingTypePath = \"crate::sql_types::{rust_name}\"]\n"
+            ));
         }
         attrs
     }
@@ -55,7 +57,9 @@ impl ModelDecorator for ModelEmitterOptions {
     fn row_attrs(&self, table_name: &str) -> String {
         let mut attrs = String::new();
         if self.diesel {
-            attrs.push_str(&format!("#[diesel(table_name = crate::schema::{table_name})]\n"));
+            attrs.push_str(&format!(
+                "#[diesel(table_name = crate::schema::{table_name})]\n"
+            ));
         }
         if self.napi {
             attrs.push_str("#[napi(object)]\n");
@@ -66,7 +70,9 @@ impl ModelDecorator for ModelEmitterOptions {
     fn new_attrs(&self, table_name: &str) -> String {
         let mut attrs = String::new();
         if self.diesel {
-            attrs.push_str(&format!("#[diesel(table_name = crate::schema::{table_name})]\n"));
+            attrs.push_str(&format!(
+                "#[diesel(table_name = crate::schema::{table_name})]\n"
+            ));
         }
         if self.napi {
             attrs.push_str("#[napi(object)]\n");
@@ -198,7 +204,9 @@ pub fn emit_models_with_decorator<B: Backend, D: ModelDecorator>(
                     out.push_str(&format!("    #[serde(rename = \"{col_name}\")]\n"));
                 }
                 if has_default_or_autoincrement || col.nullable {
-                    out.push_str("    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n");
+                    out.push_str(
+                        "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n",
+                    );
                 }
             }
             out.push_str(&format!("    pub {field_name}: {insert_type},\n"));
@@ -210,7 +218,11 @@ pub fn emit_models_with_decorator<B: Backend, D: ModelDecorator>(
 }
 
 /// Emit Rust models (Row struct, NewX insert struct, and enums).
-pub fn emit_models<B: Backend>(schema: &SchemaIr, backend: &B, opts: &ModelEmitterOptions) -> String {
+pub fn emit_models<B: Backend>(
+    schema: &SchemaIr,
+    backend: &B,
+    opts: &ModelEmitterOptions,
+) -> String {
     emit_models_with_decorator(schema, backend, opts, opts)
 }
 

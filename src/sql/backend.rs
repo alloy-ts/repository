@@ -73,9 +73,7 @@ impl Backend for SqliteBackend {
             ColumnType::Timestamptz => "chrono::DateTime<chrono::Utc>".to_string(),
             ColumnType::Uuid => "uuid::Uuid".to_string(),
             ColumnType::Json => "serde_json::Value".to_string(),
-            ColumnType::Enum { name } => {
-                crate::sql::naming::resolve_enum_type_name(name, None)
-            }
+            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
         };
 
         if col.nullable {
@@ -111,11 +109,12 @@ impl Backend for SqliteBackend {
             ColumnType::Integer | ColumnType::Float | ColumnType::Double => "number".to_string(),
             ColumnType::Bigint => "bigint".to_string(),
             ColumnType::Boolean => "boolean".to_string(),
-            ColumnType::Text | ColumnType::Timestamp | ColumnType::Timestamptz | ColumnType::Uuid => "string".to_string(),
+            ColumnType::Text
+            | ColumnType::Timestamp
+            | ColumnType::Timestamptz
+            | ColumnType::Uuid => "string".to_string(),
             ColumnType::Json => "any".to_string(),
-            ColumnType::Enum { name } => {
-                crate::sql::naming::resolve_enum_type_name(name, None)
-            }
+            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
         };
 
         if col.nullable {
@@ -130,13 +129,19 @@ impl Backend for SqliteBackend {
             DefaultValueIr::Now => "CURRENT_TIMESTAMP".to_string(),
             DefaultValueIr::Null => "NULL".to_string(),
             DefaultValueIr::Literal(serde_json::Value::Bool(b)) => {
-                if *b { "1".to_string() } else { "0".to_string() }
+                if *b {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                }
             }
             DefaultValueIr::Literal(serde_json::Value::Number(n)) => n.to_string(),
             DefaultValueIr::Literal(serde_json::Value::String(s)) => {
                 format!("'{}'", s.replace('\'', "''"))
             }
-            DefaultValueIr::Literal(other) => format!("'{}'", other.to_string().replace('\'', "''")),
+            DefaultValueIr::Literal(other) => {
+                format!("'{}'", other.to_string().replace('\'', "''"))
+            }
             DefaultValueIr::Custom(raw) => raw.clone(),
         }
     }
@@ -195,9 +200,7 @@ impl Backend for PostgresBackend {
             ColumnType::Timestamptz => "chrono::DateTime<chrono::Utc>".to_string(),
             ColumnType::Uuid => "uuid::Uuid".to_string(),
             ColumnType::Json => "serde_json::Value".to_string(),
-            ColumnType::Enum { name } => {
-                crate::sql::naming::resolve_enum_type_name(name, None)
-            }
+            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
         };
 
         if col.nullable {
@@ -237,11 +240,12 @@ impl Backend for PostgresBackend {
             ColumnType::Integer | ColumnType::Float | ColumnType::Double => "number".to_string(),
             ColumnType::Bigint => "bigint".to_string(),
             ColumnType::Boolean => "boolean".to_string(),
-            ColumnType::Text | ColumnType::Timestamp | ColumnType::Timestamptz | ColumnType::Uuid => "string".to_string(),
+            ColumnType::Text
+            | ColumnType::Timestamp
+            | ColumnType::Timestamptz
+            | ColumnType::Uuid => "string".to_string(),
             ColumnType::Json => "any".to_string(),
-            ColumnType::Enum { name } => {
-                crate::sql::naming::resolve_enum_type_name(name, None)
-            }
+            ColumnType::Enum { name } => crate::sql::naming::resolve_enum_type_name(name, None),
         };
 
         if col.nullable {
@@ -256,13 +260,19 @@ impl Backend for PostgresBackend {
             DefaultValueIr::Now => "NOW()".to_string(),
             DefaultValueIr::Null => "NULL".to_string(),
             DefaultValueIr::Literal(serde_json::Value::Bool(b)) => {
-                if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+                if *b {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
             }
             DefaultValueIr::Literal(serde_json::Value::Number(n)) => n.to_string(),
             DefaultValueIr::Literal(serde_json::Value::String(s)) => {
                 format!("'{}'", s.replace('\'', "''"))
             }
-            DefaultValueIr::Literal(other) => format!("'{}'", other.to_string().replace('\'', "''")),
+            DefaultValueIr::Literal(other) => {
+                format!("'{}'", other.to_string().replace('\'', "''"))
+            }
             DefaultValueIr::Custom(raw) => raw.clone(),
         }
     }
