@@ -1,6 +1,6 @@
 # Status
 
-Design for the status NAPI bindings in `src/status.rs`, using `git2`'s
+Design for the status NAPI bindings in `src/repo/status.rs`, using `git2`'s
 `status.rs` as the feature checklist and `gix` 0.89's status pipeline as the
 engine. The goal is a **JS-friendly, porcelain-compatible** API — not a raw port
 of either.
@@ -191,7 +191,7 @@ const e = await repo.statusFile("src/main.rs"); // { porcelain: " M", ... } | nu
 if (repo.shouldIgnore("build/output.log")) skip();
 ```
 
-## Rust implementation plan (`src/status.rs`)
+## Rust implementation plan (`src/repo/status.rs`)
 
 New/changed NAPI items:
 
