@@ -1,6 +1,6 @@
 # Task API
 
-The `Task` API queues entry resolution through libuv and evaluates the resolved entries on the JavaScript event-loop thread in the current NAPI environment. For a separate operating-system process, use [Process](./process.md).
+The `Task` API queues entry resolution through Node-API async work and evaluates the resolved entries on the JavaScript event-loop thread in the current NAPI environment. For a separate operating-system process, use [Process](./process.md).
 
 ## Overview
 
@@ -13,7 +13,7 @@ A Task is not an isolated Node.js instance, OS thread, or child process. CPU-bou
 | `Task` | Resolves entries in a pool, evaluates JavaScript in the current environment | `done()` | `cancel()` for queued work; `terminate()` requests skipping evaluation |
 | `Process` | Starts a separate executable on construction | `run()` collects once | `cancel()` requests child cleanup |
 
-A live Task cannot be passed to the Process constructor. Process accepts command descriptors using `program` and `args`, whereas Task uses `entries`.
+Process accepts a live Task or TaskOptions with `entries` and starts a fresh subprocess execution from the original options. It also accepts executable paths, local file URLs, and command descriptors using `program` and `args`. Running state and listeners remain with the original Task.
 
 Submodules under `task`:
 

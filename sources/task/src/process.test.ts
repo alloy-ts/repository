@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "vite-plus/test";
-import { createCancellationToken, Process, runCommand } from "../../repository/src/main.ts";
+import { createCancellationToken, Process, runCommand, Task } from "../../repository/src/main.ts";
 
 // Use the running Node executable instead of platform-specific shell utilities.
 // Bound fixture lifetimes even when the behavior under test fails.
@@ -120,6 +120,7 @@ describe("Process constructor", () => {
     const inputs = [
       "",
       "bad\0path",
+      "file:///tmp/bad%00path",
       "https://example.invalid/program",
       new URL("https://example.invalid/program"),
       executable + "?argument=1",
@@ -130,10 +131,93 @@ describe("Process constructor", () => {
     }
   });
 
-  test("rejects TaskOptions rather than treating entries as a command", () => {
-    // Exercise malformed JS input without pretending this is a supported type.
-    const invalid = { entries: "postMessage('hello')" };
-    expect(() => new Process(invalid as never)).toThrow();
+  test("runs TaskOptions in a separate process with taskData and ordered entries", async () => {
+    const parentPid = process.pid;
+    const child = new Process({
+      entries: [
+        "process.stdout.write(JSON.stringify({ pid: process.pid, data: taskData, env: process.env.ALLOY_TASK_VALUE, arg: process.argv[1] }))",
+        "process.stderr.write('second entry')",
+      ],
+      taskData: { message: "hello" },
+      env: { ALLOY_TASK_VALUE: "child" },
+      argv: ["argument"],
+    });
+    const result = await child.run();
+    expect(result.output!.success).toBe(true);
+    const output = JSON.parse(result.output!.stdout.toString());
+    expect(output.pid).not.toBe(parentPid);
+    expect(output.data).toEqual({ message: "hello" });
+    expect(output.env).toBe("child");
+    expect(output.arg).toBe("argument");
+    expect(result.output!.stderr.toString()).toBe("second entry");
+    expect(process.env.ALLOY_TASK_VALUE).toBeUndefined();
+  });
+
+  test("replays an existing Task's original options in a fresh child", async () => {
+    const data = { pid: process.pid, message: "original" };
+    const task = new Task({
+      entries: "if (process.pid !== taskData.pid) process.stdout.write(taskData.message)",
+      taskData: data,
+    });
+    data.message = "mutated";
+    await task.done();
+    const child = new Process(task);
+    const result = await child.run();
+    expect(result.output!.success).toBe(true);
+    expect(result.output!.stdout.toString()).toBe("original");
+  });
+
+  test("resolves TaskOptions file entries and reports task failures", async () => {
+    const child = new Process({ entries: "throw new Error('task failed')" });
+    const result = await child.run();
+    expect(result.output!.success).toBe(false);
+    expect(result.output!.exitCode).toBe(1);
+    expect(result.output!.stderr.toString()).toContain("task failed");
+    await withDirectory(async (directory) => {
+      const { writeFile } = await import("node:fs/promises");
+      const script = join(directory, "entry.cjs");
+      await writeFile(script, "process.stdout.write('file entry')");
+      const fileChild = new Process({ entries: pathToFileURL(script).href });
+      expect((await fileChild.run()).output!.stdout.toString()).toBe("file entry");
+    });
+  });
+
+  test("cancels a task subprocess without stopping its source Task", async () => {
+    const task = new Task({ entries: "setTimeout(() => {}, 10)" });
+    await task.done();
+    const child = new Process(task);
+    child.cancel();
+    const result = await child.run();
+    expect(result.failure!.kind).toBe("cancelled");
+    expect(task.terminated).toBe(false);
+  });
+
+  test("applies an empty environment only inside the task subprocess", async () => {
+    const child = new Process({
+      entries: "process.stdout.write(String(Object.keys(process.env).length))",
+      env: "none",
+    });
+    const result = await child.run();
+    expect(result.output!.success).toBe(true);
+    expect(result.output!.stdout.toString()).toBe("0");
+    expect(Object.keys(process.env).length).toBeGreaterThan(0);
+  });
+
+  test("transports task data larger than the OS command argument limit", async () => {
+    const child = new Process({
+      entries: "process.stdout.write(String(taskData.length))",
+      taskData: "x".repeat(256 * 1024),
+    });
+    const result = await child.run();
+    expect(result.output!.success).toBe(true);
+    expect(result.output!.stdout.toString()).toBe(String(256 * 1024));
+    expect(child.args.join(" ")).not.toContain("x".repeat(100));
+  });
+
+  test("rejects malformed task options and unrelated native classes", () => {
+    for (const invalid of [{ entries: 12 }, { entries: [true] }, createCancellationToken()]) {
+      expect(() => new Process(invalid as never)).toThrow();
+    }
   });
 
   test("rejects invalid execution and cleanup durations synchronously", () => {

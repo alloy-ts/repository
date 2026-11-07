@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::{
-    ClassInstance, Either, FromNapiValue, Function, FunctionRef, JsObjectValue, JsValue, Object,
-    ToNapiValue, Unknown,
+    ClassInstance, Either, FnArgs, FromNapiValue, Function, FunctionRef, JsObjectValue, JsValue,
+    Object, ToNapiValue, Unknown,
 };
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use napi::{Env, Error, JsDeferred, Result, Status};
@@ -551,6 +551,45 @@ pub struct TaskOptions {
     pub repository: Option<ClassInstance<'static, Repository>>,
 }
 
+/// Snapshot launch configuration without retaining environment-bound NAPI handles.
+pub(crate) fn process_snapshot(options: &TaskOptions) -> serde_json::Value {
+    let entries = match &options.entries {
+        Either::A(entry) => serde_json::json!(entry),
+        Either::B(entries) => serde_json::json!(entries),
+    };
+    let resource_limits = options.resource_limits.as_ref().map(|limits| {
+        serde_json::json!({
+            "maxYoungGenerationSizeMb": limits.max_young_generation_size_mb,
+            "maxOldGenerationSizeMb": limits.max_old_generation_size_mb,
+            "codeRangeSizeMb": limits.code_range_size_mb,
+            "stackSizeMb": limits.stack_size_mb,
+        })
+    });
+    let mut snapshot = serde_json::json!({
+        "entries": entries,
+        "tasktreePath": options.tasktree_path,
+        "sandbox": options.sandbox,
+        "name": options.name,
+        "resourceLimits": resource_limits,
+        "env": options.env,
+        "argv": options.argv,
+        "execArgv": options.exec_argv,
+        "taskData": options.task_data,
+        "trackUnmanagedFds": options.track_unmanaged_fds,
+        "allowNetwork": options.allow_network,
+        "repositoryPath": options.repository.as_ref().map(|repository| repository.path()),
+    });
+    // NAPI optional object fields must be absent rather than explicit nulls.
+    if let Some(limits) = snapshot["resourceLimits"].as_object_mut() {
+        limits.retain(|_, value| !value.is_null());
+    }
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .retain(|_, value| !value.is_null());
+    snapshot
+}
+
 // ---------------------------------------------------------------------------
 // Programme resolution
 // ---------------------------------------------------------------------------
@@ -905,12 +944,49 @@ fn to_unknown<T: ToNapiValue>(env: &Env, v: T) -> Result<Unknown<'static>> {
 // The `Task` class
 // ---------------------------------------------------------------------------
 
+/// Queue resolution through Node-API so completion and cancellation are
+/// delivered on the originating environment's loop, including Node workers.
+struct ResolutionWork<F, G> {
+    work: Option<F>,
+    deliver: Option<G>,
+}
+
+impl<F, G, T> napi::Task for ResolutionWork<F, G>
+where
+    F: FnOnce() -> T + Send + 'static,
+    G: FnOnce(Option<T>, bool) + Send + 'static,
+    T: Send + 'static,
+{
+    type Output = T;
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<T> {
+        Ok(self.work.take().expect("resolution runs once")())
+    }
+
+    fn resolve(&mut self, _env: Env, output: T) -> Result<()> {
+        if let Some(deliver) = self.deliver.take() {
+            deliver(Some(output), false);
+        }
+        Ok(())
+    }
+
+    fn reject(&mut self, _env: Env, _error: Error) -> Result<()> {
+        if let Some(deliver) = self.deliver.take() {
+            deliver(None, true);
+        }
+        Ok(())
+    }
+}
+
 /// Monotonic, process-unique id for each [`Task`] instance.
 static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(1);
 
-/// A libuv `uv_queue_task` task that presents a Node-Executor-compatible API.
+/// A Node-API async task that presents a Node-Executor-compatible API.
 #[napi]
 pub struct Task {
+    /// Serializable construction options for a fresh subprocess execution.
+    process_options: serde_json::Value,
     /// Process-unique id.
     id: u32,
     /// A stable, task-like id for the task.
@@ -932,13 +1008,12 @@ pub struct Task {
     done: napi::sys::napi_value,
     /// Deferred created by [`Task::terminate`], settled when `exit` is emitted.
     terminate_slot: TerminateSlot,
-    /// The underlying `uv_task_t` request, kept so [`Task::cancel`] and
-    /// [`Task::terminate`] can issue `uv_cancel` before the task starts.
-    task_req: Mutex<Option<TaskReq>>,
+    /// Node-API work handle, retained for cancellation before resolution starts.
+    task_req: Mutex<Option<napi::AsyncWorkPromise<()>>>,
 }
 
-// `task_req` holds a libuv `TaskReq` (`!Send`/`!Sync`) and `done` an env-bound
-// `napi_value`, but a `Task` is only ever created, used and dropped on the JS
+// `task_req` and `done` hold environment-bound Node-API state, but a `Task`
+// is only ever created, used and dropped on the JS
 // thread, so marking it `Send`/`Sync` is sound here.
 unsafe impl Send for Task {}
 unsafe impl Sync for Task {}
@@ -954,6 +1029,7 @@ impl Task {
     /// evaluated on the JS thread in the after-task callback.
     #[napi(constructor)]
     pub fn new(env: Env, options: TaskOptions) -> Result<Self> {
+        let process_options = process_snapshot(&options);
         let id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
         let thread_id = id;
         let name = options.name.clone().unwrap_or_default();
@@ -977,12 +1053,9 @@ impl Task {
         let deferred_slot: Arc<Mutex<Option<JsDeferred<(), DeferredResolver>>>> =
             Arc::new(Mutex::new(Some(deferred)));
 
-        let pool = ThreadPool::new()?;
-
         // `task` runs on a libuv task thread (no V8 access): it resolves the
-        // task plus the sandbox/object-database/network setup. The result
-        // is parked in a shared slot and delivered to the loop thread through
-        // the `Task` (uv_async_t) wakeup used internally by `ThreadPool::exec`.
+        // task plus the sandbox/object-database/network setup. Node-API
+        // delivers its result to the originating environment's loop.
         let task_dir = dir.clone();
         let task_options_repo = options.repository.as_ref().map(|r| Arc::clone(&r.inner));
         let task_entries: Vec<String> = match &options.entries {
@@ -1026,15 +1099,15 @@ impl Task {
                 .collect()
         };
 
-        // `on_loop` runs on the event-loop thread (via the `Task` uv_async_t
-        // wakeup): settle the deferred, which evaluates the task and
+        // `on_loop` runs on the event-loop thread: settle the deferred,
+        // which evaluates the task and
         // dispatches events.
         let deliver_deferred = Arc::clone(&deferred_slot);
         let deliver_handlers = Arc::clone(&handlers);
         let deliver_terminated = Arc::clone(&terminated);
         let deliver_task_data = task_data.clone();
         let deliver_terminate = Arc::clone(&terminate_slot);
-        let on_loop = move |resolved: std::result::Result<Vec<Programme>, String>,
+        let on_loop = move |resolved: Option<std::result::Result<Vec<Programme>, String>>,
                             cancelled: bool| {
             // A cancelled after-task status means `uv_cancel` succeeded and
             // the task never ran: report it as an error so `exit`/`done()`
@@ -1042,7 +1115,7 @@ impl Task {
             let resolved = if cancelled {
                 Err("task was cancelled".to_string())
             } else {
-                resolved
+                resolved.unwrap_or_else(|| Err("task completed without a result".into()))
             };
             if let Some(d) = deliver_deferred.lock().unwrap().take() {
                 let handlers = Arc::clone(&deliver_handlers);
@@ -1062,11 +1135,15 @@ impl Task {
             }
         };
 
-        let task_req = pool
-            .exec_then(task, on_loop)
-            .map_err(|e| Error::new(Status::GenericFailure, format!("exec: {e}")))?;
+        // Node owns the loop and work lifecycle; a bundled libuv default loop
+        // is not necessarily the current NAPI environment's event loop.
+        let task_req = env.spawn(ResolutionWork {
+            work: Some(task),
+            deliver: Some(on_loop),
+        })?;
 
         Ok(Task {
+            process_options,
             id,
             thread_id,
             name,
@@ -1172,15 +1249,14 @@ impl Task {
         Ok(self.uv_cancel())
     }
 
-    /// Rust-side `uv_cancel` over the stored request; takes it so the cancel
-    /// is issued at most once. Safe to call on an already-completed request:
-    /// libuv reports `UV_EALREADY` and leaves the request alone.
+    /// Cancel pending Node-API work at most once. Completed work has no live
+    /// native handle to cancel.
     fn uv_cancel(&self) -> bool {
+        if self.terminate_slot.code.lock().unwrap().is_some() {
+            return false;
+        }
         match self.task_req.lock().unwrap().take() {
-            Some(req) => {
-                let mut r: libuv::Req = libuv::Req::from(req);
-                matches!(r.cancel(), Ok(_))
-            }
+            Some(mut request) => request.cancel().is_ok(),
             None => false,
         }
     }
@@ -1393,7 +1469,7 @@ fn run_resolved(
     for entry in &entries {
         let script = runner_script(entry);
         let runner: Function<
-            (Unknown<'static>, Unknown<'static>, Unknown<'static>),
+            FnArgs<(Unknown<'static>, Unknown<'static>, Unknown<'static>)>,
             Unknown<'static>,
         > = env.run_script(&script)?;
 
@@ -1420,7 +1496,7 @@ fn run_resolved(
 
         let data = to_unknown(env, task_data.clone().unwrap_or(serde_json::Value::Null))?;
         let argv = (to_unknown(env, post)?, to_unknown(env, on_msg)?, data);
-        if let Err(e) = runner.call(argv) {
+        if let Err(e) = runner.call(argv.into()) {
             emit_data(env, handlers, "error", to_unknown(env, e.reason)?)?;
             finish(1)?;
             return Ok(());
@@ -1453,7 +1529,7 @@ fn runner_script(task: &Programme) -> String {
             // `__dirname`) are declared here to stand in for the module wrapper.
             format!(
                 "(function (postMessage, onMessage, taskData) {{\n\
-                 const {{ createRequire }} = process.mainModule.require('module');\n\
+                 const {{ createRequire }} = process.getBuiltinModule('module');\n\
                  const __filename = {file};\n\
                  const __dirname = {dir};\n\
                  const require = createRequire(__filename);\n\
@@ -1625,4 +1701,3 @@ pub fn run(
     )
     .map(|req| TaskRequest { inner: req })
 }
-

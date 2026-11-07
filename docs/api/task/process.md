@@ -34,7 +34,7 @@ if (result.success) {
 ### Constructor
 
 ```ts
-new Process(input: string | URL | CommandOptions, cancellation?: CancellationToken)
+new Process(input: string | URL | Task | TaskOptions | CommandOptions, cancellation?: CancellationToken)
 ```
 
 | Input | Behavior |
@@ -42,6 +42,7 @@ new Process(input: string | URL | CommandOptions, cancellation?: CancellationTok
 | Executable string, such as `"git"` or `"/usr/bin/git"` | Launches that executable with no arguments. Bare names use normal OS executable lookup. |
 | File URL string, such as `"file:///usr/bin/git"` | Converts the local file URL to an executable path, including percent decoding. |
 | URL object, such as `new URL("file:///usr/bin/git")` | Reads its string `href` and resolves it as a local file URL. |
+| Task instance or `TaskOptions` with `entries` | Recreates the task from its construction options in a separate Node subprocess. |
 | Command descriptor, such as `{ program: "git", args: ["--version"] }` | Configures the command using the options below. An object's `program` property takes precedence over `href`. |
 
 The object path uses property access rather than an `instanceof URL` check, so a URL-like object with a string `href` is also accepted. In a descriptor, `program` can itself be a local file URL string.
@@ -50,7 +51,9 @@ An executable string is not a shell command: `"git --version"` is treated as the
 
 HTTP(S) URLs are rejected; this constructor does not download executables. File URLs must convert to a local path and must not contain a query or fragment. Empty executable names and NUL bytes are rejected.
 
-A “task object” here means a `CommandOptions` descriptor. A live [Task](./index.md) instance or a `TaskOptions` object with `entries` is not accepted.
+A `TaskOptions` object with `entries` launches a fresh Node subprocess running the same native Task implementation. Entry resolution, task data, repository selection, and network opt-in use Task semantics. `env`, `argv`, and `execArgv` are applied to the child. Passing an existing [Task](./index.md) replays a snapshot of its original options in a fresh child, even if the original has completed. It does not transfer its running state, listeners, or messages, or stop the original Task. Resource limits and unmanaged descriptor options retain the underlying Task implementation's behavior.
+
+Task launches require Node.js with N-API 9 or newer and access to the same native addon file. Task script errors produce a nonzero child exit code and diagnostics on stderr. `Process.cancel()` terminates task subprocesses through the same child cleanup path as executable commands.
 
 Input validation can throw synchronously. OS spawn failures and execution errors are observed by awaiting `run()`. Construction schedules the work; it does not synchronously confirm that the OS has created the child.
 

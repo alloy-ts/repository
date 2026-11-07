@@ -12,8 +12,9 @@
 //!
 //! - `CancellationToken` — JS class: `new CancellationToken()`, `.cancel()`,
 //!   `.isCancelled(): boolean`, `.cancelled(): Promise<void>`.
-//! - `runCommand(options, token?): Promise<CommandResult>` — the only exported
-//!   executor. Execution failures (timeout/cancel/limit/read) are returned with
+//! - `Process(input, token?)` starts one child; `run()` collects its result.
+//! - `runCommand(options, token?): Promise<CommandResult>` executes one command.
+//!   Execution failures (timeout/cancel/limit/read) are returned with
 //!   `success: false`; only I/O and configuration errors reject the promise.
 //!
 //! # Prerequisites (not in this file)
@@ -1280,17 +1281,24 @@ pub struct Process {
 #[napi]
 impl Process {
     /// Accept an executable path, a file URL (string or URL object), or a
-    /// task descriptor using CommandOptions (`{ program, args, ... }`).
+    /// Task, TaskOptions, or CommandOptions (`{ program, args, ... }`).
     /// Network URLs are rejected: executables must already exist locally.
     #[napi(constructor)]
     pub fn new(
-        input: napi::bindgen_prelude::Either<String, napi::bindgen_prelude::Object>,
+        env: napi::Env,
+        #[napi(ts_arg_type = "string | URL | Task | TaskOptions | CommandOptions")]
+        input: napi::bindgen_prelude::Either3<
+            String,
+            napi::bindgen_prelude::ClassInstance<crate::task::Task>,
+            napi::bindgen_prelude::Object,
+        >,
         cancellation: Option<CancellationToken>,
     ) -> napi::Result<Self> {
-        use napi::bindgen_prelude::{Either, JsObjectValue};
+        use napi::bindgen_prelude::{Either3, FromNapiValue, JsObjectValue, JsValue};
         let options = match input {
-            Either::A(path) => executable_options(&path)?,
-            Either::B(object) => {
+            Either3::A(path) => executable_options(&path)?,
+            Either3::B(task) => task_options(&env, task.process_options.clone())?,
+            Either3::C(object) => {
                 if object.has_named_property("program")? {
                     let mut options = CommandOptions {
                         program: object.get_named_property("program")?,
@@ -1304,6 +1312,11 @@ impl Process {
                     };
                     options.program = executable_path(&options.program)?;
                     options
+                } else if object.has_named_property("entries")? {
+                    // Parse with the same binding conversion as new Task(options).
+                    let options =
+                        unsafe { super::TaskOptions::from_napi_value(env.raw(), object.raw())? };
+                    task_options(&env, super::process_snapshot(&options))?
                 } else {
                     let href: String = object.get_named_property("href")?;
                     executable_options(&href)?
@@ -1402,6 +1415,97 @@ impl Drop for Process {
     }
 }
 
+/// Look up N-API 9's module filename operation without enabling type-tag
+/// generation across unrelated bindings. Older hosts fail only task launches.
+#[cfg(any(unix, windows))]
+fn native_module_path(env: &napi::Env) -> napi::Result<String> {
+    #[cfg(unix)]
+    let host = libloading::os::unix::Library::this();
+    #[cfg(windows)]
+    let host = libloading::os::windows::Library::this()
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    type GetModuleFileName = unsafe extern "C" fn(
+        napi::sys::napi_env,
+        *mut *const std::ffi::c_char,
+    ) -> napi::sys::napi_status;
+    // SAFETY: resolve the documented Node C API from the running host. The
+    // symbol signature matches node_api.h; the host outlives this call.
+    let get_filename = unsafe { host.get::<GetModuleFileName>(b"node_api_get_module_file_name\0") }
+        .map_err(|_| {
+            napi::Error::from_reason("Task subprocesses require a Node.js host with N-API 9")
+        })?;
+    let mut filename = std::ptr::null();
+    // SAFETY: env is the current JS environment and filename is a valid output
+    // pointer. Node owns the returned NUL-terminated string.
+    let status = unsafe { get_filename(env.raw(), &mut filename) };
+    if status != napi::sys::Status::napi_ok || filename.is_null() {
+        return Err(napi::Error::from_reason(
+            "cannot locate the native Task addon",
+        ));
+    }
+    let filename = unsafe { std::ffi::CStr::from_ptr(filename) }
+        .to_str()
+        .map_err(|_| napi::Error::from_reason("native Task addon path is not UTF-8"))?;
+    executable_path(filename)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_module_path(_env: &napi::Env) -> napi::Result<String> {
+    Err(napi::Error::from_reason(
+        "Task subprocesses require a native Node.js host",
+    ))
+}
+
+/// Recreate the same Task implementation inside a fresh Node process. Only
+/// serializable options cross the process boundary; live listeners stay local.
+fn task_options(env: &napi::Env, snapshot: serde_json::Value) -> napi::Result<CommandOptions> {
+    let program: String = env.run_script("process.execPath")?;
+    let addon = native_module_path(env)?;
+    let mut args: Vec<String> = snapshot["execArgv"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Carry configuration on stdin, keeping task data out of command arguments
+    // and avoiding the operating system's per-argument size limit.
+    let addon = serde_json::to_string(&addon)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let bootstrap = format!(
+        r#"
+(async () => {{
+  const {{ Task, Repository }} = require({addon});
+  const options = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+  if (options.env === 'none') {{ for (const key of Object.keys(process.env)) delete process.env[key]; }}
+  else if (options.env && typeof options.env === 'object') Object.assign(process.env, options.env);
+  if (options.sandbox && !options.tasktreePath) {{
+    options.tasktreePath = require('node:path').join(require('node:os').tmpdir(), 'alloy-task-' + require('node:crypto').randomUUID());
+  }}
+  if (options.repositoryPath) options.repository = new Repository(options.repositoryPath);
+  delete options.repositoryPath;
+  const task = new Task(options);
+  task.addEventListener('error', event => {{ console.error(event.data); process.exitCode = 1; }});
+  task.addEventListener('exit', event => {{ if (event.code) process.exitCode = event.code; }});
+  await task.done();
+}})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+"#
+    );
+    args.extend(["--eval".to_owned(), bootstrap, "--".to_owned()]);
+    if let Some(argv) = snapshot["argv"].as_array() {
+        args.extend(
+            argv.iter()
+                .filter_map(|value| value.as_str().map(str::to_owned)),
+        );
+    }
+    let mut options = executable_options(&program)?;
+    options.args = Some(args);
+    options.input = Some(Buffer::from(snapshot.to_string().into_bytes()));
+    Ok(options)
+}
+
 fn validate_duration(ms: Option<f64>) -> napi::Result<()> {
     if let Some(ms) = ms {
         if !ms.is_finite() || ms < 0.0 || Duration::try_from_secs_f64(ms / 1000.0).is_err() {
@@ -1433,10 +1537,17 @@ fn executable_path(value: &str) -> napi::Result<String> {
         let path = url
             .to_file_path()
             .map_err(|_| napi::Error::from_reason("invalid local file URL"))?;
-        return path
+        let path = path
             .into_os_string()
             .into_string()
-            .map_err(|_| napi::Error::from_reason("executable path is not UTF-8"));
+            .map_err(|_| napi::Error::from_reason("executable path is not UTF-8"))?;
+        if path.is_empty() || path.contains('\0') {
+            return Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                "executable must be a nonempty path without NUL bytes",
+            ));
+        }
+        return Ok(path);
     }
     Ok(value.to_owned())
 }
@@ -1602,6 +1713,7 @@ mod tests {
         for value in [
             "",
             "bad\0path",
+            "file:///tmp/bad%00path",
             "https://example.com/tool",
             "file:///tmp/tool?x=1",
             "file:///tmp/tool#part",
