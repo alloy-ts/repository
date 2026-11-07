@@ -53,11 +53,13 @@ pub async fn fetch(
         None => default_body,
     };
 
-    execute_http_request(
+    let redirect = init.redirect.as_deref().unwrap_or("follow");
+    crate::net::request::execute_http_request_with_redirect(
         &method,
         &url,
         &headers,
         body.as_deref(),
+        redirect,
     )
     .await
 }

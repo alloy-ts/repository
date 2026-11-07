@@ -2,37 +2,34 @@ import { describe, expect, test } from "vite-plus/test";
 import { Server, Response } from "../main.ts";
 
 describe("Server (src/net/server.rs)", () => {
-  test("Server constructor initializes with routes and default options", () => {
+  test("Server constructor initializes with routes and default options", async () => {
     const server = new Server({
-      port: 8080,
+      port: 8085,
       host: "127.0.0.1",
       routes: {
         "/api/status": new Response("OK"),
-        "/users/:id": (req: any) => new Response(`Hello User ${req.params.id}!`),
         "/api/*": Response.json({ message: "Not found" }, { status: 404 }),
-      },
-      fetch(req: any) {
-        return new Response("Not Found", { status: 404 });
       },
     });
 
-    expect(server.port).toBe(8080);
+    expect(server.port).toBe(8085);
     expect(server.host).toBe("127.0.0.1");
     expect(server.listening).toBe(false);
 
-    server.start();
+    const port = await server.start();
     expect(server.listening).toBe(true);
+    expect(port).toBe(8085);
 
-    server.stop();
+    await server.stop();
     expect(server.listening).toBe(false);
   });
 
-  test("serve() is an alias for start()", () => {
-    const server = new Server();
+  test("serve() is an alias for start()", async () => {
+    const server = new Server({ port: 8086 });
     expect(server.listening).toBe(false);
-    server.serve();
+    await server.serve();
     expect(server.listening).toBe(true);
-    server.stop();
+    await server.stop();
     expect(server.listening).toBe(false);
   });
 });

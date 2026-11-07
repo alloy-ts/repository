@@ -7,14 +7,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use tokio::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-/// A TCP socket wrapping `tokio::net::TcpStream`.
+/// A TCP socket wrapping independent read and write halves.
 #[napi]
 pub struct Socket {
-    stream: Arc<Mutex<Option<TcpStream>>>,
+    read_half: Arc<Mutex<Option<OwnedReadHalf>>>,
+    write_half: Arc<Mutex<Option<OwnedWriteHalf>>>,
     local_address: Option<String>,
     local_port: Arc<AtomicU16>,
     remote_address: Option<String>,
@@ -27,11 +29,27 @@ impl Socket {
     #[napi(constructor)]
     pub fn new() -> Self {
         Socket {
-            stream: Arc::new(Mutex::new(None)),
+            read_half: Arc::new(Mutex::new(None)),
+            write_half: Arc::new(Mutex::new(None)),
             local_address: None,
             local_port: Arc::new(AtomicU16::new(0)),
             remote_address: None,
             remote_port: Arc::new(AtomicU16::new(0)),
+            destroyed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn from_tcp_stream(stream: TcpStream) -> Self {
+        let local = stream.local_addr().ok();
+        let peer = stream.peer_addr().ok();
+        let (rh, wh) = stream.into_split();
+        Socket {
+            read_half: Arc::new(Mutex::new(Some(rh))),
+            write_half: Arc::new(Mutex::new(Some(wh))),
+            local_address: local.map(|a| a.ip().to_string()),
+            local_port: Arc::new(AtomicU16::new(local.map(|a| a.port()).unwrap_or(0))),
+            remote_address: peer.map(|a| a.ip().to_string()),
+            remote_port: Arc::new(AtomicU16::new(peer.map(|a| a.port()).unwrap_or(0))),
             destroyed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -83,20 +101,26 @@ impl Socket {
             self.remote_port.store(peer.port(), Ordering::SeqCst);
         }
 
-        let mut lock = self.stream.lock().await;
-        *lock = Some(stream);
+        let (rh, wh) = stream.into_split();
+        let mut r_lock = self.read_half.lock().await;
+        *r_lock = Some(rh);
+        let mut w_lock = self.write_half.lock().await;
+        *w_lock = Some(wh);
         self.destroyed.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Write data to the socket.
+    /// Write data to the socket without blocking read().
     #[napi]
     pub async fn write(&self, data: Either<String, Buffer>) -> napi::Result<u32> {
+        if self.destroyed.load(Ordering::SeqCst) {
+            return Err(napi::Error::new(napi::Status::GenericFailure, "socket is destroyed"));
+        }
         let bytes = match data {
             Either::A(s) => s.into_bytes(),
             Either::B(b) => b.to_vec(),
         };
-        let mut lock = self.stream.lock().await;
+        let mut lock = self.write_half.lock().await;
         let stream = lock.as_mut().ok_or_else(|| {
             napi::Error::new(napi::Status::GenericFailure, "socket not connected")
         })?;
@@ -106,12 +130,15 @@ impl Socket {
         Ok(bytes.len() as u32)
     }
 
-    /// Read available data from the socket.
+    /// Read available data from the socket without blocking write().
     #[napi]
     pub async fn read(&self, size: Option<u32>) -> napi::Result<Option<Buffer>> {
+        if self.destroyed.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
         let sz = size.unwrap_or(65536) as usize;
         let mut buf = vec![0u8; sz];
-        let mut lock = self.stream.lock().await;
+        let mut lock = self.read_half.lock().await;
         let stream = lock.as_mut().ok_or_else(|| {
             napi::Error::new(napi::Status::GenericFailure, "socket not connected")
         })?;
@@ -132,18 +159,28 @@ impl Socket {
         if let Some(d) = data {
             self.write(d).await?;
         }
-        let mut lock = self.stream.lock().await;
-        if let Some(stream) = lock.as_mut() {
+        let mut lock = self.write_half.lock().await;
+        if let Some(mut stream) = lock.take() {
             let _ = stream.shutdown().await;
         }
         self.destroyed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Destroy the socket immediately.
+    /// Destroy the socket immediately and close the TCP connection.
     #[napi]
     pub fn destroy(&self) -> napi::Result<()> {
         self.destroyed.store(true, Ordering::SeqCst);
+        let rh = Arc::clone(&self.read_half);
+        let wh = Arc::clone(&self.write_half);
+        tokio::spawn(async move {
+            let mut r = rh.lock().await;
+            *r = None;
+            let mut w = wh.lock().await;
+            if let Some(mut stream) = w.take() {
+                let _ = stream.shutdown().await;
+            }
+        });
         Ok(())
     }
 }
@@ -151,7 +188,7 @@ impl Socket {
 /// A TCP server wrapping `tokio::net::TcpListener`.
 #[napi]
 pub struct NetServer {
-    listener: Arc<Mutex<Option<Arc<TcpListener>>>>,
+    listener: Arc<Mutex<Option<TcpListener>>>,
     listening: Arc<AtomicBool>,
     port: Arc<AtomicU16>,
 }
@@ -190,7 +227,7 @@ impl NetServer {
         let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
         self.port.store(bound_port, Ordering::SeqCst);
         let mut l = self.listener.lock().await;
-        *l = Some(Arc::new(listener));
+        *l = Some(listener);
         self.listening.store(true, Ordering::SeqCst);
 
         Ok(bound_port)
@@ -199,31 +236,31 @@ impl NetServer {
     /// Accept the next incoming connection.
     #[napi]
     pub async fn accept(&self) -> napi::Result<Socket> {
-        let listener_opt = self.listener.lock().await.clone();
-        let listener = listener_opt.ok_or_else(|| {
+        if !self.listening.load(Ordering::SeqCst) {
+            return Err(napi::Error::new(napi::Status::GenericFailure, "server not listening"));
+        }
+        let mut lock = self.listener.lock().await;
+        let listener = lock.as_mut().ok_or_else(|| {
             napi::Error::new(napi::Status::GenericFailure, "server not listening")
         })?;
 
-        let (stream, peer) = listener.accept().await.map_err(|e| {
+        let (stream, _peer) = listener.accept().await.map_err(|e| {
             napi::Error::new(napi::Status::GenericFailure, format!("accept failed: {e}"))
         })?;
 
-        let local = stream.local_addr().ok();
-
-        Ok(Socket {
-            stream: Arc::new(Mutex::new(Some(stream))),
-            local_address: local.map(|a| a.ip().to_string()),
-            local_port: Arc::new(AtomicU16::new(local.map(|a| a.port()).unwrap_or(0))),
-            remote_address: Some(peer.ip().to_string()),
-            remote_port: Arc::new(AtomicU16::new(peer.port())),
-            destroyed: Arc::new(AtomicBool::new(false)),
-        })
+        Ok(Socket::from_tcp_stream(stream))
     }
 
-    /// Close the server.
+    /// Close the server and drop the listener socket immediately so port is released.
     #[napi]
     pub fn close(&self) -> napi::Result<()> {
         self.listening.store(false, Ordering::SeqCst);
+        self.port.store(0, Ordering::SeqCst);
+        let l = Arc::clone(&self.listener);
+        tokio::spawn(async move {
+            let mut lock = l.lock().await;
+            *lock = None;
+        });
         Ok(())
     }
 }

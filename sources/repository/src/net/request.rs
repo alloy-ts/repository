@@ -390,11 +390,12 @@ impl Request {
     /// Instance method `start` using `http_request` to execute this Request.
     #[napi]
     pub async fn start(&self) -> napi::Result<Response> {
-        execute_http_request(
+        execute_http_request_with_redirect(
             &self.method,
             &self.url,
             &self.headers,
             self.body.as_deref(),
+            &self.redirect,
         )
         .await
     }
@@ -405,6 +406,16 @@ pub(crate) async fn execute_http_request(
     url: &str,
     headers: &HashMap<String, String>,
     body: Option<&[u8]>,
+) -> napi::Result<Response> {
+    execute_http_request_with_redirect(method, url, headers, body, "follow").await
+}
+
+pub(crate) async fn execute_http_request_with_redirect(
+    method: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: Option<&[u8]>,
+    redirect_policy: &str,
 ) -> napi::Result<Response> {
     use http_request::{HttpRequest, Method, Body};
 
@@ -439,14 +450,45 @@ pub(crate) async fn execute_http_request(
 
     let url_string = url.to_string();
 
-    let outcome = tokio::task::spawn_blocking(move || {
-        req.send()
-    })
-    .await
-    .map_err(|e| napi::Error::new(Status::GenericFailure, format!("tokio spawn failed: {e}")))?
-    .map_err(|e| napi::Error::new(Status::GenericFailure, format!("http request failed: {e:?}")))?;
+    let mut current_url = url_string;
+    let mut current_method = method.to_string();
+    let mut redirect_count = 0;
+    let max_redirects = 10;
 
-    Ok(response_from_http_response(outcome, url_string))
+    loop {
+        let mut cur_req = req.clone();
+        cur_req.set_url(&current_url);
+        let cur_url_str = current_url.clone();
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            cur_req.send()
+        })
+        .await
+        .map_err(|e| napi::Error::new(Status::GenericFailure, format!("tokio spawn failed: {e}")))?
+        .map_err(|e| napi::Error::new(Status::GenericFailure, format!("http request failed: {e:?}")))?;
+
+        let resp = response_from_http_response(outcome, cur_url_str);
+        if resp.status >= 300 && resp.status < 400 {
+            if redirect_policy == "error" {
+                return Err(napi::Error::new(Status::GenericFailure, "redirect error"));
+            } else if redirect_policy == "manual" {
+                return Ok(resp);
+            } else if redirect_policy == "follow" {
+                if let Some(loc) = resp.headers.get("location") {
+                    redirect_count += 1;
+                    if redirect_count > max_redirects {
+                        return Err(napi::Error::new(Status::GenericFailure, "maximum redirect limit exceeded"));
+                    }
+                    current_url = loc.clone();
+                    if resp.status == 303 {
+                        current_method = "GET".to_string();
+                    }
+                    continue;
+                }
+            }
+        }
+        return Ok(resp);
+    }
 }
 
 pub type RequestOpts = RequestInit;

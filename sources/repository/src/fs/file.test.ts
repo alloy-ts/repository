@@ -23,8 +23,10 @@ describe("File (src/fs/file.rs)", () => {
     const buf = await foo.arrayBuffer();
     expect(buf.length).toBe(16);
 
-    const stream = await foo.stream();
-    expect(stream.length).toBe(16);
+    const stream = foo.stream();
+    const reader = stream.getReader();
+    const { value } = await reader.read();
+    expect(value.length).toBe(16);
 
     foo.delete();
     expect(await foo.exists()).toBe(false);
