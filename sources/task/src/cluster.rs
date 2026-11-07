@@ -98,6 +98,32 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn removal_releases_the_last_registration_owner() {
+        use crate::task::process::REGISTRY_TEST_LOCK;
+        let _lock = REGISTRY_TEST_LOCK.lock().await;
+        let mut cluster = Cluster::new();
+        let process = cluster
+            .fork(CommandOptions {
+                program: "git".into(),
+                args: Some(vec!["--version".into()]),
+                cwd: None,
+                env: None,
+                input: None,
+                timeout_ms: Some(5000.0),
+                cleanup_timeout_ms: None,
+                limits: None,
+            })
+            .unwrap();
+        let id = process.id().unwrap();
+        let registration = Arc::downgrade(cluster.tasks.get(&id).unwrap());
+        assert!(process.run().await.unwrap().success);
+        drop(process);
+        assert!(registration.upgrade().is_some());
+        assert!(cluster.remove(id));
+        assert!(registration.upgrade().is_none());
+    }
+
+    #[tokio::test]
     async fn dropping_cluster_cancels_registered_execution() {
         use crate::task::process::{OutputLimits, REGISTRY_TEST_LOCK, run};
         use std::process::Stdio;
@@ -108,10 +134,10 @@ mod tests {
         let token = owner.token;
         let mut cluster = Cluster::new();
         cluster.tasks.insert(1, owner);
-        // The test harness itself is a portable short-lived executable.
-        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        // Git is already required by the repository integration fixtures.
+        let mut command = tokio::process::Command::new("git");
         command
-            .arg("--list")
+            .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

@@ -1267,7 +1267,8 @@ pub async fn run_command(
 /// This controls a child, not the host Node.js global `process` object.
 #[napi]
 pub struct Process {
-    execution: tokio::sync::Mutex<Option<tokio::task::JoinHandle<napi::Result<CommandResult>>>>,
+    execution:
+        tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<napi::Result<CommandResult>>>>,
     cancellation: CancellationToken,
     // The future owns another guard until execution/cleanup finishes.
     _ownership: Option<Arc<OwnedCancellation>>,
@@ -1375,10 +1376,14 @@ impl Process {
         let args = options.args.unwrap_or_default();
         let token = cancellation;
         let execution_ownership = ownership.clone();
-        let execution = napi::bindgen_prelude::spawn(async move {
-            // Bind inside the future: dropping/aborting it also releases the guard.
-            let _ownership = execution_ownership;
-            execute(command, input, timeout, limits, cleanup, Some(&token)).await
+        let (completion, execution) = tokio::sync::oneshot::channel();
+        napi::bindgen_prelude::spawn(async move {
+            // Keep cancellation addressable until execution and cleanup finish.
+            let result = execute(command, input, timeout, limits, cleanup, Some(&token)).await;
+            // Completion observers may immediately drop the last Process owner.
+            // Release execution ownership before waking them so cleanup is done.
+            drop(execution_ownership);
+            let _ = completion.send(result);
         });
         Ok(Self {
             execution: tokio::sync::Mutex::new(Some(execution)),
@@ -1542,31 +1547,15 @@ mod tests {
         let _lock = REGISTRY_TEST_LOCK.lock().await;
         let baseline = registry().lock().unwrap().len();
         for _ in 0..16 {
-            let owner = OwnedCancellation::new();
-            let token = owner.token;
-            let execution_owner = Arc::clone(&owner);
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command
-                .arg("--list")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            let execution = tokio::spawn(async move {
-                let _owner = execution_owner;
-                run(
-                    command,
-                    None,
-                    Some(Duration::from_secs(5)),
-                    Some(&token),
-                    OutputLimits::default(),
-                    Duration::from_secs(1),
-                )
-                .await
-            });
-            assert!(execution.await.unwrap().unwrap().success);
-            // The Process/Cluster owner still keeps the token addressable.
+            let mut options = executable_options("git").unwrap();
+            options.args = Some(vec!["--version".into()]);
+            options.timeout_ms = Some(5000.0);
+            let process = Process::start(options, None).unwrap();
+            let token = process.cancellation;
+            assert!(process.run().await.unwrap().success);
+            // Execution has finished; the Process still owns its registration.
             assert!(registry().lock().unwrap().contains_key(&token.id));
-            drop(owner);
+            drop(process);
             assert_eq!(registry().lock().unwrap().len(), baseline);
         }
     }
@@ -1590,8 +1579,12 @@ mod tests {
     async fn owned_cleanup_preserves_caller_supplied_tokens() {
         let _lock = REGISTRY_TEST_LOCK.lock().await;
         let caller = create_cancellation_token();
-        let owner = OwnedCancellation::new();
-        drop(owner);
+        let mut options = executable_options("git").unwrap();
+        options.args = Some(vec!["--version".into()]);
+        options.timeout_ms = Some(5000.0);
+        let process = Process::start(options, Some(caller)).unwrap();
+        assert!(process.run().await.unwrap().success);
+        drop(process);
         assert!(registry().lock().unwrap().contains_key(&caller.id));
         caller.cancel();
         assert!(caller.is_cancelled());
