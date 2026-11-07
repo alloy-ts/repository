@@ -11,6 +11,7 @@ Submodules under `task`:
 - **`thread`** ([thread.md](./thread.md)): Direct OS thread handles (`Thread`, `Builder`, `JoinHandle`) and thread-pool wrappers (`ThreadPool`).
 - **`scheduler`** ([scheduler.md](./scheduler.md)): Task scheduling and dispatching (`Scheduler`, `TaskHandle`) managing worker execution pools.
 - **`promise`** ([promise.md](./promise.md)): Native Promise bridging and deferred resolution (`asyncPlus100`, `processBuffer`, `processBufferOnPool`).
+- **`process`** ([process.md](./process.md)): Async child process execution, stdio streaming, cancellation tokens, and timeouts.
 
 ## Usage
 

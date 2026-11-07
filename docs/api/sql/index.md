@@ -30,19 +30,19 @@ Rust Validation Pass (`validate_schema`)
 
 ## Type Mappings
 
-| Logical Type | SQLite | PostgreSQL | Rust | Diesel Type |
-|---|---|---|---|---|
-| `integer` | `INTEGER` / `INTEGER PRIMARY KEY AUTOINCREMENT` | `INTEGER` / `SERIAL` | `i32` | `diesel::sql_types::Integer` |
-| `bigint` | `INTEGER` | `BIGINT` / `BIGSERIAL` | `i64` | `diesel::sql_types::BigInt` |
-| `float` | `REAL` | `REAL` | `f32` | `diesel::sql_types::Float` |
-| `double` | `REAL` | `DOUBLE PRECISION` | `f64` | `diesel::sql_types::Double` |
-| `boolean` | `INTEGER` (0 or 1) | `BOOLEAN` | `bool` | `diesel::sql_types::Bool` |
-| `text` | `TEXT` | `TEXT` | `String` | `diesel::sql_types::Text` |
-| `timestamp` | `TEXT` | `TIMESTAMP` | `chrono::NaiveDateTime` | `diesel::sql_types::Timestamp` |
-| `timestamptz` | `TEXT` | `TIMESTAMPTZ` | `chrono::DateTime<Utc>` | `diesel::sql_types::Timestamptz` |
-| `uuid` | `TEXT` | `UUID` | `uuid::Uuid` | `diesel::sql_types::Uuid` |
-| `json` | `TEXT` | `JSONB` | `serde_json::Value` | `diesel::sql_types::Jsonb` |
-| `enum` | `TEXT` + `CHECK` constraint | `CREATE TYPE ... AS ENUM` | Generated Rust `enum` | Generated SQL enum |
+| Logical Type  | SQLite                                          | PostgreSQL                | Rust                    | Diesel Type                      |
+| ------------- | ----------------------------------------------- | ------------------------- | ----------------------- | -------------------------------- |
+| `integer`     | `INTEGER` / `INTEGER PRIMARY KEY AUTOINCREMENT` | `INTEGER` / `SERIAL`      | `i32`                   | `diesel::sql_types::Integer`     |
+| `bigint`      | `INTEGER`                                       | `BIGINT` / `BIGSERIAL`    | `i64`                   | `diesel::sql_types::BigInt`      |
+| `float`       | `REAL`                                          | `REAL`                    | `f32`                   | `diesel::sql_types::Float`       |
+| `double`      | `REAL`                                          | `DOUBLE PRECISION`        | `f64`                   | `diesel::sql_types::Double`      |
+| `boolean`     | `INTEGER` (0 or 1)                              | `BOOLEAN`                 | `bool`                  | `diesel::sql_types::Bool`        |
+| `text`        | `TEXT`                                          | `TEXT`                    | `String`                | `diesel::sql_types::Text`        |
+| `timestamp`   | `TEXT`                                          | `TIMESTAMP`               | `chrono::NaiveDateTime` | `diesel::sql_types::Timestamp`   |
+| `timestamptz` | `TEXT`                                          | `TIMESTAMPTZ`             | `chrono::DateTime<Utc>` | `diesel::sql_types::Timestamptz` |
+| `uuid`        | `TEXT`                                          | `UUID`                    | `uuid::Uuid`            | `diesel::sql_types::Uuid`        |
+| `json`        | `TEXT`                                          | `JSONB`                   | `serde_json::Value`     | `diesel::sql_types::Jsonb`       |
+| `enum`        | `TEXT` + `CHECK` constraint                     | `CREATE TYPE ... AS ENUM` | Generated Rust `enum`   | Generated SQL enum               |
 
 ---
 
@@ -77,6 +77,7 @@ Diffs two Schema IR snapshots and outputs migration scripts.
 #### SQLite Table Rebuilds
 
 For SQLite, changes to column types or nullability trigger the standard table-rebuild sequence:
+
 1. `PRAGMA foreign_keys = OFF;`
 2. `BEGIN TRANSACTION;`
 3. `CREATE TABLE _<table>_new (...)`
@@ -138,3 +139,45 @@ For SQLite, changes to column types or nullability trigger the standard table-re
   ]
 }
 ```
+
+---
+
+## SQL QueryDsl & RunQueryDsl (`src/sql/query.rs`)
+
+The `query` module provides chainable SQL query building and execution via SQLite connection and transaction wrappers.
+
+### `SqlConnection`
+
+```ts
+class SqlConnection {
+  constructor(pathOrUrl: string);
+  execute(sql: string): number;
+  executeBatch(sql: string): void;
+  query(table: string): SqlQueryBuilder;
+  transaction<T>(callback: (tx: SqlTransaction) => T): T;
+}
+```
+
+### `SqlQueryBuilder`
+
+Provides chainable query construction:
+
+- `.select(columns: string[])`: Limits columns selected in the query.
+- `.distinct()`: Adds `DISTINCT` clause.
+- `.filterEq(column: string, value: any)`: Equality predicate (`col = val`).
+- `.filterNe(column: string, value: any)`: Inequality predicate (`col != val`).
+- `.filterGt(column: string, value: any)` / `.filterLt(column, value)`: Greater/less than predicates.
+- `.filterLike(column: string, pattern: string)`: SQL `LIKE` filtering.
+- `.filterIn(column: string, values: any[])`: SQL `IN (...)` filtering.
+- `.filterIsNull(column: string)` / `.filterIsNotNull(column: string)`: Nullness check predicates.
+- `.orderByAsc(column: string)` / `.orderByDesc(column: string)`: Ordering.
+- `.limit(n: number)` / `.offset(n: number)`: Pagination.
+- `.insert(record: Record<string, any>)`: Inserts record and returns modified rows.
+- `.update(record: Record<string, any>)`: Updates matched records.
+- `.delete()`: Deletes matched records.
+- `.load()`: Executes query and returns array of row objects.
+- `.first()`: Returns first row object or `null`.
+- `.getResult()`: Returns exactly one row object (throws if zero or multiple).
+- `.count()`: Returns number of matching rows.
+- `.exists()`: Returns boolean indicating existence of matching rows.
+- `.toSql()`: Returns generated SQL string for debugging.

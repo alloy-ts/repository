@@ -11,17 +11,23 @@ async support and full type definitions.
 ## Features
 
 - **Git Operations**: Repositories, commits, trees, blobs, diffs, blame, status,
-  worktrees, branches, tags, and remotes.
+  worktrees, branches, tags, and remotes. See
+  [Git API Documentation](docs/api/repo/index.md).
 - **Cryptography & Vault**: Symmetric ChaCha20-Poly1305 / AES encryption,
   ref-backed key vaults, git-crypt worktree filter drivers, and
   git-remote-gcrypt entire repository mode (packfile & manifest encryption).
 - **OpenPGP & GPG**: OpenPGP encryption, decryption, signing, and signature
   verification via `rPGP`, along with GPG keyring lookup utilities. See
-  [Cryptography API Documentation](docs/api/crypto.md).
+  [Cryptography API Documentation](docs/api/crypto/index.md).
 - **SQL Schema Compiler**: Turns a JavaScript/TypeScript schema definition into
   validated Rust models, Diesel tables, NAPI-RS bindings, SQL DDL, runtime
   validators, and migrations for SQLite and PostgreSQL. See
-  [SQL Schema Compiler Documentation](docs/api/sql.md).
+  [SQL Schema Compiler Documentation](docs/api/sql/index.md).
+- **Task & Process Execution**: Background worker threads, child process
+  spawning, and scheduling. See
+  [Task API Documentation](docs/api/task/index.md).
+- **Engine Runtime**: Bytecode compilation and FuseVM VM execution. See
+  [Engine API Documentation](docs/api/engine/index.md).
 
 ## Getting Started
 

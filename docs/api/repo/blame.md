@@ -1,6 +1,6 @@
 # Blame API
 
-Blame lives in `src/blame.rs` and exposes `gitoxide`'s file blame through three
+Blame lives in `src/repo/blame.rs` and exposes `gitoxide`'s file blame through three
 `Repository` methods. All return (directly or indirectly) a `BlameOutcome` — the
 per-line attribution of a file to the commits that last touched each region,
 plus the raw file bytes and some work statistics.
