@@ -240,7 +240,7 @@ describe("writeCommit (loose object) with headers / encoding", () => {
 
     const text = c.toObjectText();
     expect(text).toContain("encoding UTF-8");
-    expect(text).toContain("Reviewed-by: Reviewer <r@e.com>");
+    expect(text).toContain("Reviewed-by Reviewer <r@e.com>");
     expect(text).toContain("object-form commit");
   });
 

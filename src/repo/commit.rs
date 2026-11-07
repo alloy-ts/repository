@@ -1230,6 +1230,7 @@ impl Repository {
         let mut index = self.index_or_load()?;
         if options.all.unwrap_or(true) {
             self.add_all(&mut index)?;
+            index.write(None)?;
         }
         let tree = self.write_tree_from_index(&index)?;
         let parents: Vec<String> = commit_parent_id(&r, &reference)
