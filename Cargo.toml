@@ -68,14 +68,6 @@ tokio = { version = "1", features = [
   "sync",
 ] }
 ring = "0.17.14"
-reqwest = { version = "0.13.5", features = [
-  "query",
-  "stream",
-  "blocking",
-  "rustls",
-  "multipart",
-  "deflate",
-] }
 prolly = { package = "prolly-map", version = "0.7.2" }
 fjall = "3.1.12"
 tracing = "0.1"
@@ -89,6 +81,7 @@ blake3 = "1"
 crc32fast = "1"
 fusevm = { version = "=0.26.10", default-features = false }
 itertools = "0.13.0"
+http-request = "22.2.0"
 
 [build-dependencies]
 napi-build = "2.6.0"
