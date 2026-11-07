@@ -31,7 +31,7 @@ gix-filter = "0.36.0"
 gix-imara-diff = "0.3.1"
 gix-protocol = { version = "0.67.0", features = ["blocking-client", "fetch"] }
 filetime = "0.2.29"
-napi = { version = "=3.16.0", features = ["serde-json", "tokio_rt", "napi6"] }
+napi = { version = "=3.16.0", features = ["serde-json", "tokio_rt", "napi6", "web_stream"] }
 napi-derive = "=3.7.0"
 futures = { version = "0.3.34", features = ["async-await", "executor"] }
 futures-executor = { version = "0.3.34", features = ["thread-pool"] }
@@ -69,14 +69,6 @@ tokio = { version = "1", features = [
   "sync",
 ] }
 ring = "0.17.14"
-reqwest = { version = "0.13.5", features = [
-  "query",
-  "stream",
-  "blocking",
-  "rustls",
-  "multipart",
-  "deflate",
-] }
 prolly = { package = "prolly-map", version = "0.7.2" }
 fjall = "3.1.12"
 tracing = "0.1"
@@ -90,6 +82,11 @@ blake3 = "1"
 crc32fast = "1"
 fusevm = { version = "=0.26.10", default-features = false }
 itertools = "0.13.0"
+
+rustls-native-certs = "0.8"
+url = "2.5"
+http-request = "22.2.0"
+rocket = "0.5.2"
 
 [build-dependencies]
 napi-build = "2.6.0"

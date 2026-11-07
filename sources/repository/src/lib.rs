@@ -1,3 +1,4 @@
+pub mod net;
 #[path = "../../repo/src/mod.rs"]
 pub mod repo;
 pub use self::repo::*;
@@ -42,5 +43,5 @@ pub(crate) mod content_store;
 pub(crate) mod record;
 
 // Filesystem-seam napi bindings, wrapping `crate::vfs` without modifying it.
-#[cfg(feature = "fs")]
-pub(crate) mod fs;
+pub mod fs;
+pub use fs::{File, Blob};

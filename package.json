@@ -80,5 +80,8 @@
       "version": "11.11.0",
       "onFail": "download"
     }
+  },
+  "inlinedDependencies": {
+    "undici-types": "8.9.0"
   }
 }

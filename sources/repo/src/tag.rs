@@ -29,13 +29,13 @@ pub enum TagKind {
     Lightweight,
 }
 
-#[napi]
+#[napi(namespace = "object")]
 pub struct Tag {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,
 }
 
-#[napi]
+#[napi(namespace = "object")]
 impl Tag {
     #[napi(getter)]
     pub fn name(&self) -> napi::Result<String> {

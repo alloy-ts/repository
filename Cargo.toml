@@ -10,3 +10,6 @@ publish = false
 
 [workspace.dependencies]
 repository-bindings = { package = "repository", path = "sources/repository" }
+
+[patch.crates-io]
+http-request = { path = "vendor/http-request" }
