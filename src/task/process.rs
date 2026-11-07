@@ -740,6 +740,49 @@ fn map_spawn_error(error: io::Error) -> Error {
     }
 }
 
+/// Send an OS kill signal to a process by pid.
+pub fn kill_pid(pid: u32, signal: Option<&str>) -> bool {
+    #[cfg(unix)]
+    {
+        let sig = match signal {
+            Some("SIGKILL") | Some("KILL") => libc::SIGKILL,
+            Some("SIGTERM") | Some("TERM") | None => libc::SIGTERM,
+            Some("SIGINT") | Some("INT") => libc::SIGINT,
+            Some("SIGHUP") | Some("HUP") => libc::SIGHUP,
+            Some("SIGQUIT") | Some("QUIT") => libc::SIGQUIT,
+            Some("SIGUSR1") => libc::SIGUSR1,
+            Some("SIGUSR2") => libc::SIGUSR2,
+            Some(_) => libc::SIGTERM,
+        };
+        unsafe { libc::kill(pid as libc::pid_t, sig) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let res = unsafe { TerminateProcess(handle, 1) != 0 };
+        unsafe { CloseHandle(handle) };
+        res
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// Send an OS kill signal to a process by pid, exposed to N-API JavaScript.
+#[napi]
+pub fn kill_process(pid: u32, signal: Option<String>) -> bool {
+    kill_pid(pid, signal.as_deref())
+}
+
 #[cfg(unix)]
 fn kill_process_group(pid: u32) -> TerminationOutcome {
     let Ok(pgid) = i32::try_from(pid) else {
@@ -919,7 +962,7 @@ impl WindowsTask {
 // napi boundary
 // ---------------------------------------------------------------------------
 
-use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::{Buffer, Either3, Object};
 
 /// One environment variable override for a spawned command.
 #[napi(object)]
@@ -1251,15 +1294,90 @@ pub struct Process {
     cancellation: Option<CancellationToken>,
 }
 
+/// Argument passed to [`Process::new`]: can be a string path/URL, a URL/Task object, or [`CommandOptions`].
+pub type ProcessArg<'a> = Either3<String, CommandOptions, Object<'a>>;
+
 #[napi]
 impl Process {
-    /// Prepare a process from options and an optional cancellation token.
+    /// Prepare a process from an executable string/URL, URL/Task object, or CommandOptions, with an optional cancellation token.
     #[napi(constructor)]
-    pub fn new(options: CommandOptions, cancellation: Option<CancellationToken>) -> Self {
-        Self {
+    pub fn new(target: ProcessArg<'_>, cancellation: Option<CancellationToken>) -> napi::Result<Self> {
+        let options = match target {
+            Either3::A(path_or_url) => {
+                let program = if let Some(stripped) = path_or_url.strip_prefix("file://") {
+                    stripped.to_string()
+                } else {
+                    path_or_url
+                };
+                CommandOptions {
+                    program,
+                    args: None,
+                    cwd: None,
+                    env: None,
+                    input: None,
+                    timeout_ms: None,
+                    cleanup_timeout_ms: None,
+                    limits: None,
+                }
+            }
+            Either3::B(opts) => opts,
+            Either3::C(obj) => {
+                // If it's a URL object or Task object or generic object:
+                // Check for `href` / `pathname` (URL object) or `program` / `entries` / `exec` / `path` (Task or options)
+                let program: String = if let Ok(Some(href)) = obj.get::<String>("href") {
+                    if let Some(stripped) = href.strip_prefix("file://") {
+                        stripped.to_string()
+                    } else {
+                        href
+                    }
+                } else if let Ok(Some(pathname)) = obj.get::<String>("pathname") {
+                    pathname
+                } else if let Ok(Some(prog)) = obj.get::<String>("program") {
+                    prog
+                } else if let Ok(Some(exec)) = obj.get::<String>("exec") {
+                    exec
+                } else if let Ok(Some(path)) = obj.get::<String>("path") {
+                    path
+                } else if let Ok(Some(entries)) = obj.get::<String>("entries") {
+                    entries
+                } else {
+                    "node".to_string()
+                };
+
+                let args: Option<Vec<String>> = obj.get("args").ok().flatten();
+                let cwd: Option<String> = obj.get("cwd").ok().flatten();
+                let timeout_ms: Option<f64> = obj.get("timeoutMs").ok().flatten().or_else(|| obj.get("timeout_ms").ok().flatten());
+                let cleanup_timeout_ms: Option<f64> = obj.get("cleanupTimeoutMs").ok().flatten().or_else(|| obj.get("cleanup_timeout_ms").ok().flatten());
+
+                CommandOptions {
+                    program,
+                    args,
+                    cwd,
+                    env: None,
+                    input: None,
+                    timeout_ms,
+                    cleanup_timeout_ms,
+                    limits: None,
+                }
+            }
+        };
+
+        Ok(Self {
             options,
             cancellation,
-        }
+        })
+    }
+
+    /// The program/executable configured for this process.
+    #[napi(getter)]
+    pub fn get_program(&self) -> String {
+        self.options.program.clone()
+    }
+
+    /// The arguments configured for this process.
+    #[napi(getter)]
+    pub fn get_args(&self) -> Option<Vec<String>> {
+        self.options.args.clone()
     }
 
     /// Start the command and resolve with its captured output or a structured
