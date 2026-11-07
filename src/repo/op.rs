@@ -579,7 +579,7 @@ impl Repository {
             .map(|v| String::from_utf8_lossy(&v).into_owned())
         {
             let p = std::path::PathBuf::from(custom);
-            if p.is_dir() || p.join("op_store").is_dir() {
+            if p.is_dir() || p.join("op_store").is_dir() || p.exists() {
                 return p;
             }
         }
@@ -601,10 +601,42 @@ impl Repository {
         git_dir.join("ops")
     }
 
-    /// Check whether an op store directory exists.
+    /// Resolve effective SQLite database URL (`core.dbUrl` if configured, otherwise `file:<opsDir>/store.db`).
+    #[napi]
+    pub fn db_url(&self) -> String {
+        let r = thread_local(&self.inner);
+        if let Some(url) = r
+            .config_snapshot()
+            .string("core.dbUrl")
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+        {
+            return url;
+        }
+        let ops_dir = self.ops_dir_path();
+        format!("file:{}/store.db", ops_dir.to_string_lossy())
+    }
+
+    /// Check whether an op store directory exists, automatically ensuring initialization if `core.dbUrl` is configured or `init.storeOp` is true.
     #[napi]
     pub fn is_op_repo(&self) -> bool {
         let r = thread_local(&self.inner);
+        let config_store_op = r.config_snapshot().boolean("init.storeOp").unwrap_or(false);
+        let config_db_url = r.config_snapshot().string("core.dbUrl");
+
+        // If core.dbUrl or init.storeOp is set, ensure opsDir and store.db are initialized even when not running init
+        if config_store_op || config_db_url.is_some() {
+            let base_dir = self.ops_dir_path();
+            if !base_dir.join("op_heads").is_dir() {
+                let _ = self.init_op_repo();
+            }
+            let db_url = self.db_url();
+            let db_path = db_url.trim_start_matches("file:");
+            if !std::path::Path::new(db_path).exists() {
+                let _ = crate::object_store::op::SqlBackend::init(db_url);
+            }
+            return true;
+        }
+
         let git_dir = r.git_dir();
         let config_ops_dir = r
             .config_snapshot()
@@ -681,7 +713,8 @@ impl Repository {
         self.init_op_repo_at(None)
     }
 
-    /// Initialise operation store metadata at a designated directory (or default `<git-dir>/ops`).
+    /// Initialise operation store metadata at a designated directory (or default `<git-dir>/ops`),
+    /// automatically initializing the SQLite database `store.db` under WAL mode.
     #[napi]
     pub fn init_op_repo_at(&self, ops_dir: Option<String>) -> napi::Result<OpHeadsStore> {
         let base_dir = match ops_dir {
@@ -690,6 +723,19 @@ impl Repository {
         };
         let r = thread_local(&self.inner);
         let head_id = r.head_commit().ok().map(|c| c.id.to_string());
+
+        // Initialize SQLite database at core.dbUrl or file:<opsDir>/store.db
+        let db_url = if let Some(url) = r
+            .config_snapshot()
+            .string("core.dbUrl")
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+        {
+            url
+        } else {
+            format!("file:{}/store.db", base_dir.to_string_lossy())
+        };
+        let _ = crate::object_store::op::SqlBackend::init(db_url);
+
         OpHeadsStore::init(base_dir.to_string_lossy().into_owned(), head_id)
     }
 

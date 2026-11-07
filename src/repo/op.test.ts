@@ -70,6 +70,25 @@ describe("Repository Op and Workspace NAPI bindings", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("supports core.dbUrl and auto-initializes opsDir and store.db even without running init", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "repo-dburl-test-"));
+    // Standard git init without storeOp
+    const repo = Repository.init(tmpDir);
+    expect(repo.isOpRepo()).toBe(false);
+
+    // Set core.dbUrl in config
+    const customDb = path.join(tmpDir, "custom.db");
+    repo.configSet("core.dbUrl", `file:${customDb}`);
+
+    // Reopen repository: isOpRepo auto-detects and initializes opsDir and store.db
+    const reopened = Repository.open(tmpDir);
+    expect(reopened.dbUrl()).toBe(`file:${customDb}`);
+    expect(reopened.isOpRepo()).toBe(true);
+    expect(fs.existsSync(customDb)).toBe(true);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it("tests OpStoreOpts with custom opsDir and recursive creation", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "opstore-opts-test-"));
     const nestedOpsDir = path.join(tmpDir, "nested", "deep", "ops_store");

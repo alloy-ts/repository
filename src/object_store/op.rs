@@ -839,6 +839,12 @@ impl SqlBackend {
 
     #[napi(factory)]
     pub fn init(database_url: String) -> napi::Result<SqlBackend> {
+        let clean_path = database_url.trim_start_matches("file:");
+        if let Some(parent) = Path::new(clean_path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
         let mut conn =
             SqliteConnection::establish(&database_url).map_err(|e| err("init_sql_backend", e))?;
 
