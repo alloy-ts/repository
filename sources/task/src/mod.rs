@@ -13,7 +13,9 @@ use napi_derive::napi;
 
 use libuv::{AsyncHandle, HandleTrait, Loop, ReqTrait, WorkReq as TaskReq};
 
+pub mod cluster;
 pub mod process;
+pub use cluster::*;
 pub mod promise;
 pub mod scheduler;
 pub mod thread;
