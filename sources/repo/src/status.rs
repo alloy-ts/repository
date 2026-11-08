@@ -1033,7 +1033,7 @@ impl Task for IsDirtyTask {
 // NAPI methods
 // ---------------------------------------------------------------------------
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Compute the full working tree status asynchronously. Returns a [`Status`]
     /// whose `entries` holds one element per changed path with the staged

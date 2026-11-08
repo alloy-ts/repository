@@ -203,7 +203,7 @@ impl gix::progress::Progress for ProgressCallback {
 /// Parsed progress information as sent by a git server during fetch, clone and push operations.
 ///
 /// Build one from a raw server progress `line` with [`RemoteProgress::from_bytes`].
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct RemoteProgress {
     /// The name of the action, like `"Receiving objects"` or `"Resolving deltas"`.
     pub action: String,
@@ -277,7 +277,7 @@ fn parse_byte_counts(text: &str) -> (Option<f64>, Option<f64>) {
     (found.first().copied(), found.get(1).copied())
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl RemoteProgress {
     /// Parse a remote progress `line` (as sent by the git server) into structured progress.
     ///

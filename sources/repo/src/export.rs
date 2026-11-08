@@ -1652,7 +1652,7 @@ impl Task for RepositoryExportTask {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Serialise this repository into a fast-export stream.
     ///

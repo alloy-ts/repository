@@ -27,14 +27,14 @@ pub struct HeadOptions {
 }
 
 /// The repository HEAD, exposed to TypeScript.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Head {
     inner: Option<Arc<gix::ThreadSafeRepository>>,
     referent: Option<String>,
     kind: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Head {
     /// Construct a `Head` from [`HeadOptions`].
     #[napi(constructor)]
@@ -128,7 +128,7 @@ impl Head {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// The repository `HEAD`.
     #[napi]

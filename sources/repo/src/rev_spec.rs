@@ -55,7 +55,7 @@ fn rev_spec_to_info(spec: &gix::revision::Spec) -> RevSpec {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Resolve a single revision specification (e.g. `HEAD~1`, `main`, `<sha>`) to an id.
     #[napi]

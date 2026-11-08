@@ -88,6 +88,7 @@ rustls-native-certs = "0.8"
 url = "2.5"
 http-request = "22.2.0"
 rocket = "0.5.2"
+serde_yaml = "0.9.34"
 
 [build-dependencies]
 napi-build = "2.6.0"

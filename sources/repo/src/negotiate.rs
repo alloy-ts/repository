@@ -98,7 +98,7 @@ pub fn negotiation_window_size(stateless: bool, previous: Option<u32>) -> u32 {
 ///
 /// Async: the (blocking) network transfer and object traversal run on a libuv
 /// task thread.
-#[napi]
+#[napi(namespace = "Repository")]
 impl Remote {
     pub fn prepare_negotiation(
         &self,

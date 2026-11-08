@@ -19,7 +19,7 @@ pub enum ResetMode {
     Hard,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Move HEAD to `revision` (any rev-parse spec; tags/objects peeled to a
     /// commit) like `git reset --soft/--mixed/--hard <revision>`, and return the

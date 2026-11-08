@@ -104,7 +104,7 @@ fn resolve_glob(
     Ok(out)
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Walk reachable commits from the given tips, with optional sort/reverse/first-parent
     /// control, exclusions, reference globs, and ranges.
@@ -242,7 +242,7 @@ impl Repository {
 /// This is a gix-backed mirror of libgit2's `git_revwalk`. Configuration is accumulated
 /// (push/hide/sort) and the walk is materialised lazily on the first call to
 /// [`next`](Self::next) or [`to_array`](Self::to_array).
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Revwalk {
     inner: Arc<gix::ThreadSafeRepository>,
     tips: Vec<gix::ObjectId>,
@@ -255,7 +255,7 @@ pub struct Revwalk {
     pos: usize,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Revwalk {
     fn new(inner: Arc<gix::ThreadSafeRepository>) -> Self {
         Revwalk {

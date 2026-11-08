@@ -29,13 +29,13 @@ pub enum TagKind {
     Lightweight,
 }
 
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 pub struct Tag {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,
 }
 
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 impl Tag {
     #[napi(getter)]
     pub fn name(&self) -> napi::Result<String> {
@@ -467,7 +467,7 @@ pub struct CreateTagOptions {
     pub force: Option<bool>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Find and decode a tag by id.
     #[napi]

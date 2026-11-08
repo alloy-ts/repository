@@ -25,6 +25,7 @@ pub mod index;
 pub mod init;
 pub mod log;
 pub mod mailmap;
+pub mod manifest;
 pub mod merge;
 pub mod metrics;
 pub mod namespace;
@@ -61,6 +62,7 @@ pub mod tree;
 pub mod workspace;
 pub mod worktree;
 
+pub use manifest::*;
 pub use trailer::*;
 
 use std::sync::Arc;
@@ -207,7 +209,7 @@ pub struct AheadBehind {
 /// | `checkout(hash, dir)` | `repo.checkout(rev, opts?)` (async) |
 /// | `fetch()` | `repo.fetch(remoteName?, opts?)` (async) / `Remote.fetch` |
 /// | `credentials_callback` | `Auth` passed via `auth` option |
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Repository {
     pub(crate) inner: Arc<gix::ThreadSafeRepository>,
 }
@@ -306,7 +308,7 @@ pub struct CatFileOptions {
     pub mode: Option<String>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Create a repository handle.
     ///

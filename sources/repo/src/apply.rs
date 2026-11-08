@@ -352,7 +352,7 @@ fn apply_patch_to_tree(
     Ok(new_id.detach().to_string())
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Apply a unified-diff `patch` onto `baseTreeId` and return the resulting
     /// tree id. Mirrors git2's `Repository::apply_to_tree` (without the `Diff`

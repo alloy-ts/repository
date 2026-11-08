@@ -140,7 +140,7 @@ pub struct CommandContext {
 /// A locked, single-file configuration transaction opened with
 /// [`Repository::configFileMut`]. Dropping it releases the lock without writing;
 /// call [`commit()`](ConfigTransaction::commit) to persist changes.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct ConfigTransaction {
     inner: Option<gix::config::FileTransaction>,
 }
@@ -186,7 +186,7 @@ fn to_config_source(s: ConfigSource) -> gix::config::Source {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Read a single config value as a string.
     #[napi]
@@ -422,7 +422,7 @@ fn signing_options_to_napi(opts: gix::objs::signature::sign::Options) -> Signing
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl ConfigTransaction {
     /// Set a configuration key to `value`, creating the section if needed. `subsection` may
     /// be `null` for top-level sections.
@@ -638,12 +638,12 @@ impl ConfigTransaction {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct ConfigSnapshot {
     pub(crate) inner: gix::config::File,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl ConfigSnapshot {
     /// Read a single configuration value as a string, or `null` if absent.
     #[napi]

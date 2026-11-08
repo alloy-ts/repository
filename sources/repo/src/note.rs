@@ -265,7 +265,7 @@ fn compute_list_notes(
     Ok(out)
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Return the effective default notes reference. When `core.notesRef` is unset
     /// this is git's implicit `refs/notes/commits`; otherwise the configured value.

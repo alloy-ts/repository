@@ -89,12 +89,12 @@ fn parse_hash_kind(s: &str) -> napi::Result<gix::hash::Kind> {
 /// The data may come from a monolithic `objects/info/commit-graph` file, or from one or more
 /// `objects/info/commit-graphs/graph-*.graph` files. Obtain one via
 /// [`Repository::graph`] / [`Repository::graph_if_enabled`].
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Graph {
     inner: Arc<gix::commitgraph::Graph>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Graph {
     /// The number of commits stored in this graph.
     #[napi(getter)]
@@ -227,7 +227,7 @@ impl Graph {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Return info about the commit-graph if it is present *and* enabled, else `null`.
     #[napi]
@@ -311,7 +311,7 @@ impl gix::objs::Find for RepoFind {
 ///
 /// Note: borrow-returning methods of the underlying type (`lookup`, `get_or_insert_commit`, `get`)
 /// are not exposed because they cannot cross the FFI boundary.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct TraversalGraph {
     // Declared before `inner`: it holds the `Arc` behind `inner`'s `cache` reference, so it must be
     // dropped after `inner` (Rust drops fields in declaration order).
@@ -319,7 +319,7 @@ pub struct TraversalGraph {
     inner: gix::revwalk::Graph<'static, 'static, ()>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl TraversalGraph {
     /// Create a new traversal graph backed by `repo`'s object database.
     ///

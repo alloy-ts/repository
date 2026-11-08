@@ -429,7 +429,7 @@ fn native_local_push(
 /// Async: the (blocking) object transfer / `git push` runs on a libuv task
 /// thread and resolves a `Promise<PushOutcome>`, so it does not block the JS
 /// event loop.
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     #[napi(ts_return_type = "Promise<PushOutcome>")]
     pub fn push(

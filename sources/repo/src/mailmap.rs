@@ -25,12 +25,12 @@ pub struct MailmapEntry {
     pub old_email: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Mailmap {
     pub(crate) inner: gix::mailmap::Snapshot,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Mailmap {
     /// Create an empty, in-memory mailmap with no entries.
     ///
@@ -195,7 +195,7 @@ impl Mailmap {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Open and merge the mailmaps that apply to this repository, or `null` if the
     /// resulting mailmap is empty (no `.mailmap` in the worktree, and nothing

@@ -264,7 +264,7 @@ fn render_dirty(rendered: &mut String, count: usize) {
 // NAPI methods
 // ---------------------------------------------------------------------------
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Build a testament to the state of this repository at a commit.
     ///

@@ -20,7 +20,7 @@ use gix::remote::fetch::{RefLogMessage, Shallow};
 ///
 /// Returns a [`FetchOutcome`] describing what changed. Pass [`RemoteFetchOptions`] to
 /// control refspecs, depth, dry-run, reflog and authentication.
-#[napi]
+#[napi(namespace = "Repository")]
 impl Remote {
     #[napi(ts_return_type = "Promise<FetchOutcome>")]
     pub fn fetch(
@@ -388,7 +388,7 @@ fn fetch_with_prune(
 /// Convenience `git fetch` from a named remote (`"origin"` by default). Resolves the remote
 /// and delegates to the same plumbing as [`Remote::fetch`]. Returns a [`FetchOutcome`]
 /// describing what changed.
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     pub fn fetch(
         &self,

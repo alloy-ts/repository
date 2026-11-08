@@ -106,12 +106,12 @@ pub struct ChurnEntry {
 
 /// Code-health metrics over a repository's history. Construct once (it parses the full
 /// history), then call the analysis methods, which operate on the parsed [`CommitInfo`]s.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Metrics {
     inner: Vec<CommitInfo>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Metrics {
     /// Open `repo_path`, walk its history, and collect per-commit [`CommitInfo`]s.
     #[napi(constructor)]

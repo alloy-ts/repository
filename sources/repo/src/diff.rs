@@ -696,7 +696,7 @@ fn compute_tree_worktree_diff(
     Ok(out)
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Diff two trees. When `new_id` is omitted (or `old` is omitted), the corresponding side is
     /// treated as the empty tree, so `diffTreeToTree(tree, null)` reports deletions and

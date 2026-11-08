@@ -25,13 +25,13 @@ use crate::repository::Repository;
 /// state, buffers, and resolved options) is built once and reused across conversions. Each
 /// conversion still rebuilds the per-path attribute lookup on the fly and drains the resulting
 /// stream into a [`Buffer`] for the FFI boundary.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct FilterPipeline {
     repo: Repository,
     pipeline: gix_filter::Pipeline,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl FilterPipeline {
     /// Create a pipeline bound to `repo`. The underlying [`gix_filter::Pipeline`] (driver state,
     /// buffers, resolved options) is constructed once here and reused for every conversion.

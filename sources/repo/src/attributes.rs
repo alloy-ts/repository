@@ -159,13 +159,13 @@ fn attribute_statistics(
 /// owned stack so it can outlive a single FFI call — the borrowed [`gix::AttributeStack`] and its
 /// `Platform` (returned by `at_path`/`at_entry`) cannot cross the FFI boundary, which is why these
 /// query methods run the whole `at_path` + `matching_attributes`/`is_excluded` sequence internally.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct AttributeStack {
     inner: gix::worktree::Stack,
     repo: Arc<gix::ThreadSafeRepository>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl AttributeStack {
     /// Resolve attributes for `relative_path`, reusing this stack's cache. Equivalent to
     /// [`Repository::attributes`](crate::Repository::attributes) but without rebuilding the cache.
@@ -258,7 +258,7 @@ impl AttributeStack {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Check attributes for a relative `relative_path`.
     ///

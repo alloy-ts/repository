@@ -72,7 +72,7 @@ fn collect_conflicts(file: &gix::index::File) -> Vec<Conflict> {
         .collect()
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// List the paths left conflicted by an in-progress merge, rebase, or
     /// cherry-pick, classified into typed [`Conflict`] entries (with

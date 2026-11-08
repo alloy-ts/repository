@@ -216,7 +216,7 @@ impl DirwalkOptions {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Walk the working tree, returning entries filtered by `patterns`.
     ///

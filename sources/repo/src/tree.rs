@@ -17,14 +17,14 @@ use crate::object::{Object, build_object, lossy};
 use crate::repository::Repository;
 
 /// A single entry of a git tree.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct TreeEntry {
     pub(crate) mode: String,
     pub(crate) filename: String,
     pub(crate) id: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl TreeEntry {
     /// The entry mode (`100644`, `100755`, `040000`, `120000`, or `160000`).
     #[napi(getter)]
@@ -112,13 +112,13 @@ impl TreeEntry {
 /// database — which is itself prolly-backed under the hood, so the bytes live
 /// in prolly while every consumer sees plain git. There is no "prolly-backed
 /// tree" mode: git compatibility and prolly storage are the same object here.
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 pub struct Tree {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) oid: gix::ObjectId,
 }
 
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 impl Tree {
     /// Create a new tree from a flat array of [`Entry`] objects, returning a [`Tree`]
     /// with its freshly assigned id.
@@ -739,7 +739,7 @@ pub struct TreeEditInput {
     pub remove_mode: Option<String>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Find and decode a tree by id.
     #[napi]
@@ -988,7 +988,7 @@ pub struct TreeBuilderWriteOptions {
 /// until then. Nodes are persisted under `<git_dir>/prolly` via [`FileNodeStore`].
 ///
 /// Open one via `Tree.build(repo, baseTreeId?)` or `new TreeBuilder(repo, baseTreeId?)`.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct TreeBuilder {
     repo: Arc<gix::ThreadSafeRepository>,
     /// Content-addressed node store driver for [`TreeBuilder::index`].
@@ -1001,7 +1001,7 @@ pub struct TreeBuilder {
     seq: u64,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl TreeBuilder {
     /// Create a builder that applies edits on top of `base_tree_id`, or on top of the
     /// empty tree when omitted. The base tree must exist and be a tree.
@@ -1703,7 +1703,7 @@ pub(crate) fn build_prolly_tree_from_tree(
     build_prolly_tree_values(prolly, pairs, what)
 }
 
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 impl Tree {
     /// Canonicalise (normalise) this tree into a content-addressed fingerprint.
     ///
@@ -1719,7 +1719,7 @@ impl Tree {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Build a canonical prolly tree from `commitId` containing the entire
     /// commit DAG reachable from it: every commit (with its metadata — parents,

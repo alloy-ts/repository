@@ -266,7 +266,7 @@ pub fn branch_name_is_valid(name: String) -> bool {
         .is_ok()
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// List configured branch names.
     ///

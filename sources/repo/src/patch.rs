@@ -128,7 +128,7 @@ pub struct PatchDelta {
 /// * Rename/copy headers (`similarity index`, `rename from/to`) are not
 ///   rendered; [`PatchDelta::status`] reports the rename instead.
 /// * Paths are emitted verbatim (no C-style quoting of unusual characters).
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Patch {
     delta: PatchDelta,
     hunks: Vec<PatchHunk>,
@@ -174,7 +174,7 @@ impl TextFlags {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Patch {
     /// File-level metadata: paths, blob ids, modes, status and the binary flag.
     #[napi]
@@ -603,7 +603,7 @@ fn read_side(
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Build a patch from a single [`Change`] returned by
     /// [`diff_tree_to_tree`](Self::diff_tree_to_tree) — the NAPI counterpart of

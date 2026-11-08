@@ -116,7 +116,7 @@ impl WriteTo for RawTree {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Save the working directory and index state into a new stash commit, recording
     /// it in the `refs/stash` reflog. Returns `null` when there is nothing to stash.

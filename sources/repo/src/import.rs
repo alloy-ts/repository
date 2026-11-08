@@ -2462,7 +2462,7 @@ pub struct GitImportOutput {
 /// importer.done();
 /// const stats = importer.importInto("/path/to/repo");
 /// ```
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Importer {
     inner: GitImporter<Vec<u8>>,
     pending: Option<PendingCommit>,
@@ -2477,7 +2477,7 @@ struct PendingCommit {
     merges: Vec<String>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Importer {
     /// Create a stream that commits to `branch` as `author`.
     ///
@@ -2942,7 +2942,7 @@ impl Task for RepositoryImportTask {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Apply a fast-import stream to this repository.
     #[napi]

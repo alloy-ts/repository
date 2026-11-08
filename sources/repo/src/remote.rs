@@ -84,7 +84,7 @@ where
 }
 
 /// A configured git remote, exposed to TypeScript.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Remote {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) name: Option<String>,
@@ -94,7 +94,7 @@ pub struct Remote {
     pub(crate) interrupt: Arc<AtomicBool>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Remote {
     /// The configured name of this remote, or `null` for an anonymous remote.
     #[napi(getter)]
@@ -778,7 +778,7 @@ fn ls_refs_with_options(
     Ok(custom.into_iter().map(convert_ref).collect())
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// All configured (named) remotes.
     #[napi]

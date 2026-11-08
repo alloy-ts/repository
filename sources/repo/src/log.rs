@@ -370,7 +370,7 @@ fn assign_columns(items: &[&GraphItem]) -> Vec<(u32, Vec<u32>)> {
     out
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Read commit history (a "git log") starting at `options.rev` (or `HEAD`).
     ///

@@ -202,7 +202,7 @@ impl Task for CloneTask {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Clone a repository from `url` into `path`.
     ///
@@ -310,12 +310,12 @@ pub struct CloneOptions {
 /// Unlike the low-level [`Repository::clone`], a `Cloner` carries an authenticator and
 /// lets `path` be omitted — the destination then defaults to a sanitised repository name
 /// derived from `url`, exactly like `git clone <url>`.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Cloner {
     auth: Option<AuthOpts>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Cloner {
     /// Create a `Cloner`. `auth` is applied to every clone unless overridden per call.
     #[napi(constructor)]
