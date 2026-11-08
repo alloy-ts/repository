@@ -474,6 +474,24 @@ export class Server<
     input: string | URL | globalThis.Request,
     options?: RequestInit,
   ): Promise<Response> {
+    if (this.listening) {
+      let targetUrl: string;
+      if (typeof input === "string" || input instanceof URL) {
+        const urlStr = typeof input === "string" ? input : input.toString();
+        if (urlStr.startsWith("http://") || urlStr.startsWith("https://")) {
+          targetUrl = urlStr;
+        } else {
+          targetUrl = `http://127.0.0.1:${this.port}${urlStr.startsWith("/") ? "" : "/"}${urlStr}`;
+        }
+      } else {
+        const parsed = new URL(input.url);
+        targetUrl = `http://127.0.0.1:${this.port}${parsed.pathname}${parsed.search}`;
+      }
+      const init =
+        options ?? (typeof input === "object" && !(input instanceof URL) ? input : undefined);
+      return await globalThis.fetch(targetUrl, init as any);
+    }
+
     let req: Request;
     if (typeof input === "string" || input instanceof URL) {
       const urlStr = typeof input === "string" ? input : input.toString();
