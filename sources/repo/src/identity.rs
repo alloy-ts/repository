@@ -117,7 +117,7 @@ pub fn parse_signature(data: String) -> Option<Signature> {
     Some(signature_from_actor(&sig.trim()))
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Retrieve the default author signature configured for this repository.
     #[napi]

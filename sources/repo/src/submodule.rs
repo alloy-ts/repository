@@ -61,12 +61,12 @@ fn git_in_super(r: &gix::Repository, args: &[&str]) -> napi::Result<()> {
 }
 
 /// A parsed `.gitmodules` file, exposing per-submodule configuration.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct ModulesFile {
     inner: gix::submodule::File,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl ModulesFile {
     /// All submodule names defined in this `.gitmodules` file.
     #[napi]
@@ -182,7 +182,7 @@ fn ignore_to_string(i: Ignore) -> String {
 }
 
 /// Submodule (`.gitmodules`) configuration access on the repository.
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Open the `.gitmodules` file from the worktree, returning `null` if it is absent.
     #[napi]
@@ -256,7 +256,7 @@ pub struct SubmoduleUpdateOptions {
 /// Wraps `gix::Submodule`; each call re-resolves the submodule from the
 /// superproject via [`gix::Repository::submodules`], so the handle stays valid
 /// even as the superproject's index or configuration changes.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Submodule {
     repo: std::sync::Arc<gix::ThreadSafeRepository>,
     name: String,
@@ -280,7 +280,7 @@ impl Submodule {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Submodule {
     /// The submodule's configured name as it appears in `submodule.<name>.*`.
     #[napi]
@@ -744,7 +744,7 @@ impl Submodule {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Return handles for all configured submodules, or an empty list if none.
     #[napi]

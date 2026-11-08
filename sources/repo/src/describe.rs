@@ -45,7 +45,7 @@ pub struct DescribeOutcome {
     pub commits_seen: u32,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Describe a commit the way `git describe` does: find the closest tag or
     /// branch that contains it and count the commits in between.
@@ -121,7 +121,7 @@ impl Repository {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Object {
     /// Describe this object the way `git describe` does: find the closest tag or
     /// branch that contains it and count the commits in between. Returns `null`

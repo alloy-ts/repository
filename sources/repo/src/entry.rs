@@ -116,7 +116,7 @@ pub struct Mode {
 
 /// A single record of a git tree: a `{ mode, filename, id }` triple bound to a
 /// repository (unless detached) and, once resolved through a tree, to that tree.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Entry {
     /// `None` for detached entries ([`Entry::detached`]) that carry no repository binding.
     pub(crate) repo: Option<Arc<gix::ThreadSafeRepository>>,
@@ -127,7 +127,7 @@ pub struct Entry {
     pub(crate) id: gix::ObjectId,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Entry {
     /// Create a new entry by writing `opts.content` into the object database as a
     /// blob and describing it as `{ mode, path, id }`.

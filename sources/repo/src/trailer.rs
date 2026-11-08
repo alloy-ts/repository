@@ -30,7 +30,7 @@ impl TrailerObject {
 /// A key-value pair representing a trailer in a commit message, of the
 /// form `Key: Value`.
 #[derive(Debug, PartialEq, Eq, Clone)]
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Trailer {
     /// trailer key
     pub key: String,
@@ -41,7 +41,7 @@ pub struct Trailer {
     pub value: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Trailer {
     /// Construct a new Trailer with key and value.
     #[napi(constructor)]

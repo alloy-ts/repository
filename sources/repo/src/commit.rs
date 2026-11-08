@@ -181,13 +181,13 @@ fn prettify_message(message: &str, comment_char: Option<u8>) -> String {
 }
 
 /// A git commit exposed to TypeScript.
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 pub struct Commit {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,
 }
 
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 impl Commit {
     /// The object id of this commit.
     #[napi(getter)]
@@ -1004,7 +1004,7 @@ pub struct CommitInput {
     pub extra_headers: Option<Vec<CommitHeaderEntry>>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Find and decode a commit by id.
     #[napi]
@@ -1209,7 +1209,7 @@ pub struct CommitAllOptions {
     pub sign: Option<bool>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Create a commit on the current branch (or `reference`) that includes every
     /// change in the worktree — the high-level convenience equivalent of

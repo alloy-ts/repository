@@ -15,7 +15,7 @@ use crate::tag::{Tag, build_tag};
 use crate::tree::{Tree, build_tree};
 
 /// A git reference (branch, tag, or HEAD) exposed to TypeScript.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Reference {
     repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) name: String,
@@ -26,7 +26,7 @@ pub struct Reference {
     target_peel: Option<String>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Reference {
     #[napi(getter)]
     pub fn name(&self) -> String {
@@ -817,7 +817,7 @@ fn build_ref_edit(input: &RefEditInput) -> napi::Result<gix::refs::transaction::
     Ok(edit.with_deref(deref))
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Point HEAD at a commit id (detached HEAD) or at a branch/ref name (symbolic HEAD).
     ///

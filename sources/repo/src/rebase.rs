@@ -256,7 +256,7 @@ fn update_rebased_ref(
 /// repository until `finish()`: replayed commits are written to the object
 /// database and the branch ref is only moved by `finish()`. Conflicts stay
 /// in memory — resolve them by passing a `resolvedTree` to `commit()`.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Rebase {
     repo: Arc<gix::ThreadSafeRepository>,
     orig_head_name: Option<String>,
@@ -275,7 +275,7 @@ pub struct Rebase {
     finished: bool,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Rebase {
     /// The number of planned rebase operations.
     #[napi(getter)]
@@ -437,7 +437,7 @@ impl Rebase {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Start an in-memory rebase session: plan the commits to replay and
     /// return a step-driven `Rebase` handle.

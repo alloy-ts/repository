@@ -8,13 +8,13 @@ use crate::error::{err, err_str, parse_oid, thread_local};
 use crate::object::{Object, build_object};
 use crate::repository::Repository;
 
-#[napi(namespace = "object", js_name = "GitBlob")]
+#[napi(namespace = "Repository", js_name = "GitBlob")]
 pub struct Blob {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,
 }
 
-#[napi(namespace = "object")]
+#[napi(namespace = "Repository")]
 impl Blob {
     #[napi(constructor)]
     pub fn new(repo: Option<&Repository>, content: Either<String, Buffer>) -> napi::Result<Self> {
@@ -90,7 +90,7 @@ pub fn build_blob(repo: &Arc<gix::ThreadSafeRepository>, id: gix::ObjectId) -> B
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Find a blob by id (content is read lazily via [`Blob::content`]).
     #[napi]

@@ -783,7 +783,7 @@ fn resolve_rev(r: &gix::Repository, spec: &str, what: &str) -> napi::Result<gix:
         .map_err(|e| err(what, e))
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// The merge base of two commits, if any.
     #[napi]

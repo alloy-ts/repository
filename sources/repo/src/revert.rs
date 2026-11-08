@@ -128,7 +128,7 @@ fn resolve_ours(r: &gix::Repository, ours: Option<&str>) -> napi::Result<String>
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Revert `revertCommit` onto `ourCommit` and return the resulting index
     /// (git2's `Repository::revert_commit`). When the revert produces conflicts

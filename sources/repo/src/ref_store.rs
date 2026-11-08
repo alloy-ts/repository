@@ -69,7 +69,7 @@ pub fn init_backend(_version: Option<u32>) -> RefStoreType {
 /// wrapper that carries the repository and exposes the `git_ref_store_*`
 /// operations against it. Construct it with [`RefStore::new`] (or
 /// [`RefStore::open`]) from a [`Repository`].
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct RefStore {
     repo: Arc<gix::ThreadSafeRepository>,
 }
@@ -128,7 +128,7 @@ pub struct RefEditOptions {
     pub message: Option<String>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl RefStore {
     /// Bind a new, unopened reference store to `repository`.
     ///
@@ -899,14 +899,14 @@ impl RefStore {
 /// Mirrors the C `git_reference_iterator`. Each call to [`next`](Self::next)
 /// re-resolves the next name (yielding a [`Reference`]) while
 /// [`next_name`](Self::next_name) returns just the name.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct ReferenceIterator {
     repo: Arc<gix::ThreadSafeRepository>,
     names: Vec<String>,
     pos: usize,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl ReferenceIterator {
     /// Return the next reference, or `null` when exhausted.
     #[napi]
@@ -943,7 +943,7 @@ impl ReferenceIterator {
 /// `git_ref_store_unlock` pair. Because gix locks only for the duration of an
 /// edit transaction, the lock carries the ref name and defers the actual write
 /// to [`unlock`](Self::unlock).
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct RefLock {
     repo: Arc<gix::ThreadSafeRepository>,
     /// The reference this lock guards.
@@ -951,7 +951,7 @@ pub struct RefLock {
     pub ref_name: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl RefLock {
     /// Release the lock without applying any change.
     #[napi]

@@ -128,13 +128,13 @@ fn reflog_file_path(r: &gix::Repository, name: &str) -> napi::Result<PathBuf> {
 /// persists changes immediately (gix has no deferred reflog buffer). Read the
 /// entries with [`entries`](Self::entries)/[`get`](Self::get); append with
 /// [`append`](Self::append).
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Reflog {
     repo: Arc<gix::ThreadSafeRepository>,
     name: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Reflog {
     /// The reference name this reflog belongs to.
     #[napi(getter)]
@@ -208,7 +208,7 @@ impl Reflog {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Whether a reflog exists for the given reference name.
     #[napi]

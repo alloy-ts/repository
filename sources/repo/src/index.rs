@@ -397,12 +397,12 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
 ///
 /// Returned by [`Repository::index()`], [`Repository::open_index()`], [`Repository::try_index()`],
 /// [`Repository::index_or_load()`] and [`Repository::index_from_tree()`].
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Index {
     pub(crate) inner: gix::index::File,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Index {
     /// The number of entries in the index.
     #[napi]
@@ -996,7 +996,7 @@ pub struct IndexOpenOptions {
     pub alloc_limit_bytes: Option<f64>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Open the shared, auto-updating worktree index; fails if no index exists yet.
     #[napi]
@@ -1276,12 +1276,12 @@ impl Repository {
 ///
 /// Note: `IndexEntry.mode` (in `crate::repository`) is still exposed as a string for backward
 /// compatibility; construct this type to access the structured predicates.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct IndexEntryMode {
     pub(crate) inner: gix::index::entry::Mode,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl IndexEntryMode {
     /// Parse an `IndexEntryMode` from a git mode string: `100644`, `100755`,
     /// `040000`/`40000`, `120000`, `160000`. Any other value defaults to `100644`
@@ -1351,7 +1351,7 @@ impl IndexEntryMode {
 /// Obtained via [`lstat()`], which does not follow symlinks; this is the same `lstat`-based
 /// metadata git uses when populating index entries. On non-unix platforms the device/inode/user
 /// ids and the executable/symlink bits fall back to platform defaults (0 / false).
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct IndexFsMetadata {
     inner: gix::index::fs::Metadata,
 }
@@ -1364,7 +1364,7 @@ fn system_time_to_index_timestamp(t: std::time::SystemTime) -> IndexTimestamp {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl IndexFsMetadata {
     /// `true` if the path is a directory.
     #[napi(getter)]
@@ -1476,7 +1476,7 @@ pub struct ChunkInput {
 /// Use [`ChunkIndex::from_bytes`] to read an existing chunk file's index (commit-graph,
 /// multi-pack-index, etc.), or [`ChunkIndex::for_writing`] + [`ChunkIndex::plan_chunk`] +
 /// [`ChunkIndex::write`] to produce one.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct ChunkIndex {
     inner: gix_chunk::file::Index,
     // Only populated for indexes decoded from bytes (used by `chunks()`); empty otherwise.
@@ -1503,7 +1503,7 @@ fn chunk_id(kind: &str) -> napi::Result<[u8; 4]> {
     Ok(id)
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl ChunkIndex {
     /// Decode a chunk-file table of contents from `data`, starting at `tocOffset`, containing
     /// `numChunks` chunks. Throws on a malformed table of contents.

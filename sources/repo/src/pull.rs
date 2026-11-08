@@ -86,7 +86,7 @@ pub struct PullOutcome {
 }
 
 /// Pull and fetch operations for Git repositories.
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Fetch from a named remote and integrate the result into the current branch — the
     /// `git pull` operation.

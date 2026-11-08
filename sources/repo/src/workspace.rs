@@ -77,7 +77,7 @@ pub struct CheckoutStats {
 
 /// A registry of store factory names supported by the repository.
 #[derive(Clone, Debug, Default)]
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct StoreFactories {
     backends: Vec<String>,
     workspace_stores: Vec<String>,
@@ -87,7 +87,7 @@ pub struct StoreFactories {
     submodule_stores: Vec<String>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl StoreFactories {
     #[napi(constructor)]
     pub fn new() -> Self {
@@ -195,13 +195,13 @@ pub fn default_submodule_store_initializer() -> String {
 }
 
 /// An active locked working copy / workspace lock.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct LockedWorkspace {
     workspace_root: PathBuf,
     lock_file: PathBuf,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl LockedWorkspace {
     /// Finish the mutation and record the resulting operation.
     #[napi]
@@ -229,7 +229,7 @@ impl LockedWorkspace {
 }
 
 /// Represents the combination of a repository and working copy.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Workspace {
     workspace_root: PathBuf,
     repo_path: PathBuf,
@@ -237,7 +237,7 @@ pub struct Workspace {
     repo: Repository,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Workspace {
     /// Initialize a simple workspace at `workspace_root`.
     #[napi]
@@ -387,14 +387,14 @@ impl Workspace {
 }
 
 /// Helper that inspects and loads a `Workspace` from `.jj/` files.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct WorkspaceLoader {
     workspace_root: PathBuf,
     repo_path: PathBuf,
     working_copy_state_path: PathBuf,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl WorkspaceLoader {
     #[napi(constructor)]
     pub fn new(workspace_root: String) -> napi::Result<WorkspaceLoader> {

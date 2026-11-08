@@ -27,7 +27,7 @@ pub fn namespace_expand(namespace: String) -> napi::Result<String> {
         .map_err(|e| err("namespace_expand", e))
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Return the currently set reference namespace in its canonical
     /// `refs/namespaces/<name>/` form, if any.
@@ -70,7 +70,7 @@ impl Repository {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Reference {
     /// Return the full validated name of this reference with the given reference
     /// namespace stripped, or `null` if the name isn't prefixed with it.

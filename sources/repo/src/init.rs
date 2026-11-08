@@ -44,7 +44,7 @@ fn to_gix_create_options(o: &InitOptions) -> gix::create::Options {
     opts
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Initialise a repository with the given `options` (`bare`, `destinationMustBeEmpty`, open options,
     /// `initialHead` for the default branch, `description`, `objectFormat` and `compatObjectFormat`).

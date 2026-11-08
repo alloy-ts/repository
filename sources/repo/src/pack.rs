@@ -41,7 +41,7 @@ use crate::rev_walk::WalkOptions;
 /// A single entry (full or delta object) within a pack data file, mirroring `gix_pack::data::Entry`.
 ///
 /// Decode one with [`PackEntry::from_bytes`], then read its [`PackEntry::header`], sizes and offsets.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct PackEntry {
     inner: gix_pack::data::Entry,
 }
@@ -64,7 +64,7 @@ fn hash_kind(s: &str) -> napi::Result<gix::hash::Kind> {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl PackEntry {
     /// Decode a pack entry from the start of `data` (the bytes of a pack data file, or a slice
     /// beginning at `packOffset`). `packOffset` is the absolute byte offset of this entry within the
@@ -136,12 +136,12 @@ impl PackEntry {
 
 /// The header portion of a pack entry: the kind of stored object, or (for deltas) how the base is
 /// identified. Mirrors `gix_pack::data::entry::Header`.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct PackEntryHeader {
     inner: PackHeader,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl PackEntryHeader {
     /// The entry kind: `"blob"`, `"tree"`, `"commit"`, `"tag"`, `"ofs_delta"`, or `"ref_delta"`.
     #[napi(getter)]
@@ -247,7 +247,7 @@ pub struct PackOperationOptions {
 ///
 /// Insertion methods are synchronous and only record intent; the heavy counting, compression
 /// and (optionally) indexing work happens in the terminal async call.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Pack {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) threads: Option<usize>,
@@ -479,7 +479,7 @@ fn extract(
     (progress, cancellation)
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Pack {
     /// Create a pack builder for `repository`.
     ///

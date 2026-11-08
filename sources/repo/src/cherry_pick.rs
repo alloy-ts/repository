@@ -56,7 +56,7 @@ pub struct CherryPickResult {
     pub empty: bool,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Apply the changes introduced by commit `sha` onto the current `HEAD` (a cherry-pick).
     ///

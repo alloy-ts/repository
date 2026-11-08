@@ -122,12 +122,12 @@ fn to_instruction(i: gix::refspec::Instruction<'_>) -> RefSpecInstruction {
 ///
 /// Build one with [`RefSpec.parse()`] (static factory in JS), then inspect its sides,
 /// derived instruction, and prefixes.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct RefSpec {
     inner: gix::refspec::RefSpec,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl RefSpec {
     /// Parse `spec` for use in `operation` and return it if it is valid.
     ///
@@ -391,12 +391,12 @@ fn to_mapping(m: &gix::refspec::match_group::Mapping<'_, '_>) -> RefSpecMapping 
 
 /// Match a list of refspecs in order while handling negation, conflicts, and
 /// one-to-many mappings.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct MatchGroup {
     specs: Vec<gix::refspec::RefSpec>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl MatchGroup {
     /// Create a match group from already-parsed refspecs, keeping only those whose
     /// operation matches `operation` (fetch specs for fetch, push specs for push),

@@ -214,13 +214,13 @@ pub fn is_pathspec_valid(
 ///
 /// Note: patterns that reference attributes (via the `:(attr:…)` magic syntax) are parsed,
 /// but matching such patterns requires an attributes source and is not supported.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Pathspec {
     repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) inner: gix::PathspecDetached,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Pathspec {
     /// Whether `path` is included by these pathspecs (i.e. matches and is not excluded).
     ///
@@ -297,7 +297,7 @@ impl Pathspec {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Create a pathspec from `patterns` that can match repository paths.
     ///

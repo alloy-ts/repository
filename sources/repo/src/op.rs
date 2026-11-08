@@ -17,12 +17,12 @@ use crate::repository::Repository;
 
 /// Identifier for a [`View`] object.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct ViewId {
     hex: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl ViewId {
     #[napi(constructor)]
     pub fn new(hex: String) -> Self {
@@ -37,12 +37,12 @@ impl ViewId {
 
 /// Identifier for an [`Operation`] object.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct OperationId {
     hex: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl OperationId {
     #[napi(constructor)]
     pub fn new(hex: String) -> Self {
@@ -91,13 +91,13 @@ impl RefTarget {
 
 /// Remote bookmark or tag.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct RemoteRef {
     target: RefTarget,
     state: RemoteRefState,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl RemoteRef {
     #[napi(constructor)]
     pub fn new(target: RefTarget, state: RemoteRefState) -> Self {
@@ -140,13 +140,13 @@ impl RemoteRef {
 
 /// Represents the state of the remote repository.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct RemoteView {
     pub(crate) bookmarks: HashMap<String, RemoteRef>,
     pub(crate) tags: HashMap<String, RemoteRef>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl RemoteView {
     #[napi(constructor)]
     pub fn new() -> Self {
@@ -176,7 +176,7 @@ impl RemoteView {
 
 /// Represents the way the repository looks at a given time.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct View {
     head_ids: Vec<String>,
     local_bookmarks: HashMap<String, RefTarget>,
@@ -185,7 +185,7 @@ pub struct View {
     wc_commit_ids: HashMap<String, String>,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl View {
     #[napi(constructor)]
     pub fn new(head_ids: Vec<String>) -> Self {
@@ -238,7 +238,7 @@ impl View {
 /// Represents an operation (transaction) on the repository view,
 /// storing a pointer to the `OpStore` the operation belongs to.
 #[derive(Clone)]
-#[napi(js_name = "Operation")]
+#[napi(namespace = "Repository", js_name = "Operation")]
 pub struct Operation {
     op_store: Option<OpStore>,
     id: OperationId,
@@ -248,7 +248,7 @@ pub struct Operation {
 
 pub type Op = Operation;
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Operation {
     /// Construct a new Operation object.
     #[napi(constructor)]
@@ -569,7 +569,7 @@ pub struct ReparentStats {
     pub unreachable_count: u32,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     fn ops_dir_path(&self) -> std::path::PathBuf {
         let r = thread_local(&self.inner);

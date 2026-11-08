@@ -624,7 +624,7 @@ fn replace_type(entry_path: &Option<String>, kind: &str) -> String {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Replace `object` (given by id or rev-spec) with `content`, recording a
     /// revision history under `refs/replace/*`.

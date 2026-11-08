@@ -494,7 +494,7 @@ fn delete_snapshot(repo: &Arc<gix::ThreadSafeRepository>, id: &str) -> napi::Res
 /// A worktree is a checkout directory registered under `$GIT_DIR/worktrees/<id>`,
 /// sharing the object database with the repository while keeping its own `HEAD`,
 /// index and other per-worktree files.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Worktree {
     repo: Arc<gix::ThreadSafeRepository>,
     /// The checkout location (working tree root).
@@ -505,7 +505,7 @@ pub struct Worktree {
     git_dir: String,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Worktree {
     /// Create a linked worktree at `path`, checked out at `commit` with a detached `HEAD`.
     ///
@@ -1040,7 +1040,7 @@ impl Worktree {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// List secondary worktrees for this repository.
     #[napi]

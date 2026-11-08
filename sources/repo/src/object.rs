@@ -142,7 +142,7 @@ pub(crate) fn message_body(message: &[u8]) -> Option<String> {
 /// the "real" object (like `gix::objs::Object`), so it can be constructed from any
 /// of the object types via the `fromBlob` / `fromCommit` / `fromTree` / `fromTag` /
 /// `fromEntry` static constructors.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Object {
     pub(crate) repo: Arc<gix::ThreadSafeRepository>,
     pub(crate) id: gix::ObjectId,
@@ -175,7 +175,7 @@ pub(crate) fn build_object(
     })
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Object {
     /// The object id of this object.
     #[napi(getter)]
@@ -573,12 +573,12 @@ pub(crate) fn string_to_kind(s: &str) -> napi::Result<gix::object::Kind> {
 /// oid.isZero(); // false
 /// Oid.fromBytes(oid.toBytes()).equals(oid); // true
 /// ```
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Oid {
     inner: gix::hash::ObjectId,
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Oid {
     /// Parse a hex object id: 40 hex characters for SHA-1 or 64 for SHA-256. Throws on
     /// empty, wrongly-sized, or non-hex input — abbreviated ids are not object ids.
@@ -784,7 +784,7 @@ pub fn oid_from_bytes(bytes: Buffer) -> napi::Result<String> {
     Ok(oid.to_string())
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Find an object of any kind, returning a wrapper holding its decoded content.
     #[napi]

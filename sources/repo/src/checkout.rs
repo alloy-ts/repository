@@ -313,7 +313,7 @@ impl Task for CheckoutIndexTask {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Checkout a rev (commit id, branch, or tag) asynchronously, updating
     /// `HEAD` (detached for a non-branch rev), the index, and the working tree.

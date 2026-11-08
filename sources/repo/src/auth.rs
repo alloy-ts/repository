@@ -57,7 +57,7 @@ pub struct AuthOpts {
 /// Build it from [`AuthOpts`] or start empty and configure with the `add*`/`try*`
 /// methods, then pass it to an authenticated operation (`Repository.clone`/`fetch`/`push`). The
 /// authenticator is translated into git env vars + `-c` config overrides at apply time.
-#[napi]
+#[napi(namespace = "Repository")]
 pub struct Auth {
     credentials: Vec<CredentialEntry>,
     credential_helper: bool,
@@ -232,7 +232,7 @@ impl Drop for EnvGuard {
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Auth {
     /// Create an authenticator from options, or an empty one with headless defaults if omitted.
     #[napi(constructor)]

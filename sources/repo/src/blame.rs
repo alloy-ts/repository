@@ -272,7 +272,7 @@ fn map_outcome(r: &gix::Repository, outcome: gix::blame::Outcome, resolve: bool)
     }
 }
 
-#[napi]
+#[napi(namespace = "Repository")]
 impl Repository {
     /// Compute a blame for `file_path` (relative to the repository root), starting from
     /// `commit_id` (or `HEAD` if omitted). Returns the per-hunk blame entries plus the full
