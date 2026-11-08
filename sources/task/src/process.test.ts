@@ -428,3 +428,30 @@ describe("runCommand", () => {
     }
   });
 });
+
+test("queued Task cancellation settles done without an unhandled rejection", async () => {
+  const moduleUrl = new URL("../../../dist/index.js", import.meta.url).href;
+  const source = `
+    (async () => {
+      const { Task } = await import(${JSON.stringify(moduleUrl)});
+      const { pbkdf2 } = require('node:crypto');
+      const occupied = new Promise((resolve, reject) => {
+        pbkdf2('password', 'salt', 200000, 32, 'sha256', error => error ? reject(error) : resolve());
+      });
+      const task = new Task({ entries: "throw new Error('cancelled task must not execute')" });
+      const exited = new Promise(resolve => task.addEventListener('exit', event => resolve(event.code)));
+      if (!task.cancel()) throw new Error('task was not queued');
+      await Promise.all([occupied, task.done()]);
+      if (await exited !== 1) throw new Error('expected cancelled exit');
+      process.stdout.write('cancelled');
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `;
+  const child = new Process({
+    ...nodeCommand(source),
+    env: [{ name: "UV_THREADPOOL_SIZE", value: "1" }],
+  });
+  const result = await child.run();
+  expect(result.output!.stderr.toString()).toBe("");
+  expect(result.output!.success).toBe(true);
+  expect(result.output!.stdout.toString()).toBe("cancelled");
+});

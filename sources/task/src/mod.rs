@@ -977,6 +977,14 @@ where
         }
         Ok(())
     }
+
+    fn finally(mut self, _env: Env) -> Result<()> {
+        // Node-API skips resolve/reject when work is cancelled before compute.
+        if let Some(deliver) = self.deliver.take() {
+            deliver(None, true);
+        }
+        Ok(())
+    }
 }
 
 /// Monotonic, process-unique id for each [`Task`] instance.
@@ -1141,6 +1149,11 @@ impl Task {
             work: Some(task),
             deliver: Some(on_loop),
         })?;
+        // Only done()/terminate() are public. Observe the private work promise
+        // so Node-API's AbortError cannot become an unhandled rejection.
+        task_req
+            .promise_object()
+            .catch::<Unknown<'static>, (), _>(|_| Ok(()))?;
 
         Ok(Task {
             process_options,
