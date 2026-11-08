@@ -22,6 +22,8 @@ export type { ServerOptions } from "./net/server.ts";
 export { File, Blob } from "./fs/file.ts";
 export const Worker = dist.Task;
 export type Worker = dist.Task;
+export { ServiceWorker, ServiceWorkerRegistration } from "../../../dist/index.js";
+export type { ServiceWorkerOptions, ServiceWorkerState } from "../../../dist/index.js";
 // Node's adapters preserve EventEmitter, stream, callback, and error semantics.
 export * as net from "node:net";
 export * as http from "node:http";

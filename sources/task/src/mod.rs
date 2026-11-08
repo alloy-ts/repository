@@ -17,7 +17,12 @@ pub mod cluster;
 pub mod process;
 pub mod promise;
 pub mod scheduler;
+pub mod service_worker;
 pub mod thread;
+
+pub use service_worker::{
+    ServiceWorker, ServiceWorkerOptions, ServiceWorkerRegistration, ServiceWorkerState,
+};
 
 use self::thread::ThreadPool;
 use crate::error::{err, thread_local};
