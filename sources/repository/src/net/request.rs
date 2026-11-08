@@ -28,195 +28,7 @@ pub struct RequestInit {
     pub r#type: Option<String>,
 }
 
-/// Options for constructing a [`Response`].
-#[napi(object)]
-#[derive(Default, Clone)]
-pub struct ResponseInit {
-    pub status: Option<u16>,
-    pub status_text: Option<String>,
-    pub headers: Option<HashMap<String, String>>,
-}
-
-/// A Web-compatible `Response` object.
-#[napi]
-pub struct Response {
-    status: u16,
-    status_text: String,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
-    url: String,
-    redirected: bool,
-}
-
-#[napi]
-impl Response {
-    #[napi(constructor)]
-    pub fn new(body: Option<Either<String, Buffer>>, init: Option<ResponseInit>) -> Self {
-        let init = init.unwrap_or_default();
-        let status = init.status.unwrap_or(200);
-        let status_text = init.status_text.unwrap_or_else(|| {
-            match status {
-                200 => "OK",
-                201 => "Created",
-                204 => "No Content",
-                301 => "Moved Permanently",
-                302 => "Found",
-                304 => "Not Modified",
-                400 => "Bad Request",
-                401 => "Unauthorized",
-                403 => "Forbidden",
-                404 => "Not Found",
-                500 => "Internal Server Error",
-                _ => "",
-            }
-            .to_string()
-        });
-        let headers = init.headers.unwrap_or_default();
-        let body_bytes = match body {
-            Some(Either::A(s)) => s.into_bytes(),
-            Some(Either::B(b)) => b.to_vec(),
-            None => Vec::new(),
-        };
-
-        Response {
-            status,
-            status_text,
-            headers,
-            body: body_bytes,
-            url: String::new(),
-            redirected: false,
-        }
-    }
-
-    #[napi(getter)]
-    pub fn status(&self) -> u16 {
-        self.status
-    }
-
-    #[napi(getter)]
-    pub fn status_text(&self) -> String {
-        self.status_text.clone()
-    }
-
-    #[napi(getter)]
-    pub fn ok(&self) -> bool {
-        self.status >= 200 && self.status < 300
-    }
-
-    #[napi(getter)]
-    pub fn redirected(&self) -> bool {
-        self.redirected
-    }
-
-    #[napi(getter)]
-    pub fn url(&self) -> String {
-        self.url.clone()
-    }
-
-    #[napi(getter)]
-    pub fn headers(&self) -> HashMap<String, String> {
-        self.headers.clone()
-    }
-
-    #[napi]
-    pub async fn text(&self) -> napi::Result<String> {
-        String::from_utf8(self.body.clone())
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("invalid utf-8: {e}")))
-    }
-
-    #[napi(js_name = "json")]
-    pub async fn parse_json(&self) -> napi::Result<serde_json::Value> {
-        let s = self.text().await?;
-        serde_json::from_str(&s).map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("failed to parse json: {e}"))
-        })
-    }
-
-    #[napi]
-    pub async fn array_buffer(&self) -> napi::Result<Buffer> {
-        Ok(self.body.clone().into())
-    }
-
-    #[napi]
-    pub async fn bytes(&self) -> napi::Result<Buffer> {
-        Ok(self.body.clone().into())
-    }
-
-    #[napi]
-    pub fn clone(&self) -> Self {
-        Response {
-            status: self.status,
-            status_text: self.status_text.clone(),
-            headers: self.headers.clone(),
-            body: self.body.clone(),
-            url: self.url.clone(),
-            redirected: self.redirected,
-        }
-    }
-
-    /// Static constructor: `Response.json(data, init)`
-    #[napi(factory, js_name = "json")]
-    pub fn json_factory(data: serde_json::Value, init: Option<ResponseInit>) -> napi::Result<Self> {
-        let json_str = serde_json::to_string(&data).map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("json serialize: {e}"))
-        })?;
-        let mut resp_init = init.unwrap_or_default();
-        let mut headers = resp_init.headers.unwrap_or_default();
-        headers
-            .entry("content-type".to_string())
-            .or_insert_with(|| "application/json".to_string());
-        resp_init.headers = Some(headers);
-        Ok(Response::new(Some(Either::A(json_str)), Some(resp_init)))
-    }
-
-    /// Static constructor: `Response.redirect(url, status)`
-    #[napi(factory)]
-    pub fn redirect(url: String, status: Option<u16>) -> napi::Result<Self> {
-        let status = status.unwrap_or(302);
-        let mut headers = HashMap::new();
-        headers.insert("location".to_string(), url);
-        Ok(Response::new(
-            None,
-            Some(ResponseInit {
-                status: Some(status),
-                status_text: None,
-                headers: Some(headers),
-            }),
-        ))
-    }
-
-    /// Static constructor: `Response.error()`
-    #[napi(factory)]
-    pub fn error() -> Self {
-        Response {
-            status: 0,
-            status_text: String::new(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-            url: String::new(),
-            redirected: false,
-        }
-    }
-}
-
-pub(crate) fn response_from_http_response(hr: http_request::HttpResponse, url: String) -> Response {
-    let status = hr.get_status_code() as u16;
-    let status_text = hr.get_reason_phrase().clone();
-    let mut headers = HashMap::new();
-    for (k, v) in hr.get_headers().iter() {
-        headers.insert(k.to_lowercase(), v.clone());
-    }
-    let body = hr.get_body().clone();
-
-    Response {
-        status,
-        status_text,
-        headers,
-        body,
-        url,
-        redirected: false,
-    }
-}
+pub use crate::net::response::{Response, ResponseInit, response_from_http_response};
 
 /// A Web Fetch API `Request` object.
 ///
@@ -510,11 +322,13 @@ pub(crate) async fn execute_http_request_with_redirect(
             .map_err(|e| napi::Error::from_reason(e.to_string()))?
             .map_err(|e| napi::Error::from_reason(format!("http request failed: {e:?}")))?;
         let mut response = response_from_http_response(outcome, current_url.to_string());
-        response.redirected = redirected;
-        if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+        response.set_redirected(redirected);
+        let status = response.status();
+        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
         }
-        let Some(location) = response.headers.get("location") else {
+        let headers_map = response.headers();
+        let Some(location) = headers_map.get("location") else {
             return Ok(response);
         };
         if redirect_policy == "manual" {
@@ -534,8 +348,8 @@ pub(crate) async fn execute_http_request_with_redirect(
                 headers.remove(key);
             }
         }
-        if ((response.status == 301 || response.status == 302) && current_method == "POST")
-            || (response.status == 303 && current_method != "GET" && current_method != "HEAD")
+        if ((status == 301 || status == 302) && current_method == "POST")
+            || (status == 303 && current_method != "GET" && current_method != "HEAD")
         {
             current_method = "GET".to_owned();
             body = None;
