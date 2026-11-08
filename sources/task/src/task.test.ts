@@ -135,8 +135,11 @@ describe("Task", () => {
 
   test("runs an entry given by file path", async () => {
     const task = new Task({ entries: scriptFile("postMessage('from-file');") });
-    expect(await onceMessage(task)).toBe("from-file");
-    expect(await onceExit(task)).toBe(0);
+    // Both events can be emitted in the same loop callback.
+    const message = onceMessage(task);
+    const exited = onceExit(task);
+    expect(await message).toBe("from-file");
+    expect(await exited).toBe(0);
   });
 
   test("a throwing entry emits exit code 1", async () => {

@@ -5925,6 +5925,7 @@ dependencies = [
  "http-request",
  "itertools 0.13.0",
  "libc",
+ "libloading 0.8.9",
  "libuv",
  "multi-codec",
  "multi-key",
