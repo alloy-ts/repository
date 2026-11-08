@@ -14,6 +14,7 @@ import {
   exec,
   Task,
   TaskSignal,
+  Worker,
 } from "../../repository/src/main.ts";
 
 // `src/task.rs` exports:
@@ -196,6 +197,15 @@ describe("Task", () => {
     // with UV_ECANCELED and `error` + `exit 1` are emitted), false otherwise.
     // Either way the call is safe.
     expect(typeof task.cancel()).toBe("boolean");
+  });
+
+  test("Worker is exported as an alias for Task conforming to MDN Web Worker API", async () => {
+    expect(Worker).toBe(Task);
+    const worker = new Worker({ entries: "postMessage('from-worker');" });
+    const message = onceMessage(worker);
+    const exited = onceExit(worker);
+    expect(await message).toBe("from-worker");
+    expect(await exited).toBe(0);
   });
 });
 

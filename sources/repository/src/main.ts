@@ -20,6 +20,8 @@ export type { RequestOpts, RequestInit, ResponseInit } from "./net/request.ts";
 export { Server } from "./net/server.ts";
 export type { ServerOptions } from "./net/server.ts";
 export { File, Blob } from "./fs/file.ts";
+export const Worker = dist.Task;
+export type Worker = dist.Task;
 // Node's adapters preserve EventEmitter, stream, callback, and error semantics.
 export * as net from "node:net";
 export * as http from "node:http";
