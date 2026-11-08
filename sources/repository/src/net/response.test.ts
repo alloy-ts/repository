@@ -146,6 +146,32 @@ describe("Web Response API conformance", () => {
     expect(text).toContain('"name": "repository"');
   });
 
+  test("blob() returns a Blob representation of the body", async () => {
+    const res = new Response("blob content", {
+      headers: { "content-type": "text/custom" },
+    });
+    const blob = await res.blob();
+    expect(blob).toBeInstanceOf(Blob);
+    expect(blob.size).toBe(12);
+    expect(blob.type).toBe("text/custom");
+    expect(await blob.text()).toBe("blob content");
+  });
+
+  test("ReadableStream body inspection and locking", async () => {
+    const res = new Response("streamed content");
+    expect(res.body).toBeInstanceOf(ReadableStream);
+    const reader = res.body!.getReader();
+    expect(res.bodyUsed).toBe(false);
+
+    // When reader is active/locked, clone should fail
+    expect(() => res.clone()).toThrow();
+
+    const { value, done } = await reader.read();
+    expect(done).toBe(false);
+    expect(new TextDecoder().decode(value)).toBe("streamed content");
+    expect(res.bodyUsed).toBe(true);
+  });
+
   test("validation of status range and null-body statuses", () => {
     // In WHATWG fetch spec, status must be 200..=599
     expect(() => new Response(null, { status: 199 })).toThrow();
