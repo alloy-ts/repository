@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { CancellationToken, createCancellationToken, Process } from "../main.ts";
+import { createCancellationToken, Process } from "../main.ts";
 
 // `yes`/`sleep`/`echo`/`cat` are POSIX utilities; the tests below assume a
 // POSIX shell is on PATH (macOS/Linux). The Windows equivalents are noted where
@@ -87,5 +87,26 @@ describe("Process", () => {
     expect(typeof cleanup.directChildReaped).toBe("boolean");
     expect(typeof cleanup.processTree).toBe("string");
     expect(typeof cleanup.waitTimedOut).toBe("boolean");
+  });
+
+  test("auto-starts when constructed with string executable or URL", async () => {
+    const proc = new Process("node");
+    expect(typeof proc.pid).toBe("number");
+    expect(proc.pid).toBeGreaterThan(0);
+    expect(proc.isDead()).toBe(false);
+    expect(proc.isConnected()).toBe(true);
+    expect(proc.kill("SIGTERM")).toBe(true);
+  });
+
+  test("auto-starts when constructed with URL object", async () => {
+    const proc = new Process(new URL("file:///bin/echo"));
+    expect(typeof proc.pid).toBe("number");
+    expect(proc.pid).toBeGreaterThan(0);
+  });
+
+  test("auto-starts when constructed with task options", async () => {
+    const proc = new Process({ entries: "console.log('from task')" });
+    expect(typeof proc.pid).toBe("number");
+    expect(proc.pid).toBeGreaterThan(0);
   });
 });

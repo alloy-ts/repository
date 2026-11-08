@@ -8,6 +8,7 @@ A `Task` object executes specified JavaScript or TypeScript code, file scripts, 
 
 Submodules under `task`:
 
+- **`cluster`** ([cluster.md](./cluster.md)): Multi-process cluster coordination, fork, IPC, and workload distribution (`Cluster`, `ClusterTask`).
 - **`thread`** ([thread.md](./thread.md)): Direct OS thread handles (`Thread`, `Builder`, `JoinHandle`) and thread-pool wrappers (`ThreadPool`).
 - **`scheduler`** ([scheduler.md](./scheduler.md)): Task scheduling and dispatching (`Scheduler`, `TaskHandle`) managing worker execution pools.
 - **`promise`** ([promise.md](./promise.md)): Native Promise bridging and deferred resolution (`asyncPlus100`, `processBuffer`, `processBufferOnPool`).

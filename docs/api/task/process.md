@@ -8,18 +8,36 @@ The `process` module provides utilities for executing subprocesses asynchronousl
 
 ## Classes and Interfaces
 
-### `Command`
+### `Process`
 
-Builder for executing child processes asynchronously.
+A spawnable, cancellable, byte-bounded subprocess with IPC support.
+
+#### Constructor
+
+```ts
+new Process(target?: string | URL | { href: string } | TaskOptions | CommandOptions, cancellation?: CancellationToken)
+```
+
+Constructs a new `Process`. When instantiated with an executable path, URL, URL object, or Task object, it automatically starts a subprocess.
+
+#### Properties
+
+- `pid: number | null`: Process identifier of the child process.
+- `connected: boolean`: Whether the process is connected to its IPC channel.
+- `killed: boolean`: Whether the process has exited or been signaled.
+- `exitedAfterDisconnect: boolean`: Whether the process exited after a manual `disconnect()`.
 
 #### Methods
 
-- `constructor(program: string)`: Creates a new command invocation.
-- `arg(arg: string): Command`: Adds an argument.
-- `args(args: string[]): Command`: Adds multiple arguments.
-- `cwd(dir: string): Command`: Sets working directory.
-- `env(key: string, val: string): Command`: Sets environment variable.
-- `run(): Promise<CommandResult>`: Executes the command and awaits completion.
+- `isDead(): boolean`: Returns whether the process has terminated.
+- `isConnected(): boolean`: Returns whether the IPC channel is open.
+- `send(message: unknown): boolean`: Sends an IPC message to the child process.
+- `disconnect(): void`: Closes the IPC channel.
+- `kill(signal?: string): boolean`: Terminates the child process (default `'SIGTERM'`).
+- `destroy(signal?: string): boolean`: Alias for `kill`.
+- `on(event: string, listener: (...args: any[]) => void): void`: Subscribes to child events (`exit`, `message`, `error`, `disconnect`).
+- `addEventListener(event: string, listener: (...args: any[]) => void): void`: Alias for `on`.
+- `run(): Promise<CommandResult>`: Executes the command and resolves with captured output or execution failure.
 
 ### `CancellationToken`
 

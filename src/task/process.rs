@@ -28,6 +28,8 @@
 
 use crate::error::{Error, Result};
 use crate::output::{CommandOutput, ProcessStatus};
+use napi::bindgen_prelude::{Buffer, Function, JsObjectValue, JsValue, Object, Unknown, ValueType};
+use napi::Env;
 use napi_derive::napi;
 use std::collections::HashMap;
 use std::fmt;
@@ -55,7 +57,7 @@ use tokio::time::{Instant, sleep_until};
 #[derive(Clone, Copy, Debug)]
 #[napi]
 pub struct CancellationToken {
-    id: u32,
+    pub id: u32,
 }
 
 /// Live cancellation state, kept outside the `napi` handle.
@@ -919,8 +921,6 @@ impl WindowsTask {
 // napi boundary
 // ---------------------------------------------------------------------------
 
-use napi::bindgen_prelude::Buffer;
-
 /// One environment variable override for a spawned command.
 #[napi(object)]
 pub struct EnvEntry {
@@ -1242,23 +1242,333 @@ pub async fn run_command(
 
 /// A spawnable, cancellable, byte-bounded subprocess.
 ///
-/// Construct with [`CommandOptions`] and an optional [`CancellationToken`]; call
-/// [`Process::run`] to start it and await the captured result. The token passed
-/// to the constructor is honored for the lifetime of every `run` call.
+/// Construct with [`CommandOptions`], a string executable path / URL, a URL object,
+/// or a Task object; an optional cancellation token can be supplied as the second argument.
+/// When instantiated with a target or options, it automatically creates and starts a new
+/// subprocess, providing properties like `pid`, `connected`, `killed`, and methods
+/// such as `send`, `kill`, `disconnect`, `isConnected`, `isDead`, and `run()`.
 #[napi]
 pub struct Process {
     options: CommandOptions,
     cancellation: Option<CancellationToken>,
+    child_id: u32,
+    pid_val: Arc<Mutex<Option<u32>>>,
+    killed_val: Arc<AtomicBool>,
+    connected_val: Arc<AtomicBool>,
+    exited_after_disconnect_val: Arc<AtomicBool>,
 }
+
+static NEXT_PROCESS_CHILD_ID: AtomicU32 = AtomicU32::new(1);
 
 #[napi]
 impl Process {
-    /// Prepare a process from options and an optional cancellation token.
+    /// Prepare a process from options / executable path / URL / URL object / Task object,
+    /// and an optional cancellation token. Automatically starts a subprocess.
     #[napi(constructor)]
-    pub fn new(options: CommandOptions, cancellation: Option<CancellationToken>) -> Self {
+    pub fn new(
+        env: Env,
+        target: Option<Unknown>,
+        cancellation: Option<CancellationToken>,
+    ) -> napi::Result<Self> {
+        let (options, token, auto_start) = parse_process_args(&env, target, cancellation)?;
+        let child_id = NEXT_PROCESS_CHILD_ID.fetch_add(1, Ordering::Relaxed);
+        let pid_val = Arc::new(Mutex::new(None));
+        let killed_val = Arc::new(AtomicBool::new(false));
+        let connected_val = Arc::new(AtomicBool::new(false));
+        let exited_after_disconnect_val = Arc::new(AtomicBool::new(false));
+
+        let proc = Self {
+            options,
+            cancellation: token,
+            child_id,
+            pid_val,
+            killed_val,
+            connected_val,
+            exited_after_disconnect_val,
+        };
+
+        if auto_start {
+            proc.spawn_underlying(&env)?;
+        }
+
+        Ok(proc)
+    }
+
+    fn spawn_underlying(&self, env: &Env) -> napi::Result<()> {
+        let setup_script = r#"
+            (function(payload) {
+                if (!globalThis.__subprocesses) globalThis.__subprocesses = new Map();
+                const cp = (process.getBuiltinModule ? process.getBuiltinModule('node:child_process') : null)
+                    || (typeof require === 'function' ? require('node:child_process') : null)
+                    || (process.mainModule ? process.mainModule.require('node:child_process') : null);
+                const childId = payload.childId;
+                const program = payload.program;
+                const args = Array.isArray(payload.args) ? payload.args : [];
+                const cwd = payload.cwd;
+                const envMap = payload.envMap;
+                const options = {
+                    stdio: ['pipe', 'pipe', 'pipe', 'ipc']
+                };
+                if (cwd) options.cwd = cwd;
+                if (envMap) {
+                    options.env = Object.assign({}, process.env, envMap);
+                }
+                let child;
+                try {
+                    child = cp.spawn(program, args, options);
+                } catch (e) {
+                    delete options.stdio;
+                    child = cp.spawn(program, args, options);
+                }
+                globalThis.__subprocesses.set(childId, child);
+                return child && child.pid ? child.pid : null;
+            })
+        "#;
+
+        let runner: Function<serde_json::Value, Option<u32>> = env.run_script(setup_script)?;
+
+        let mut env_map: Option<HashMap<String, String>> = None;
+        if let Some(env_vars) = &self.options.env {
+            let mut map = HashMap::new();
+            for entry in env_vars {
+                map.insert(entry.name.clone(), entry.value.clone());
+            }
+            env_map = Some(map);
+        }
+
+        let payload = serde_json::json!({
+            "childId": self.child_id,
+            "program": self.options.program,
+            "args": self.options.args,
+            "cwd": self.options.cwd,
+            "envMap": env_map,
+        });
+
+        let pid = runner.call(payload)?;
+
+        if let Some(p) = pid {
+            *self.pid_val.lock().unwrap() = Some(p);
+            self.connected_val.store(true, Ordering::SeqCst);
+        }
+
+        let killed_flag = Arc::clone(&self.killed_val);
+        let conn_flag = Arc::clone(&self.connected_val);
+        let hook_exit_script = r#"
+            (function(childId, cb) {
+                const map = globalThis.__subprocesses;
+                if (!map || !map.has(childId)) return;
+                const child = map.get(childId);
+                child.once('exit', () => cb(true));
+                child.once('disconnect', () => cb(false));
+            })
+        "#;
+        let hook_fn: Function<
+            (u32, Function<bool, ()>),
+            (),
+        > = env.run_script(hook_exit_script)?;
+        let cb: Function<bool, ()> = env.create_function_from_closure("on_term", move |ctx| {
+            let is_exit: bool = ctx.get(0)?;
+            conn_flag.store(false, Ordering::SeqCst);
+            if is_exit {
+                killed_flag.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        })?;
+        let _ = hook_fn.call((self.child_id, cb));
+
+        Ok(())
+    }
+
+    /// Process identifier of the child process.
+    #[napi(getter)]
+    pub fn get_pid(&self) -> Option<u32> {
+        *self.pid_val.lock().unwrap()
+    }
+
+    /// Whether the process is connected to its IPC channel.
+    #[napi(getter)]
+    pub fn get_connected(&self) -> bool {
+        self.connected_val.load(Ordering::SeqCst)
+    }
+
+    /// Whether the process has exited or been signaled.
+    #[napi(getter)]
+    pub fn get_killed(&self) -> bool {
+        self.killed_val.load(Ordering::SeqCst)
+    }
+
+    /// Whether the process exited after a manual `disconnect()`.
+    #[napi(getter)]
+    pub fn get_exited_after_disconnect(&self) -> bool {
+        self.exited_after_disconnect_val.load(Ordering::SeqCst)
+    }
+
+    /// Returns `true` if IPC is connected, `false` otherwise.
+    #[napi]
+    pub fn is_connected(&self) -> bool {
+        self.get_connected()
+    }
+
+    /// Returns `true` if the process has terminated.
+    #[napi]
+    pub fn is_dead(&self) -> bool {
+        self.get_killed()
+    }
+
+    /// Send a message to the subprocess via IPC.
+    #[napi]
+    pub fn send(&self, env: Env, message: Unknown) -> napi::Result<bool> {
+        let send_script = format!(
+            r#"
+            (function(childId, msg) {{
+                const map = globalThis.__subprocesses;
+                if (!map || !map.has(childId)) return false;
+                const child = map.get(childId);
+                if (typeof child.send === 'function') {{
+                    return child.send(msg);
+                }}
+                return false;
+            }})
+            "#
+        );
+        let runner: Function<(u32, Unknown), bool> = env.run_script(&send_script)?;
+        runner.call((self.child_id, message))
+    }
+
+    /// Disconnect IPC channel from the subprocess.
+    #[napi]
+    pub fn disconnect(&self, env: Env) -> napi::Result<()> {
+        self.exited_after_disconnect_val.store(true, Ordering::SeqCst);
+        self.connected_val.store(false, Ordering::SeqCst);
+        let disc_script = format!(
+            r#"
+            (function(childId) {{
+                const map = globalThis.__subprocesses;
+                if (!map || !map.has(childId)) return;
+                const child = map.get(childId);
+                if (typeof child.disconnect === 'function') {{
+                    child.disconnect();
+                }}
+            }})
+            "#
+        );
+        let runner: Function<u32, ()> = env.run_script(&disc_script)?;
+        runner.call(self.child_id)
+    }
+
+    /// Kill the subprocess with a signal (default: `'SIGTERM'`).
+    #[napi]
+    pub fn kill(&self, env: Env, signal: Option<String>) -> napi::Result<bool> {
+        self.killed_val.store(true, Ordering::SeqCst);
+        self.connected_val.store(false, Ordering::SeqCst);
+        let sig = signal.unwrap_or_else(|| "SIGTERM".to_string());
+        let kill_script = format!(
+            r#"
+            (function(childId, sig) {{
+                const map = globalThis.__subprocesses;
+                if (!map || !map.has(childId)) return false;
+                const child = map.get(childId);
+                if (typeof child.kill === 'function') {{
+                    return child.kill(sig);
+                }}
+                return false;
+            }})
+            "#
+        );
+        let runner: Function<(u32, String), bool> = env.run_script(&kill_script)?;
+        let killed = runner.call((self.child_id, sig.clone()))?;
+        if killed {
+            return Ok(true);
+        }
+        #[cfg(unix)]
+        if let Some(pid) = *self.pid_val.lock().unwrap() {
+            let sig_num = match sig.as_str() {
+                "SIGKILL" => libc::SIGKILL,
+                "SIGINT" => libc::SIGINT,
+                "SIGHUP" => libc::SIGHUP,
+                "SIGQUIT" => libc::SIGQUIT,
+                _ => libc::SIGTERM,
+            };
+            unsafe {
+                libc::kill(pid as i32, sig_num);
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Alias for `kill`.
+    #[napi]
+    pub fn destroy(&self, env: Env, signal: Option<String>) -> napi::Result<bool> {
+        self.kill(env, signal)
+    }
+
+    /// Register an event listener on the underlying process.
+    #[napi]
+    pub fn on(
+        &self,
+        env: Env,
+        event: String,
+        listener: Function<'static, Unknown<'static>, Unknown<'static>>,
+    ) -> napi::Result<()> {
+        let on_script = format!(
+            r#"
+            (function(childId, ev, cb) {{
+                const map = globalThis.__subprocesses;
+                if (!map || !map.has(childId)) return;
+                const child = map.get(childId);
+                if (typeof child.on === 'function') {{
+                    child.on(ev, cb);
+                }}
+            }})
+            "#
+        );
+        let runner: Function<(u32, String, Function<'static, Unknown<'static>, Unknown<'static>>), ()> =
+            env.run_script(&on_script)?;
+        runner.call((self.child_id, event, listener))
+    }
+
+    /// Add event listener (alias for `on`).
+    #[napi]
+    pub fn add_event_listener(
+        &self,
+        env: Env,
+        event: String,
+        listener: Function<'static, Unknown<'static>, Unknown<'static>>,
+    ) -> napi::Result<()> {
+        self.on(env, event, listener)
+    }
+
+    pub(crate) fn from_existing(options: CommandOptions, child_id: u32, pid: Option<u32>) -> Self {
         Self {
             options,
-            cancellation,
+            cancellation: None,
+            child_id,
+            pid_val: Arc::new(Mutex::new(pid)),
+            killed_val: Arc::new(AtomicBool::new(false)),
+            connected_val: Arc::new(AtomicBool::new(true)),
+            exited_after_disconnect_val: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn new_handle_clone(&self) -> Self {
+        Self {
+            options: CommandOptions {
+                program: self.options.program.clone(),
+                args: self.options.args.clone(),
+                cwd: self.options.cwd.clone(),
+                env: None,
+                input: None,
+                timeout_ms: self.options.timeout_ms,
+                cleanup_timeout_ms: self.options.cleanup_timeout_ms,
+                limits: None,
+            },
+            cancellation: self.cancellation,
+            child_id: self.child_id,
+            pid_val: Arc::clone(&self.pid_val),
+            killed_val: Arc::clone(&self.killed_val),
+            connected_val: Arc::clone(&self.connected_val),
+            exited_after_disconnect_val: Arc::clone(&self.exited_after_disconnect_val),
         }
     }
 
@@ -1271,6 +1581,188 @@ impl Process {
         let (command, input, timeout, limits, cleanup) = prepare(&self.options);
         let token_ref = self.cancellation.as_ref();
         execute(command, input, timeout, limits, cleanup, token_ref).await
+    }
+}
+
+/// Helper function to parse arguments passed to `Process::new`.
+fn parse_process_args(
+    _env: &Env,
+    target: Option<Unknown>,
+    cancellation: Option<CancellationToken>,
+) -> napi::Result<(CommandOptions, Option<CancellationToken>, bool)> {
+    let token = cancellation;
+    let mut auto_start = false;
+
+    let options = match target {
+        Some(arg) => match arg.get_type()? {
+            ValueType::String => {
+                auto_start = true;
+                let s: String = arg.coerce_to_string()?.into_utf8()?.into_owned()?;
+                resolve_program_or_url(&s)
+            }
+            ValueType::Object => {
+                let obj = arg.coerce_to_object()?;
+                if obj.has_named_property("href")? {
+                    auto_start = true;
+                    let href: String = obj.get_named_property("href")?;
+                    resolve_program_or_url(&href)
+                } else if obj.has_named_property("entries")? {
+                    auto_start = true;
+                    let entries_val: Unknown = obj.get_named_property("entries")?;
+                    let script = match entries_val.get_type()? {
+                        ValueType::String => {
+                            entries_val.coerce_to_string()?.into_utf8()?.into_owned()?
+                        }
+                        _ => String::new(),
+                    };
+                    CommandOptions {
+                        program: "node".to_string(),
+                        args: Some(vec!["-e".to_string(), script]),
+                        cwd: None,
+                        env: None,
+                        input: None,
+                        timeout_ms: None,
+                        cleanup_timeout_ms: None,
+                        limits: None,
+                    }
+                } else if obj.has_named_property("program")? {
+                    // It's a CommandOptions object
+                    let program: String = obj.get_named_property("program")?;
+                    let args: Option<Vec<String>> = if obj.has_named_property("args")? {
+                        obj.get_named_property("args")?
+                    } else {
+                        None
+                    };
+                    let cwd: Option<String> = if obj.has_named_property("cwd")? {
+                        obj.get_named_property("cwd")?
+                    } else {
+                        None
+                    };
+                    let env_val: Option<Vec<EnvEntry>> = if obj.has_named_property("env")? {
+                        let e_unknown: Unknown = obj.get_named_property("env")?;
+                        if e_unknown.is_array()? {
+                            obj.get_named_property("env")?
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let input: Option<Buffer> = if obj.has_named_property("input")? {
+                        obj.get_named_property("input")?
+                    } else {
+                        None
+                    };
+                    let timeout_ms: Option<f64> = if obj.has_named_property("timeoutMs")? {
+                        obj.get_named_property("timeoutMs")?
+                    } else if obj.has_named_property("timeout_ms")? {
+                        obj.get_named_property("timeout_ms")?
+                    } else {
+                        None
+                    };
+                    let cleanup_timeout_ms: Option<f64> =
+                        if obj.has_named_property("cleanupTimeoutMs")? {
+                            obj.get_named_property("cleanupTimeoutMs")?
+                        } else if obj.has_named_property("cleanup_timeout_ms")? {
+                            obj.get_named_property("cleanup_timeout_ms")?
+                        } else {
+                            None
+                        };
+                    let limits: Option<OutputLimitsJs> = if obj.has_named_property("limits")? {
+                        obj.get_named_property("limits")?
+                    } else {
+                        None
+                    };
+
+                    CommandOptions {
+                        program,
+                        args,
+                        cwd,
+                        env: env_val,
+                        input,
+                        timeout_ms,
+                        cleanup_timeout_ms,
+                        limits,
+                    }
+                } else {
+                    auto_start = true;
+                    CommandOptions {
+                        program: "node".to_string(),
+                        args: Some(vec![]),
+                        cwd: None,
+                        env: None,
+                        input: None,
+                        timeout_ms: None,
+                        cleanup_timeout_ms: None,
+                        limits: None,
+                    }
+                }
+            }
+            _ => CommandOptions {
+                program: "node".to_string(),
+                args: None,
+                cwd: None,
+                env: None,
+                input: None,
+                timeout_ms: None,
+                cleanup_timeout_ms: None,
+                limits: None,
+            },
+        },
+        None => CommandOptions {
+            program: "node".to_string(),
+            args: None,
+            cwd: None,
+            env: None,
+            input: None,
+            timeout_ms: None,
+            cleanup_timeout_ms: None,
+            limits: None,
+        },
+    };
+
+    Ok((options, token, auto_start))
+}
+
+fn resolve_program_or_url(target: &str) -> CommandOptions {
+    if target.starts_with("file://") {
+        let file_path = target.trim_start_matches("file://");
+        CommandOptions {
+            program: "node".to_string(),
+            args: Some(vec![file_path.to_string()]),
+            cwd: None,
+            env: None,
+            input: None,
+            timeout_ms: None,
+            cleanup_timeout_ms: None,
+            limits: None,
+        }
+    } else if target.ends_with(".js")
+        || target.ends_with(".mjs")
+        || target.ends_with(".cjs")
+        || target.ends_with(".ts")
+    {
+        CommandOptions {
+            program: "node".to_string(),
+            args: Some(vec![target.to_string()]),
+            cwd: None,
+            env: None,
+            input: None,
+            timeout_ms: None,
+            cleanup_timeout_ms: None,
+            limits: None,
+        }
+    } else {
+        CommandOptions {
+            program: target.to_string(),
+            args: Some(vec![]),
+            cwd: None,
+            env: None,
+            input: None,
+            timeout_ms: None,
+            cleanup_timeout_ms: None,
+            limits: None,
+        }
     }
 }
 
