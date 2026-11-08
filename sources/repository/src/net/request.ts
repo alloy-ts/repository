@@ -1,23 +1,11 @@
 /** Web body/header semantics live in the JS runtime; HTTP I/O stays in http_request. */
 import * as native from "../../../../dist/index.js";
-import { File } from "../fs/file.ts";
+import { Response, type ResponseInit } from "./response.ts";
+
+export { Response, type ResponseInit };
 export const Headers = globalThis.Headers;
-export type Response = globalThis.Response;
-// Relative Location values are useful for the route-table redirect example.
-export const Response = class extends globalThis.Response {
-  constructor(body?: ConstructorParameters<typeof globalThis.Response>[0], init?: ResponseInit) {
-    super(body instanceof File ? body.stream() : body, init);
-  }
-  static override redirect(url: string | URL, status = 302): globalThis.Response {
-    if (![301, 302, 303, 307, 308].includes(status))
-      throw new RangeError("invalid redirect status");
-    new URL(url, "http://localhost");
-    return new globalThis.Response(null, { status, headers: { location: String(url) } });
-  }
-};
 export type RequestOpts = globalThis.RequestInit & { type?: string };
 export type RequestInit = globalThis.RequestInit;
-export type ResponseInit = globalThis.ResponseInit;
 
 export class Request extends globalThis.Request {
   start(): Promise<Response> {
