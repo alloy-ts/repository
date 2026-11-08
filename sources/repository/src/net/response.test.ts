@@ -224,4 +224,25 @@ describe("Native NAPI Response class", () => {
     expect(() => new native.Response("body", { status: 304 })).toThrow();
     expect(new native.Response(null, { status: 204 }).status).toBe(204);
   });
+
+  test("native UTF-8 BOM stripping, lossy replacement, and json parse failure", async () => {
+    // BOM stripping
+    const bomRes = new native.Response(Buffer.from([0xef, 0xbb, 0xbf, 0x68, 0x69]));
+    expect(await bomRes.text()).toBe("hi");
+
+    // Lossy replacement of invalid UTF-8
+    const invalidRes = new native.Response(Buffer.from([0x61, 0xff, 0x62]));
+    expect(await invalidRes.text()).toBe("a\uFFFDb");
+
+    // Invalid JSON throws SyntaxError
+    const notJsonRes = new native.Response("not json");
+    await expect(notJsonRes.json()).rejects.toThrow(/SyntaxError/);
+  });
+
+  test("native redirect serialization and empty statusText", () => {
+    const res = native.Response.redirect("https://example.com/dest?key=val#frag", 301);
+    expect(res.status).toBe(301);
+    expect(res.statusText).toBe("");
+    expect(res.headers["location"]).toBe("https://example.com/dest?key=val#frag");
+  });
 });

@@ -64,7 +64,18 @@ impl Response {
             ));
         }
 
-        let status_text = init.status_text.unwrap_or_default();
+        let status_text = match init.status_text {
+            Some(st) => {
+                if !st.bytes().all(|b| matches!(b, b'\t' | b' '..=b'~' | 0x80..=0xff)) {
+                    return Err(napi::Error::new(
+                        Status::InvalidArg,
+                        "statusText contains invalid characters",
+                    ));
+                }
+                st
+            }
+            None => String::new(),
+        };
 
         let mut headers = HashMap::new();
         if let Some(h) = init.headers {
@@ -141,7 +152,10 @@ impl Response {
             return Ok(Vec::new());
         }
         if self.body_used.swap(true, Ordering::SeqCst) {
-            return Err(napi::Error::from_reason("body already consumed"));
+            return Err(napi::Error::new(
+                Status::InvalidArg,
+                "TypeError: body already consumed",
+            ));
         }
         Ok(self.body.clone().unwrap_or_default())
     }
@@ -149,17 +163,26 @@ impl Response {
     #[napi]
     pub async fn text(&self) -> napi::Result<String> {
         let bytes = self.consume_body()?;
-        String::from_utf8(bytes)
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("invalid utf-8: {e}")))
+        // Fetch specification: strip leading UTF-8 BOM if present
+        let slice = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            &bytes[3..]
+        } else {
+            &bytes[..]
+        };
+        Ok(String::from_utf8_lossy(slice).into_owned())
     }
 
     #[napi(js_name = "json")]
     pub async fn parse_json(&self) -> napi::Result<serde_json::Value> {
         let bytes = self.consume_body()?;
-        let s = String::from_utf8(bytes)
-            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("invalid utf-8: {e}")))?;
+        let slice = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            &bytes[3..]
+        } else {
+            &bytes[..]
+        };
+        let s = String::from_utf8_lossy(slice);
         serde_json::from_str(&s).map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("failed to parse json: {e}"))
+            napi::Error::new(Status::InvalidArg, format!("SyntaxError: failed to parse json: {e}"))
         })
     }
 
@@ -177,7 +200,10 @@ impl Response {
     #[napi]
     pub fn clone(&self) -> napi::Result<Self> {
         if self.body_used() {
-            return Err(napi::Error::from_reason("body already consumed"));
+            return Err(napi::Error::new(
+                Status::InvalidArg,
+                "TypeError: body already consumed",
+            ));
         }
         Ok(Response {
             status: self.status,
@@ -216,22 +242,14 @@ impl Response {
                 format!("invalid redirect status {status}"),
             ));
         }
-        url::Url::parse(&url).map_err(|e| {
+        let parsed = url::Url::parse(&url).map_err(|e| {
             napi::Error::new(Status::InvalidArg, format!("invalid redirect URL: {e}"))
         })?;
         let mut headers = HashMap::new();
-        headers.insert("location".to_string(), url);
+        headers.insert("location".to_string(), parsed.to_string());
         Ok(Response {
             status,
-            status_text: match status {
-                301 => "Moved Permanently",
-                302 => "Found",
-                303 => "See Other",
-                307 => "Temporary Redirect",
-                308 => "Permanent Redirect",
-                _ => "",
-            }
-            .to_string(),
+            status_text: String::new(),
             headers,
             body: None,
             url: String::new(),
