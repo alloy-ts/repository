@@ -11,12 +11,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// One header name/value pair. Repeated names are preserved.
+#[napi(object)]
+pub struct HeaderPair {
+    pub name: String,
+    pub value: String,
+}
+
 /// Options for constructing a [`Request`].
 #[napi(object)]
 #[derive(Default)]
 pub struct RequestInit {
     pub method: Option<String>,
     pub headers: Option<HashMap<String, String>>,
+    /// Full header list. When set, it replaces `headers` and keeps duplicate names.
+    pub header_list: Option<Vec<HeaderPair>>,
     pub body: Option<Either<String, Buffer>>,
     pub mode: Option<String>,
     pub credentials: Option<String>,
@@ -28,6 +37,39 @@ pub struct RequestInit {
     pub r#type: Option<String>,
 }
 
+/// Cooperative abort flag for an in-flight native fetch.
+///
+/// The blocking HTTP client cannot interrupt a socket read that has already
+/// started; the flag is observed before each attempt and while waiting.
+#[napi]
+#[derive(Clone)]
+pub struct AbortFlag {
+    inner: Arc<AtomicBool>,
+}
+
+#[napi]
+impl AbortFlag {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[napi]
+    pub fn abort(&self) {
+        self.inner.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.inner)
+    }
+
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.inner.load(Ordering::SeqCst)
+    }
+}
+
 pub use crate::net::response::{Response, ResponseInit, response_from_http_response};
 
 /// A Web Fetch API `Request` object.
@@ -37,7 +79,7 @@ pub use crate::net::response::{Response, ResponseInit, response_from_http_respon
 pub struct Request {
     url: String,
     method: String,
-    headers: HashMap<String, String>,
+    headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
     mode: String,
     credentials: String,
@@ -58,7 +100,7 @@ impl Request {
     pub fn new(input: Either<String, &Request>, init: Option<RequestInit>) -> napi::Result<Self> {
         let mut init = init.unwrap_or_default();
         if let Either::B(request) = &input {
-            if request.body_used() {
+            if request.body.is_some() && request.body_used.swap(true, Ordering::SeqCst) {
                 return Err(napi::Error::from_reason("body already consumed"));
             }
             init.mode = init.mode.or_else(|| Some(request.mode.clone()));
@@ -72,7 +114,7 @@ impl Request {
             init.keepalive = init.keepalive.or(Some(request.keepalive));
         }
         let (url, default_method, default_headers, default_body) = match input {
-            Either::A(u) => (u, "GET".to_string(), HashMap::new(), None),
+            Either::A(u) => (u, "GET".to_string(), Vec::new(), None),
             Either::B(r) => (
                 r.url.clone(),
                 r.method.clone(),
@@ -83,12 +125,18 @@ impl Request {
 
         let method = init.method.take().unwrap_or(default_method).to_uppercase();
 
-        let mut headers = default_headers;
-        if let Some(h) = init.headers.take() {
-            for (k, v) in h {
-                headers.insert(k.to_lowercase(), v);
-            }
-        }
+        // A supplied header list replaces the source request's headers entirely.
+        let headers = if let Some(list) = init.header_list.take() {
+            list.into_iter()
+                .map(|pair| (pair.name.to_lowercase(), pair.value))
+                .collect()
+        } else if let Some(map) = init.headers.take() {
+            map.into_iter()
+                .map(|(key, value)| (key.to_lowercase(), value))
+                .collect()
+        } else {
+            default_headers
+        };
 
         let body = match init.body.take() {
             Some(Either::A(s)) => Some(s.into_bytes()),
@@ -130,8 +178,26 @@ impl Request {
         self.method.clone()
     }
 
+    /// Combined header map. Duplicate names are joined with `", "`.
     #[napi(getter)]
     pub fn headers(&self) -> HashMap<String, String> {
+        combined_headers(&self.headers)
+    }
+
+    /// Every value stored for `name`, in insertion order.
+    #[napi(js_name = "getAll")]
+    pub fn get_all(&self, name: String) -> Vec<String> {
+        let name = name.to_lowercase();
+        self.headers
+            .iter()
+            .filter(|(key, _)| key == &name)
+            .map(|(_, value)| value.clone())
+            .collect()
+    }
+
+    /// Header list, including duplicate names.
+    #[napi(js_name = "headerEntries")]
+    pub fn header_entries(&self) -> Vec<(String, String)> {
         self.headers.clone()
     }
 
@@ -204,7 +270,13 @@ impl Request {
     }
     #[napi]
     pub async fn text(&self) -> napi::Result<String> {
-        Ok(String::from_utf8_lossy(&self.consume_body()?.unwrap_or_default()).into_owned())
+        let bytes = self.consume_body()?.unwrap_or_default();
+        let slice = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            &bytes[3..]
+        } else {
+            &bytes[..]
+        };
+        Ok(String::from_utf8_lossy(slice).into_owned())
     }
     #[napi(js_name = "json")]
     pub async fn parse_json(&self) -> napi::Result<serde_json::Value> {
@@ -222,7 +294,10 @@ impl Request {
 
     /// Instance method `start` using `http_request` to execute this Request.
     #[napi]
-    pub async fn start(&self) -> napi::Result<Response> {
+    pub async fn start(&self, abort: Option<&AbortFlag>) -> napi::Result<Response> {
+        if abort.is_some_and(|flag| flag.is_aborted()) {
+            return Err(napi::Error::from_reason("The operation was aborted"));
+        }
         let body = self.consume_body()?;
         execute_http_request_with_redirect(
             &self.method,
@@ -230,26 +305,45 @@ impl Request {
             &self.headers,
             body.as_deref(),
             &self.redirect,
+            abort.map(AbortFlag::flag),
         )
         .await
     }
 }
 
+fn combined_headers(headers: &[(String, String)]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (key, value) in headers {
+        map.entry(key.clone())
+            .and_modify(|existing: &mut String| {
+                existing.push_str(", ");
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.clone());
+    }
+    map
+}
+
+fn remove_headers(headers: &mut Vec<(String, String)>, name: &str) {
+    headers.retain(|(key, _)| key != name);
+}
+
 pub(crate) async fn execute_http_request(
     method: &str,
     url: &str,
-    headers: &HashMap<String, String>,
+    headers: &[(String, String)],
     body: Option<&[u8]>,
 ) -> napi::Result<Response> {
-    execute_http_request_with_redirect(method, url, headers, body, "follow").await
+    execute_http_request_with_redirect(method, url, headers, body, "follow", None).await
 }
 
 pub(crate) async fn execute_http_request_with_redirect(
     method: &str,
     url: &str,
-    headers: &HashMap<String, String>,
+    headers: &[(String, String)],
     body: Option<&[u8]>,
     redirect_policy: &str,
+    abort: Option<Arc<AtomicBool>>,
 ) -> napi::Result<Response> {
     use http_request::{Body, HttpRequest, Method};
     if !matches!(redirect_policy, "follow" | "manual" | "error") {
@@ -266,7 +360,7 @@ pub(crate) async fn execute_http_request_with_redirect(
         return Err(napi::Error::from_reason("invalid HTTP method"));
     }
 
-    let mut headers = headers.clone();
+    let mut headers = headers.to_vec();
     let mut body = body.map(<[u8]>::to_vec);
     let mut redirected = false;
     for count in 0..=20 {
@@ -293,7 +387,7 @@ pub(crate) async fn execute_http_request_with_redirect(
             }
             other => Method::Unknown(other.to_owned()),
         });
-        for (key, value) in &headers {
+        for (key, value) in combined_headers(&headers) {
             if !matches!(
                 key.as_str(),
                 "content-length" | "transfer-encoding" | "connection"
@@ -317,10 +411,7 @@ pub(crate) async fn execute_http_request_with_redirect(
         }
         request.get_mut_config().set_timeout(30_000);
         request.get_mut_config().set_redirect(false);
-        let outcome = tokio::task::spawn_blocking(move || request.send())
-            .await
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?
-            .map_err(|e| napi::Error::from_reason(format!("http request failed: {e:?}")))?;
+        let outcome = drive_send(request, abort.clone()).await?;
         let mut response = response_from_http_response(outcome, current_url.to_string());
         response.set_redirected(redirected);
         let status = response.status();
@@ -343,9 +434,15 @@ pub(crate) async fn execute_http_request_with_redirect(
         let next = current_url
             .join(location)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if abort
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            return Err(napi::Error::from_reason("The operation was aborted"));
+        }
         if next.origin() != current_url.origin() {
             for key in ["authorization", "proxy-authorization", "cookie", "host"] {
-                headers.remove(key);
+                remove_headers(&mut headers, key);
             }
         }
         if ((status == 301 || status == 302) && current_method == "POST")
@@ -360,13 +457,48 @@ pub(crate) async fn execute_http_request_with_redirect(
                 "content-language",
                 "content-location",
             ] {
-                headers.remove(key);
+                remove_headers(&mut headers, key);
             }
         }
         current_url = next;
         redirected = true;
     }
     unreachable!()
+}
+
+async fn drive_send(
+    mut request: http_request::HttpRequest,
+    abort: Option<Arc<AtomicBool>>,
+) -> napi::Result<http_request::HttpResponse> {
+    if abort
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
+        return Err(napi::Error::from_reason("The operation was aborted"));
+    }
+    let task = tokio::task::spawn_blocking(move || request.send());
+    let Some(flag) = abort else {
+        return task
+            .await
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?
+            .map_err(|e| napi::Error::from_reason(format!("http request failed: {e:?}")));
+    };
+    tokio::pin!(task);
+    loop {
+        tokio::select! {
+            biased;
+            joined = &mut task => {
+                return joined
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?
+                    .map_err(|e| napi::Error::from_reason(format!("http request failed: {e:?}")));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                if flag.load(Ordering::SeqCst) {
+                    return Err(napi::Error::from_reason("The operation was aborted"));
+                }
+            }
+        }
+    }
 }
 
 pub type RequestOpts = RequestInit;

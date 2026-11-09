@@ -8,19 +8,24 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::net::request::{Request, RequestInit, Response};
+use crate::net::request::{AbortFlag, Request, RequestInit, Response};
 
 /// Fetch a resource from the network.
 ///
 /// Accepts a URL string or a `Request` instance, and optional `RequestInit`.
 /// Returns a Promise that resolves to a `Response` object.
+/// `abort` rejects the operation when {@link AbortFlag.abort} has been called.
 #[napi]
 pub async fn fetch(
     input: Either<String, &Request>,
     init: Option<RequestInit>,
+    abort: Option<&AbortFlag>,
 ) -> napi::Result<Response> {
+    if abort.as_ref().is_some_and(|flag| flag.is_aborted()) {
+        return Err(napi::Error::from_reason("The operation was aborted"));
+    }
     let request = Request::new(input, init)?;
-    request.start().await
+    request.start(abort).await
 }
 
 /// Result of a remote git network handshake or ls-refs query.

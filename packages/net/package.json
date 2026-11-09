@@ -1,0 +1,15 @@
+{
+  "name": "@alloy-ts/net",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts",
+    "./server/router/reg-exp-router": "./src/router/reg-exp-router.ts"
+  },
+  "scripts": {
+    "build": "node --eval \"process.exit(0)\"",
+    "test": "vp -C ../.. test --run --maxWorkers=1 packages/net/src"
+  }
+}

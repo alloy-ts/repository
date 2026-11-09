@@ -1,9 +1,9 @@
-import { RocketServer } from "../../../../dist/index.js";
+import { createServer, type Server as NetServer, type Socket } from "node:net";
 import { File } from "../fs/file.ts";
 import { Request, Response } from "./request.ts";
-import { RegExpRouter, SmartRouter, type Router } from "./router.ts";
+import { RegExpRouter, SmartRouter, TrieRouter, type Router } from "./router.ts";
 
-export { RegExpRouter, SmartRouter };
+export { RegExpRouter, SmartRouter, TrieRouter };
 export type { Router };
 
 type RoutedRequest = Request & { params: Record<string, string> };
@@ -21,16 +21,32 @@ export interface MountOptions {
   replaceRequest?: ((request: globalThis.Request) => globalThis.Request) | false;
 }
 
-export interface ServerOptions {
+/** Hono-style environment. `Bindings` is `c.env`; `Variables` types `c.set` / `c.get`. */
+export interface ServerEnv {
+  Bindings?: unknown;
+  Variables?: object;
+}
+
+export interface EmptyEnv {
+  Bindings: unknown;
+  Variables: Record<string, unknown>;
+}
+
+export type BindingsOf<E> = E extends { Bindings: infer Bindings } ? Bindings : unknown;
+export type VariablesOf<E> = E extends { Variables: infer Variables extends object }
+  ? Variables
+  : Record<string, unknown>;
+
+export interface ServerOptions<E extends ServerEnv = EmptyEnv> {
   /** When true (the default), `/hello` and `/hello/` are different routes. */
   strict?: boolean;
-  /** Router implementation. The default is SmartRouter, which matches RegExpRouter. */
-  router?: Router<Handler>;
+  /** Router implementation. The default is SmartRouter (regexp, then trie). */
+  router?: Router<Handler<E>> | Router<unknown>;
   /**
    * Routing path for a request. Ignored when `strict` is false.
    * The default is the URL pathname without its query or fragment.
    */
-  getPath?: (request: globalThis.Request, options?: { env?: unknown }) => string;
+  getPath?: (request: globalThis.Request, options?: { env?: BindingsOf<E> }) => string;
   port?: number;
   host?: string;
   routes?: Record<string, LegacyRoute>;
@@ -38,36 +54,49 @@ export interface ServerOptions {
 }
 
 export type Next = () => Promise<void>;
-export type Handler = (c: Context, next: Next) => Response | Promise<Response | void> | void | Promise<void>;
-export type ErrorHandler = (err: Error, c: Context) => Response | Promise<Response>;
-export type NotFoundHandler = (c: Context) => Response | Promise<Response>;
+export type Handler<E extends ServerEnv = EmptyEnv> = (
+  c: Context<E>,
+  next: Next,
+) => Response | Promise<Response | void> | void | Promise<void>;
+export type ErrorHandler<E extends ServerEnv = EmptyEnv> = (
+  err: Error,
+  c: Context<E>,
+) => Response | Promise<Response>;
+export type NotFoundHandler<E extends ServerEnv = EmptyEnv> = (
+  c: Context<E>,
+) => Response | Promise<Response>;
 
-interface RouteRecord {
+interface RouteRecord<E extends ServerEnv = EmptyEnv> {
   method: string;
   path: string;
   basePath: string;
-  handler: Handler;
+  handler: Handler<E>;
 }
 
-interface Core {
+interface Core<E extends ServerEnv = EmptyEnv> {
   host: string;
-  router: Router<Handler>;
-  routes: RouteRecord[];
-  notFound: NotFoundHandler;
+  configuredPort: number;
+  boundPort?: number;
+  http?: NetServer;
+  sockets: Set<Socket>;
+  router: Router<Handler<E>>;
+  routes: RouteRecord<E>[];
+  notFound: NotFoundHandler<E>;
   notFoundCustom: boolean;
-  onError: ErrorHandler;
+  onError: ErrorHandler<E>;
   errorCustom: boolean;
-  getPath: (request: globalThis.Request, options?: { env?: unknown }) => string;
+  getPath: (request: globalThis.Request, options?: { env?: BindingsOf<E> }) => string;
   legacyRoutes: [string, LegacyRoute][];
   legacyFetch?: LegacyHandler;
-  native: RocketServer;
 }
 
-const defaultNotFound: NotFoundHandler = (c) => c.text("404 Not Found", 404);
-const defaultOnError: ErrorHandler = (err, c) => {
+function defaultNotFound<E extends ServerEnv>(c: Context<E>): Response {
+  return c.text("404 Not Found", 404);
+}
+function defaultOnError<E extends ServerEnv>(err: Error, c: Context<E>): Response {
   console.error(`${err}`);
   return c.text("Internal Server Error", 500);
-};
+}
 
 /** Request view passed to handlers as `c.req`. */
 export class HonoRequest {
@@ -114,9 +143,9 @@ export class HonoRequest {
 }
 
 /** Handler context. `c.text` / `c.json` build a response; `c.set` / `c.get` share request state. */
-export class Context {
+export class Context<E extends ServerEnv = EmptyEnv> {
   readonly req: HonoRequest;
-  readonly env: unknown;
+  readonly env: BindingsOf<E>;
   readonly executionCtx: unknown;
   #headers = new Headers();
   #wroteHeaders = false;
@@ -126,12 +155,12 @@ export class Context {
 
   constructor(
     request: globalThis.Request,
-    env: unknown,
+    env: BindingsOf<E> | undefined,
     executionCtx: unknown,
     params: Record<string, string>,
   ) {
     this.req = new HonoRequest(request, params);
-    this.env = env;
+    this.env = env as BindingsOf<E>;
     this.executionCtx = executionCtx;
   }
 
@@ -161,12 +190,12 @@ export class Context {
     return this.#build(JSON.stringify(body), status, "application/json");
   }
 
-  set(key: string, value: unknown): void {
+  set<Key extends keyof VariablesOf<E> & string>(key: Key, value: VariablesOf<E>[Key]): void {
     this.#vars.set(key, value);
   }
 
-  get(key: string): unknown {
-    return this.#vars.get(key);
+  get<Key extends keyof VariablesOf<E> & string>(key: Key): VariablesOf<E>[Key] {
+    return this.#vars.get(key) as VariablesOf<E>[Key];
   }
 
   /** @internal */
@@ -193,18 +222,17 @@ export class Context {
  * HTTP server with Hono-style routing.
  *
  * `fetch` and `request` dispatch in-process. `start` serves the same dispatcher
- * through the Rocket listener.
+ * on a Node HTTP server so custom methods such as QUERY and PURGE are accepted.
  */
-export class Server {
+export class Server<E extends ServerEnv = EmptyEnv> {
   readonly host: string;
-  #core: Core;
+  #core: Core<E>;
   #basePath: string;
   #path = "/";
-  #keepAlive?: ReturnType<typeof setInterval>;
 
-  constructor(options?: ServerOptions);
-  constructor(options: ServerOptions | undefined, child: { core: Core; basePath: string });
-  constructor(options: ServerOptions = {}, child?: { core: Core; basePath: string }) {
+  constructor(options?: ServerOptions<E>);
+  constructor(options: ServerOptions<E> | undefined, child: { core: Core<E>; basePath: string });
+  constructor(options: ServerOptions<E> = {}, child?: { core: Core<E>; basePath: string }) {
     if (child) {
       this.#core = child.core;
       this.#basePath = child.basePath;
@@ -217,7 +245,9 @@ export class Server {
     this.#basePath = "/";
     this.#core = {
       host,
-      router: options.router ?? new SmartRouter<Handler>(),
+      configuredPort: options.port ?? 3000,
+      sockets: new Set(),
+      router: (options.router as Router<Handler<E>> | undefined) ?? new SmartRouter<Handler<E>>(),
       routes: [],
       notFound: defaultNotFound,
       notFoundCustom: false,
@@ -226,55 +256,54 @@ export class Server {
       getPath: strict ? (options.getPath ?? defaultGetPath) : getPathNoStrict,
       legacyRoutes: Object.entries(options.routes ?? {}).sort(([a], [b]) => score(b) - score(a)),
       legacyFetch: options.fetch,
-      native: new RocketServer(options.port ?? 3000, host, (input: string) => this.#handleWire(input)),
     };
   }
 
   get port(): number {
-    return this.#core.native.port;
+    return this.#core.boundPort ?? this.#core.configuredPort;
   }
 
   get listening(): boolean {
-    return this.#core.native.listening;
+    return this.#core.http?.listening ?? false;
   }
 
-  get(path: string, ...handlers: Handler[]): this;
-  get(handler: Handler, ...handlers: Handler[]): this;
-  get(pathOrHandler: string | Handler, ...handlers: Handler[]): this {
+  get(path: string, ...handlers: Handler<E>[]): this;
+  get(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  get(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     return this.#register("GET", pathOrHandler, handlers);
   }
 
-  post(path: string, ...handlers: Handler[]): this;
-  post(handler: Handler, ...handlers: Handler[]): this;
-  post(pathOrHandler: string | Handler, ...handlers: Handler[]): this {
+  post(path: string, ...handlers: Handler<E>[]): this;
+  post(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  post(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     return this.#register("POST", pathOrHandler, handlers);
   }
 
-  put(path: string, ...handlers: Handler[]): this;
-  put(handler: Handler, ...handlers: Handler[]): this;
-  put(pathOrHandler: string | Handler, ...handlers: Handler[]): this {
+  put(path: string, ...handlers: Handler<E>[]): this;
+  put(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  put(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     return this.#register("PUT", pathOrHandler, handlers);
   }
 
-  delete(path: string, ...handlers: Handler[]): this;
-  delete(handler: Handler, ...handlers: Handler[]): this;
-  delete(pathOrHandler: string | Handler, ...handlers: Handler[]): this {
+  delete(path: string, ...handlers: Handler<E>[]): this;
+  delete(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  delete(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     return this.#register("DELETE", pathOrHandler, handlers);
   }
 
-  query(path: string, ...handlers: Handler[]): this;
-  query(handler: Handler, ...handlers: Handler[]): this;
-  query(pathOrHandler: string | Handler, ...handlers: Handler[]): this {
+  query(path: string, ...handlers: Handler<E>[]): this;
+  query(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  query(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     return this.#register("QUERY", pathOrHandler, handlers);
   }
 
-  all(path: string, ...handlers: Handler[]): this;
-  all(handler: Handler, ...handlers: Handler[]): this;
-  all(pathOrHandler: string | Handler, ...handlers: Handler[]): this {
+  all(path: string, ...handlers: Handler<E>[]): this;
+  all(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  all(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     return this.#register("ALL", pathOrHandler, handlers);
   }
 
-  on(method: string | string[], path: string | string[], ...handlers: Handler[]): this {
+  on(method: string | string[], path: string | string[], ...handlers: Handler<E>[]): this {
     const methods = Array.isArray(method) ? method : [method];
     const paths = Array.isArray(path) ? path : [path];
     for (const routePath of paths) {
@@ -286,9 +315,9 @@ export class Server {
     return this;
   }
 
-  use(handler: Handler, ...handlers: Handler[]): this;
-  use(path: string, handler: Handler, ...handlers: Handler[]): this;
-  use(pathOrHandler: string | Handler, ...handlers: Handler[]): this {
+  use(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  use(path: string, handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  use(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     if (typeof pathOrHandler === "string") {
       this.#path = pathOrHandler;
       for (const handler of handlers) this.#addRoute("ALL", pathOrHandler, handler);
@@ -304,43 +333,42 @@ export class Server {
    * Later registrations on `app` are not visible here. Not-found handlers are not copied;
    * a routed app's error handler takes priority over this server's handler.
    */
-  route(path: string, app?: Server): this {
+  route<Child extends ServerEnv>(path: string, app?: Server<Child>): this {
     if (!app) return this;
     const sub = this.basePath(path);
     const onError = app.#core.errorCustom ? app.#core.onError : undefined;
     for (const record of app.#core.routes) {
       if (!belongsTo(record.basePath, app.#basePath)) continue;
       const handler = record.handler;
-      sub.#addRoute(
-        record.method,
-        record.path,
+      const wrapped = (
         onError
-          ? async (c, next) => {
+          ? async (c: Context<E>, next: Next) => {
               try {
-                return await handler(c, next);
+                return await (handler as unknown as Handler<E>)(c, next);
               } catch (error) {
-                if (error instanceof Error) return onError(error, c);
+                if (error instanceof Error) return onError(error, c as unknown as Context<Child>);
                 throw error;
               }
             }
-          : handler,
-      );
+          : handler
+      ) as unknown as Handler<E>;
+      sub.#addRoute(record.method, record.path, wrapped);
     }
     return this;
   }
 
   /** Return a view of this server that prefixes later routes with `path`. */
-  basePath(path: string): Server {
+  basePath(path: string): Server<E> {
     return new Server(undefined, { core: this.#core, basePath: mergePath(this.#basePath, path) });
   }
 
-  notFound(handler: NotFoundHandler): this {
+  notFound(handler: NotFoundHandler<E>): this {
     this.#core.notFound = handler;
     this.#core.notFoundCustom = true;
     return this;
   }
 
-  onError(handler: ErrorHandler): this {
+  onError(handler: ErrorHandler<E>): this {
     this.#core.onError = handler;
     this.#core.errorCustom = true;
     return this;
@@ -350,9 +378,13 @@ export class Server {
    * Forward matching requests to another server or fetch function.
    * The mounted handler sees the request path with `path` removed.
    */
-  mount(path: string, application: Server | MountHandler, options?: MountOptions): this {
+  mount(
+    path: string,
+    application: MountHandler | Pick<Server<E>, "fetch">,
+    options?: MountOptions,
+  ): this {
     const prefix = mergePath(this.#basePath, path).replace(/\/$/, "") || "/";
-    const handler: Handler = async (c) => {
+    const handler: Handler<E> = async (c) => {
       const request = mountedRequest(c.req.raw, prefix, options);
       if (typeof application === "function") return application(request, c.env, c.executionCtx);
       return application.fetch(request, c.env, c.executionCtx);
@@ -362,12 +394,15 @@ export class Server {
   }
 
   /**
-   * @deprecated Service Worker hosts should register fetch themselves.
-   * In this runtime this registers a global `fetch` listener when `addEventListener` exists.
+   * @deprecated Prefer `server.fetch`. Registers a global `fetch` listener.
+   * Node has no service-worker `addEventListener`, so this installs one for `fetch`
+   * events when the host does not already provide it.
    */
   fire(): void {
+    console.warn("server.fire() is deprecated. Dispatch requests with server.fetch().");
+    ensureFetchHost();
     const target = globalThis as typeof globalThis & {
-      addEventListener?: (
+      addEventListener: (
         type: string,
         listener: (event: {
           request: globalThis.Request;
@@ -375,16 +410,13 @@ export class Server {
         }) => void,
       ) => void;
     };
-    if (typeof target.addEventListener !== "function") {
-      throw new Error("server.fire() requires a global addEventListener('fetch') host");
-    }
     target.addEventListener("fetch", (event) => {
       event.respondWith(this.fetch(event.request));
     });
   }
 
   /** Dispatch a Fetch request. This is the programmatic entry point. */
-  fetch(request: globalThis.Request, env?: unknown, executionCtx?: unknown): Promise<Response> {
+  fetch(request: globalThis.Request, env?: BindingsOf<E>, executionCtx?: unknown): Promise<Response> {
     if (request.method === "HEAD") {
       return this.#dispatch(request, env, executionCtx, "GET").then(
         (response) => new Response(null, response),
@@ -397,7 +429,7 @@ export class Server {
   request(
     input: globalThis.Request | string | URL,
     requestInit?: RequestInit,
-    env?: unknown,
+    env?: BindingsOf<E>,
     executionCtx?: unknown,
   ): Promise<Response> {
     if (input instanceof globalThis.Request) {
@@ -409,21 +441,35 @@ export class Server {
   }
 
   async start(): Promise<number> {
-    if (this.#keepAlive) throw new Error("server already started");
-    let started = false;
-    // Tokio's listener and pending start future are not libuv handles.
-    this.#keepAlive = setInterval(() => {
-      if (started && !this.listening) clearInterval(this.#keepAlive);
-    }, 1000);
+    if (this.#core.http) throw new Error("server already started");
+    const server = createServer((socket) => {
+      this.#core.sockets.add(socket);
+      socket.on("close", () => this.#core.sockets.delete(socket));
+      serveSocket(this, socket);
+    });
     try {
-      const port = await this.#core.native.start();
-      started = true;
-      return port;
+      await new Promise<void>((resolve, reject) => {
+        const fail = (error: Error) => {
+          server.off("listening", succeed);
+          reject(error);
+        };
+        const succeed = () => {
+          const address = server.address();
+          this.#core.boundPort =
+            typeof address === "object" && address ? address.port : this.#core.configuredPort;
+          server.off("error", fail);
+          resolve();
+        };
+        server.once("error", fail);
+        server.once("listening", succeed);
+        server.listen(this.#core.configuredPort, this.host);
+      });
     } catch (error) {
-      clearInterval(this.#keepAlive);
-      this.#keepAlive = undefined;
+      server.close();
       throw error;
     }
+    this.#core.http = server;
+    return this.port;
   }
 
   serve(): Promise<number> {
@@ -431,15 +477,17 @@ export class Server {
   }
 
   async stop(): Promise<void> {
-    try {
-      await this.#core.native.stop();
-    } finally {
-      clearInterval(this.#keepAlive);
-      this.#keepAlive = undefined;
-    }
+    const server = this.#core.http;
+    if (!server) return;
+    this.#core.http = undefined;
+    for (const socket of this.#core.sockets) socket.destroy();
+    this.#core.sockets.clear();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
   }
 
-  #register(method: string, pathOrHandler: string | Handler, handlers: Handler[]): this {
+  #register(method: string, pathOrHandler: string | Handler<E>, handlers: Handler<E>[]): this {
     const queue = [...handlers];
     if (typeof pathOrHandler === "string") this.#path = pathOrHandler;
     else queue.unshift(pathOrHandler);
@@ -447,7 +495,7 @@ export class Server {
     return this;
   }
 
-  #addRoute(method: string, path: string, handler: Handler): void {
+  #addRoute(method: string, path: string, handler: Handler<E>): void {
     const full = mergePath(this.#basePath, path);
     this.#core.routes.push({ method, path: full, basePath: this.#basePath, handler });
     this.#core.router.add(method, full, handler);
@@ -455,20 +503,20 @@ export class Server {
 
   async #dispatch(
     request: globalThis.Request,
-    env: unknown,
+    env: BindingsOf<E> | undefined,
     executionCtx: unknown,
     method: string,
   ): Promise<Response> {
     const path = this.#core.getPath(request, { env });
     const matched = this.#core.router.match(method, path);
     if (matched.length > 0) {
-      const context = new Context(request, env, executionCtx, matched[0]?.params ?? {});
+      const context = new Context<E>(request, env, executionCtx, matched[0]?.params ?? {});
       return compose(matched, context, this.#core.notFound, this.#core.onError);
     }
     const legacy = await this.#legacy(request);
     if (legacy) return legacy;
     if (this.#core.routes.length > 0 || this.#core.notFoundCustom) {
-      const context = new Context(request, env, executionCtx, {});
+      const context = new Context<E>(request, env, executionCtx, {});
       return compose([], context, this.#core.notFound, this.#core.onError);
     }
     return new Response("Not Found", { status: 404 });
@@ -517,42 +565,145 @@ export class Server {
     return undefined;
   }
 
-  async #handleWire(input: string): Promise<string> {
-    try {
-      const wire = JSON.parse(input) as {
-        port: number;
-        method: string;
-        path: string;
-        headers: [string, string][];
-        body: string;
-      };
-      const host = this.host.includes(":") ? `[${this.host}]` : this.host;
-      const request = new Request(`http://${host}:${wire.port}${wire.path}`, {
-        method: wire.method,
-        headers: wire.headers,
-        body: ["GET", "HEAD"].includes(wire.method) ? undefined : Buffer.from(wire.body, "base64"),
-      });
-      const response = await this.fetch(request);
-      return JSON.stringify({
-        status: response.status,
-        headers: [...response.headers],
-        body: Buffer.from(await response.arrayBuffer()).toString("base64"),
-      });
-    } catch {
-      return JSON.stringify({
-        status: 500,
-        headers: [],
-        body: Buffer.from("Internal Server Error").toString("base64"),
-      });
-    }
-  }
 }
 
-async function compose(
-  routes: { handler: Handler; params: Record<string, string> }[],
-  context: Context,
-  notFound: NotFoundHandler,
-  onError: ErrorHandler,
+const MAX_BODY = 16 * 1024 * 1024;
+
+/** Node's HTTP parser only accepts its built-in method list, so the listener reads the request line itself. */
+function serveSocket<E extends ServerEnv>(server: Server<E>, socket: Socket): void {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let settled = false;
+  const fail = (status: number, text: string) => {
+    if (settled || socket.destroyed) return;
+    settled = true;
+    socket.end(`HTTP/1.1 ${status} ${text}\r\nconnection: close\r\ncontent-length: ${Buffer.byteLength(text)}\r\n\r\n${text}`);
+  };
+  const onData = (chunk: Buffer) => {
+    total += chunk.length;
+    if (total > MAX_BODY + 65_536) {
+      socket.off("data", onData);
+      fail(413, "Payload Too Large");
+      return;
+    }
+    chunks.push(chunk);
+    const buffered = Buffer.concat(chunks);
+    const headerEnd = buffered.indexOf("\r\n\r\n");
+    if (headerEnd < 0) return;
+    const header = buffered.subarray(0, headerEnd).toString("latin1");
+    const [start, ...lines] = header.split("\r\n");
+    const parsed = /^([!#$%&'*+\-.^_`|~0-9A-Za-z]+) (\S+) HTTP\/\d(?:\.\d)?$/.exec(start ?? "");
+    if (!parsed?.[1] || !parsed[2]) {
+      socket.off("data", onData);
+      fail(400, "Bad Request");
+      return;
+    }
+    let length = 0;
+    const headers: [string, string][] = [];
+    for (const line of lines) {
+      const split = line.indexOf(":");
+      if (split <= 0) continue;
+      const name = line.slice(0, split).trim();
+      const value = line.slice(split + 1).trim();
+      headers.push([name, value]);
+      if (name.toLowerCase() === "content-length") length = Number(value);
+    }
+    if (!Number.isFinite(length) || length < 0) {
+      socket.off("data", onData);
+      fail(400, "Bad Request");
+      return;
+    }
+    if (length > MAX_BODY) {
+      socket.off("data", onData);
+      fail(413, "Payload Too Large");
+      return;
+    }
+    const needed = headerEnd + 4 + length;
+    if (buffered.length < needed) return;
+    socket.off("data", onData);
+    settled = true;
+    const body = length === 0 ? undefined : buffered.subarray(headerEnd + 4, needed);
+    void respond(server, socket, parsed[1], parsed[2], headers, body).catch(() => {
+      if (!socket.destroyed) {
+        socket.end(
+          "HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\ncontent-length: 21\r\n\r\nInternal Server Error",
+        );
+      }
+    });
+  };
+  socket.on("data", onData);
+  socket.on("error", () => socket.destroy());
+}
+
+async function respond<E extends ServerEnv>(
+  server: Server<E>,
+  socket: Socket,
+  method: string,
+  path: string,
+  headers: [string, string][],
+  body: Buffer | undefined,
+): Promise<void> {
+  const host = server.host.includes(":") ? `[${server.host}]` : server.host;
+  const request = new Request(`http://${host}:${server.port}${path.startsWith("/") ? path : `/${path}`}`, {
+    method,
+    headers,
+    body: method === "GET" || method === "HEAD" ? undefined : body,
+  });
+  let result: Response;
+  try {
+    result = await server.fetch(request);
+  } catch {
+    socket.end("HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\ncontent-length: 21\r\n\r\nInternal Server Error");
+    return;
+  }
+  const payload = Buffer.from(await result.arrayBuffer());
+  const status = result.status || 500;
+  const reason = result.statusText || "OK";
+  const lines = [`HTTP/1.1 ${status} ${reason}`, "connection: close", `content-length: ${payload.length}`];
+  for (const [key, value] of result.headers) {
+    const name = key.toLowerCase();
+    if (name === "content-length" || name === "transfer-encoding" || name === "connection") continue;
+    lines.push(`${key}: ${value}`);
+  }
+  socket.end(Buffer.concat([Buffer.from(`${lines.join("\r\n")}\r\n\r\n`), payload]));
+}
+
+type FetchListener = (event: {
+  type: string;
+  request: globalThis.Request;
+  respondWith: (response: Response | Promise<Response>) => void;
+}) => void;
+
+const fetchListeners = new Set<FetchListener>();
+let fetchHostReady = false;
+
+function ensureFetchHost(): void {
+  const target = globalThis as typeof globalThis & {
+    addEventListener?: (type: string, listener: FetchListener) => void;
+    removeEventListener?: (type: string, listener: FetchListener) => void;
+    dispatchEvent?: (event: { type: string }) => boolean;
+  };
+  if (typeof target.addEventListener === "function") return;
+  if (fetchHostReady) return;
+  fetchHostReady = true;
+  target.addEventListener = (type, listener) => {
+    if (type === "fetch") fetchListeners.add(listener);
+  };
+  target.removeEventListener = (type, listener) => {
+    if (type === "fetch") fetchListeners.delete(listener);
+  };
+  target.dispatchEvent = (event) => {
+    if (event.type !== "fetch") return false;
+    for (const listener of Array.from(fetchListeners)) listener(event as Parameters<FetchListener>[0]);
+    return true;
+  };
+}
+
+async function compose<E extends ServerEnv>(
+  routes: { handler: Handler<E>; params: Record<string, string> }[],
+  context: Context<E>,
+  notFound: NotFoundHandler<E>,
+  onError: ErrorHandler<E>,
 ): Promise<Response> {
   let index = -1;
   const run = async (position: number): Promise<void> => {

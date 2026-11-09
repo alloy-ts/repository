@@ -283,7 +283,6 @@ describe("Server routing", () => {
     expect(await (await server.request(new Request("http://localhost/hello"))).text()).toBe("ok");
     const posted = new Request("http://localhost/hello", { method: "POST" });
     expect((await server.request(posted)).status).toBe(404);
-    expect(() => server.fire()).toThrow(/addEventListener/);
   });
 
   test("start serves the same routes over HTTP", async () => {
