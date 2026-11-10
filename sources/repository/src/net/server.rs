@@ -1,13 +1,24 @@
 //! Rocket transport for the public Server routing adapter (net/server.ts).
+//!
+//! Rocket 0.5.2's `Method` is a closed enum: Get, Put, Post, Delete, Options,
+//! Head, Trace, Connect, and Patch. `FromStr` rejects anything else, and
+//! `Request::from_hyp` turns that into HTTP 400 before a route runs. The
+//! unpublished 0.6 tree adds IANA registry methods, but not QUERY, PURGE, or
+//! arbitrary tokens, so upgrading would not serve those verbs. `server.query`
+//! and `server.on` still dispatch them through `fetch()` / `request()`.
+//! A listener answers QUERY, PURGE, and other unknown methods with Rocket's 400.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use napi::{bindgen_prelude::*, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
 use rocket::{
     Data, Request, Route,
-    data::ToByteUnit,
+    data::{Limits, ToByteUnit},
     http::{Header, Method, Status},
     route::{Handler, Outcome},
 };
+
+/// Request body cap. Also applied to Rocket's named limits below.
+const MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 use std::{
     io::Cursor,
     sync::{
@@ -23,7 +34,14 @@ struct Dispatch(Arc<Callback>);
 #[rocket::async_trait]
 impl Handler for Dispatch {
     async fn handle<'r>(&self, req: &'r Request<'_>, data: Data<'r>) -> Outcome<'r> {
-        let bytes = match data.open(16.mebibytes()).into_bytes().await {
+        for value in req.headers().get("Content-Length") {
+            match value.parse::<u64>() {
+                Ok(len) if len > MAX_BODY_BYTES => return Outcome::Error(Status::PayloadTooLarge),
+                Ok(_) => {}
+                Err(_) => return Outcome::Error(Status::BadRequest),
+            }
+        }
+        let bytes = match data.open((MAX_BODY_BYTES as usize).bytes()).into_bytes().await {
             Ok(bytes) if bytes.is_complete() => bytes.into_inner(),
             _ => return Outcome::Error(Status::PayloadTooLarge),
         };
@@ -51,20 +69,29 @@ impl Handler for Dispatch {
         };
         let mut response = rocket::Response::build();
         response.status(Status::new(status));
+        let mut declared_length: Option<usize> = None;
         if let Some(headers) = output["headers"].as_array() {
             for pair in headers {
                 if let (Some(k), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
-                    // Rocket owns transfer framing.
-                    if !matches!(
-                        k.to_ascii_lowercase().as_str(),
-                        "content-length" | "transfer-encoding" | "connection"
-                    ) {
-                        response.header_adjoin(Header::new(k.to_owned(), v.to_owned()));
+                    // Rocket owns transfer framing. A HEAD response keeps the
+                    // handler's content-length and sends no payload.
+                    if k.eq_ignore_ascii_case("content-length") {
+                        declared_length = v.parse().ok();
+                        continue;
                     }
+                    if matches!(k.to_ascii_lowercase().as_str(), "transfer-encoding" | "connection") {
+                        continue;
+                    }
+                    response.header_adjoin(Header::new(k.to_owned(), v.to_owned()));
                 }
             }
         }
-        response.sized_body(body.len(), Cursor::new(body));
+        if req.method() == Method::Head {
+            let length = declared_length.unwrap_or(body.len());
+            response.sized_body(Some(length), Cursor::new(Vec::<u8>::new()));
+        } else {
+            response.sized_body(body.len(), Cursor::new(body));
+        }
         Outcome::Success(response.finalize())
     }
 }
@@ -125,12 +152,20 @@ impl Server {
         config.port = self.port();
         config.log_level = rocket::config::LogLevel::Off;
         config.shutdown.ctrlc = false;
-        config.shutdown.grace = 1;
-        config.shutdown.mercy = 1;
+        config.shutdown.grace = 0;
+        config.shutdown.mercy = 0;
+        config.limits = Limits::default()
+            .limit("bytes", (MAX_BODY_BYTES as usize).bytes())
+            .limit("string", (MAX_BODY_BYTES as usize).bytes())
+            .limit("data-form", (MAX_BODY_BYTES as usize).bytes())
+            .limit("file", (MAX_BODY_BYTES as usize).bytes())
+            .limit("json", (MAX_BODY_BYTES as usize).bytes())
+            .limit("form", (MAX_BODY_BYTES as usize).bytes());
         let (ready_tx, ready_rx) = oneshot::channel();
         let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
         let port = self.port.clone();
         let listening = self.listening.clone();
+        // Every variant Rocket 0.5 can parse. Unknown methods never reach a route.
         let routes = [
             Method::Get,
             Method::Head,
@@ -139,9 +174,17 @@ impl Server {
             Method::Delete,
             Method::Patch,
             Method::Options,
+            Method::Trace,
+            Method::Connect,
         ]
         .into_iter()
-        .map(|method| Route::new(method, "/<path..>", Dispatch(self.callback.clone())))
+        .flat_map(|method| {
+            let handler = Dispatch(self.callback.clone());
+            [
+                Route::new(method, "/", handler.clone()),
+                Route::new(method, "/<path..>", handler),
+            ]
+        })
         .collect::<Vec<_>>();
         let rocket = rocket::custom(config)
             .mount("/", routes)

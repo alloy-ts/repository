@@ -49,7 +49,7 @@ describe("Server platform surface", () => {
     }
   });
 
-  test("start() accepts QUERY, PURGE, and other custom methods", async () => {
+  test("request() routes custom methods and the listener answers them with 400", async () => {
     const server = new Server({ port: 0 });
     server.query("/search", (c) => c.text("QUERY"));
     server.on("PURGE", "/cache", (c) => c.text("PURGE"));
@@ -63,12 +63,15 @@ describe("Server platform surface", () => {
     });
     server.get("/get-only", (c) => c.text("visible"));
     server.on("FOO", "/custom", (c) => c.text(`FOO ${c.req.query("q")}`));
+    expect(await (await server.request("/search", { method: "QUERY" })).text()).toBe("QUERY");
+    expect(await (await server.request("/cache", { method: "PURGE" })).text()).toBe("PURGE");
+    expect(await (await server.request("/custom?q=1", { method: "FOO" })).text()).toBe("FOO 1");
     const port = await server.start();
     try {
       const base = `http://127.0.0.1:${port}`;
-      expect(await (await fetch(`${base}/search`, { method: "QUERY" })).text()).toBe("QUERY");
-      expect(await (await fetch(`${base}/cache`, { method: "PURGE" })).text()).toBe("PURGE");
-      expect(await (await fetch(`${base}/custom?q=1`, { method: "FOO" })).text()).toBe("FOO 1");
+      expect((await fetch(`${base}/search`, { method: "QUERY" })).status).toBe(400);
+      expect((await fetch(`${base}/cache`, { method: "PURGE" })).status).toBe(400);
+      expect((await fetch(`${base}/custom?q=1`, { method: "FOO" })).status).toBe(400);
       const head = await fetch(`${base}/both`, { method: "HEAD" });
       expect(head.headers.get("x-who")).toBe("head");
       expect(head.headers.get("content-length")).toBe(String(Buffer.byteLength("head-body")));

@@ -48,6 +48,17 @@ npm run build
 npm run start
 ```
 
+`examples/server.ts` is a small Hono-style server. It imports `Server` from
+`@alloy-ts/net/server` and `RegExpRouter` from
+`@alloy-ts/net/server/router/reg-exp-router`. The listener is Rocket and binds
+`PORT`, or 3000 when that variable is unset.
+
+```bash
+node --import @oxc-node/core/register examples/server.ts
+```
+
+`EXAMPLE_SMOKE=1` runs the in-process `request()` checks and exits without listening.
+
 ## Testing the application
 
 ```bash

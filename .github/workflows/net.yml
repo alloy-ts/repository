@@ -24,3 +24,5 @@ jobs:
         run: npm run build:native
       - name: Run net and package tests
         run: npx vp -C . test --run --maxWorkers=1 sources/repository/src/net packages/net/src
+      - name: Smoke the server example
+        run: EXAMPLE_SMOKE=1 node --import @oxc-node/core/register examples/server.ts

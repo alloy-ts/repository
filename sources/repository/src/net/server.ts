@@ -1,8 +1,7 @@
-import { createServer, type Server as NetServer, type Socket } from "node:net";
 import { File } from "../fs/file.ts";
-import { attachHttpSocket, type HttpRequestMessage } from "./http-transport.ts";
 import { Request, Response } from "./request.ts";
 import { RegExpRouter, SmartRouter, TrieRouter, type Router } from "./router.ts";
+import * as native from "../../../../dist/index.js";
 
 export { RegExpRouter, SmartRouter, TrieRouter };
 export type { Router };
@@ -74,12 +73,20 @@ interface RouteRecord<E extends ServerEnv = EmptyEnv> {
   handler: Handler<E>;
 }
 
+interface RocketListener {
+  readonly port: number;
+  readonly listening: boolean;
+  start(): Promise<number>;
+  stop(): Promise<void>;
+}
+
 interface Core<E extends ServerEnv = EmptyEnv> {
   host: string;
   configuredPort: number;
   boundPort?: number;
-  http?: NetServer;
-  sockets: Set<Socket>;
+  rocket?: RocketListener;
+  /** Referenced timer so a listening server keeps the Node process alive. */
+  keepAlive?: ReturnType<typeof setInterval>;
   router: Router<Handler<E>>;
   routes: RouteRecord<E>[];
   notFound: NotFoundHandler<E>;
@@ -326,9 +333,13 @@ export class Context<E extends ServerEnv = EmptyEnv> {
 /**
  * HTTP server with Hono-style routing.
  *
- * `fetch` and `request` dispatch in-process. `start` serves that dispatcher
- * through `http-transport.ts`, because Rocket 0.5 cannot route QUERY, PURGE,
- * or other methods outside its `Method` enum.
+ * `fetch` and `request` dispatch in-process. They never open a socket.
+ * `start` serves that same dispatcher through Rocket: the native listener
+ * reads the HTTP request and the callback calls `fetch()`.
+ *
+ * Rocket 0.5.2 cannot represent QUERY, PURGE, or other methods outside its
+ * `Method` enum. Those routes still run for `fetch()` and `request()`.
+ * A live listener answers them with 400 before `fetch()` is called.
  */
 export class Server<E extends ServerEnv = EmptyEnv> {
   readonly host: string;
@@ -352,7 +363,6 @@ export class Server<E extends ServerEnv = EmptyEnv> {
     this.#core = {
       host,
       configuredPort: options.port ?? 3000,
-      sockets: new Set(),
       router: (options.router as Router<Handler<E>> | undefined) ?? new SmartRouter<Handler<E>>(),
       routes: [],
       notFound: defaultNotFound,
@@ -370,7 +380,7 @@ export class Server<E extends ServerEnv = EmptyEnv> {
   }
 
   get listening(): boolean {
-    return this.#core.http?.listening ?? false;
+    return this.#core.rocket?.listening ?? false;
   }
 
   get(path: string, ...handlers: Handler<E>[]): this;
@@ -397,6 +407,10 @@ export class Server<E extends ServerEnv = EmptyEnv> {
     return this.#register("DELETE", pathOrHandler, handlers);
   }
 
+  /**
+   * Register a QUERY route. `fetch()` and `request()` dispatch it.
+   * Rocket 0.5 has no QUERY variant, so `start()` answers QUERY with 400.
+   */
   query(path: string, ...handlers: Handler<E>[]): this;
   query(handler: Handler<E>, ...handlers: Handler<E>[]): this;
   query(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
@@ -427,6 +441,11 @@ export class Server<E extends ServerEnv = EmptyEnv> {
     return this.#register("ALL", pathOrHandler, handlers);
   }
 
+  /**
+   * Register one or more methods. Methods Rocket 0.5 does not know, including
+   * PURGE, are dispatched by `fetch()` and `request()` only. The listener
+   * answers them with 400.
+   */
   on(method: string | string[], path: string | string[], ...handlers: Handler<E>[]): this {
     const methods = Array.isArray(method) ? method : [method];
     const paths = Array.isArray(path) ? path : [path];
@@ -583,35 +602,16 @@ export class Server<E extends ServerEnv = EmptyEnv> {
   }
 
   async start(): Promise<number> {
-    if (this.#core.http) throw new Error("server already started");
-    const server = createServer((socket) => {
-      this.#core.sockets.add(socket);
-      socket.on("close", () => this.#core.sockets.delete(socket));
-      attachHttpSocket(socket, (message) => dispatchSocket(this, message));
-    });
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const fail = (error: Error) => {
-          server.off("listening", succeed);
-          reject(error);
-        };
-        const succeed = () => {
-          const address = server.address();
-          this.#core.boundPort =
-            typeof address === "object" && address ? address.port : this.#core.configuredPort;
-          server.off("error", fail);
-          resolve();
-        };
-        server.once("error", fail);
-        server.once("listening", succeed);
-        server.listen(this.#core.configuredPort, this.host);
-      });
-    } catch (error) {
-      server.close();
-      throw error;
-    }
-    this.#core.http = server;
-    return this.port;
+    if (this.#core.rocket) throw new Error("server already started");
+    const rocket = new native.RocketServer(this.#core.configuredPort, this.host, (raw: string) =>
+      dispatchRocket(this, raw),
+    );
+    const port = await rocket.start();
+    this.#core.boundPort = port;
+    this.#core.rocket = rocket;
+    // Rocket's runtime does not register a libuv handle. This timer does.
+    this.#core.keepAlive ??= setInterval(() => {}, 2 ** 30);
+    return port;
   }
 
   serve(): Promise<number> {
@@ -619,14 +619,12 @@ export class Server<E extends ServerEnv = EmptyEnv> {
   }
 
   async stop(): Promise<void> {
-    const server = this.#core.http;
-    if (!server) return;
-    this.#core.http = undefined;
-    for (const socket of this.#core.sockets) socket.destroy();
-    this.#core.sockets.clear();
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
-    });
+    const rocket = this.#core.rocket;
+    if (!rocket) return;
+    this.#core.rocket = undefined;
+    if (this.#core.keepAlive) clearInterval(this.#core.keepAlive);
+    this.#core.keepAlive = undefined;
+    await rocket.stop();
   }
 
   #register(method: string, pathOrHandler: string | Handler<E>, handlers: Handler<E>[]): this {
@@ -709,24 +707,41 @@ export class Server<E extends ServerEnv = EmptyEnv> {
 
 }
 
-async function dispatchSocket<E extends ServerEnv>(
-  server: Server<E>,
-  message: HttpRequestMessage,
-): Promise<{ status: number; statusText: string; headers: Iterable<[string, string]>; body: Uint8Array }> {
-  const host = server.host.includes(":") ? `[${server.host}]` : server.host;
-  const target = message.target.startsWith("/") ? message.target : `/${message.target}`;
-  const request = new Request(`http://${host}:${server.port}${target}`, {
-    method: message.method,
-    headers: message.headers,
-    body: message.method === "GET" || message.method === "HEAD" ? undefined : message.body,
-  });
-  const result = await server.fetch(request);
-  return {
-    status: result.status || 500,
-    statusText: result.statusText,
-    headers: result.headers,
-    body: new Uint8Array(await result.arrayBuffer()),
-  };
+interface RocketMessage {
+  port: number;
+  method: string;
+  path: string;
+  headers: [string, string][];
+  body: string;
+}
+
+/** Rocket calls this once per accepted request. The result is written by Rocket. */
+async function dispatchRocket<E extends ServerEnv>(server: Server<E>, raw: string): Promise<string> {
+  try {
+    const message = JSON.parse(raw) as RocketMessage;
+    const host = server.host.includes(":") ? `[${server.host}]` : server.host;
+    const target = message.path.startsWith("/") ? message.path : `/${message.path}`;
+    const method = message.method.toUpperCase();
+    const payload = message.body ? Buffer.from(message.body, "base64") : undefined;
+    const request = new Request(`http://${host}:${message.port}${target}`, {
+      method,
+      headers: message.headers,
+      body: method === "GET" || method === "HEAD" || !payload?.byteLength ? undefined : payload,
+    });
+    const result = await server.fetch(request);
+    const body = Buffer.from(await result.arrayBuffer()).toString("base64");
+    return JSON.stringify({
+      status: result.status || 500,
+      headers: [...result.headers.entries()],
+      body,
+    });
+  } catch {
+    return JSON.stringify({
+      status: 500,
+      headers: [["content-type", "text/plain;charset=UTF-8"]],
+      body: Buffer.from("Internal Server Error").toString("base64"),
+    });
+  }
 }
 
 async function emptyHead(response: Response): Promise<Response> {
