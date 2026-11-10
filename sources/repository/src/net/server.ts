@@ -121,7 +121,16 @@ export class HonoRequest {
     return defaultGetPath(this.raw);
   }
 
-  header(name: string): string | undefined {
+  header(name: string): string | undefined;
+  header(): Record<string, string>;
+  header(name?: string): string | undefined | Record<string, string> {
+    if (name === undefined) {
+      const all: Record<string, string> = {};
+      this.raw.headers.forEach((value, key) => {
+        all[key] = value;
+      });
+      return all;
+    }
     return this.raw.headers.get(name) ?? undefined;
   }
 
@@ -133,8 +142,38 @@ export class HonoRequest {
     return this.#params[name];
   }
 
-  query(name: string): string | undefined {
-    return new URL(this.raw.url).searchParams.get(name) ?? undefined;
+  query(name: string): string | undefined;
+  query(): Record<string, string>;
+  query(name?: string): string | undefined | Record<string, string> {
+    const params = new URL(this.raw.url).searchParams;
+    if (name === undefined) {
+      const all: Record<string, string> = {};
+      params.forEach((value, key) => {
+        all[key] ??= value;
+      });
+      return all;
+    }
+    return params.get(name) ?? undefined;
+  }
+
+  json<T = unknown>(): Promise<T> {
+    return this.raw.json() as Promise<T>;
+  }
+
+  text(): Promise<string> {
+    return this.raw.text();
+  }
+
+  arrayBuffer(): Promise<ArrayBuffer> {
+    return this.raw.arrayBuffer();
+  }
+
+  blob(): Promise<Blob> {
+    return this.raw.blob();
+  }
+
+  formData(): Promise<FormData> {
+    return this.raw.formData();
   }
 
   /** @internal Route dispatch updates the captures before each handler. */
@@ -150,19 +189,23 @@ export class Context<E extends ServerEnv = EmptyEnv> {
   readonly executionCtx: unknown;
   #headers = new Headers();
   #wroteHeaders = false;
+  #status = 200;
   #vars = new Map<string, unknown>();
   #res?: Response;
   #finalized = false;
+  readonly #notFound: NotFoundHandler<E>;
 
   constructor(
     request: globalThis.Request,
     env: BindingsOf<E> | undefined,
     executionCtx: unknown,
     params: Record<string, string>,
+    notFound: NotFoundHandler<E>,
   ) {
     this.req = new HonoRequest(request, params);
     this.env = env as BindingsOf<E>;
     this.executionCtx = executionCtx;
+    this.#notFound = notFound;
   }
 
   get finalized(): boolean {
@@ -174,21 +217,72 @@ export class Context<E extends ServerEnv = EmptyEnv> {
     return this.#res;
   }
 
-  header(name: string, value: string): this {
+  header(name: string, value: string, options?: { append?: boolean }): this {
     this.#wroteHeaders = true;
-    this.#headers.set(name, value);
+    if (options?.append) this.#headers.append(name, value);
+    else this.#headers.set(name, value);
     if (this.#res && this.#res.type !== "error" && this.#res.status !== 0) {
-      this.#res = copyResponse(this.#res, (headers) => headers.set(name, value));
+      this.#res = copyResponse(this.#res, (headers) => {
+        if (options?.append) headers.append(name, value);
+        else headers.set(name, value);
+      });
     }
     return this;
   }
 
-  text(body: string, status = 200): Response {
+  /** Remember `code`, and update a response that has already been produced. */
+  status(code: number): this {
+    this.#status = code;
+    if (this.#res && this.#res.type !== "error" && this.#res.status !== 0) {
+      const current = this.#res;
+      this.#res = new Response(current.body, {
+        status: code,
+        statusText: current.statusText,
+        headers: current.headers,
+      });
+    }
+    return this;
+  }
+
+  text(body: string, status = this.#status): Response {
     return this.#build(body, status, "text/plain; charset=UTF-8");
   }
 
-  json(body: unknown, status = 200): Response {
+  json(body: unknown, status = this.#status): Response {
     return this.#build(JSON.stringify(body), status, "application/json");
+  }
+
+  html(html: string, status = this.#status): Response {
+    return this.#build(html, status, "text/html; charset=UTF-8");
+  }
+
+  body(
+    data: ConstructorParameters<typeof Response>[0],
+    status = this.#status,
+    headers?: ConstructorParameters<typeof globalThis.Headers>[0],
+  ): Response {
+    const merged = new Headers(this.#headers);
+    if (headers) {
+      new Headers(headers).forEach((value, key) => {
+        merged.set(key, value);
+      });
+    }
+    return new Response(data, { status, headers: merged });
+  }
+
+  redirect(url: string, status = 302): Response {
+    const redirected = Response.redirect(url, status);
+    if ([...this.#headers].length === 0) return redirected;
+    return copyResponse(redirected, (headers) => {
+      for (const [key, value] of this.#headers) {
+        if (key.toLowerCase() !== "location") headers.set(key, value);
+      }
+    });
+  }
+
+  /** Run the application's `notFound` handler, including one registered with `server.notFound`. */
+  notFound(): Promise<Response> {
+    return Promise.resolve(this.#notFound(this));
   }
 
   set<Key extends keyof VariablesOf<E> & string>(key: Key, value: VariablesOf<E>[Key]): void {
@@ -306,6 +400,24 @@ export class Server<E extends ServerEnv = EmptyEnv> {
   query(handler: Handler<E>, ...handlers: Handler<E>[]): this;
   query(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
     return this.#register("QUERY", pathOrHandler, handlers);
+  }
+
+  patch(path: string, ...handlers: Handler<E>[]): this;
+  patch(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  patch(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
+    return this.#register("PATCH", pathOrHandler, handlers);
+  }
+
+  options(path: string, ...handlers: Handler<E>[]): this;
+  options(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  options(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
+    return this.#register("OPTIONS", pathOrHandler, handlers);
+  }
+
+  head(path: string, ...handlers: Handler<E>[]): this;
+  head(handler: Handler<E>, ...handlers: Handler<E>[]): this;
+  head(pathOrHandler: string | Handler<E>, ...handlers: Handler<E>[]): this {
+    return this.#register("HEAD", pathOrHandler, handlers);
   }
 
   all(path: string, ...handlers: Handler<E>[]): this;
@@ -539,13 +651,13 @@ export class Server<E extends ServerEnv = EmptyEnv> {
     const path = this.#core.getPath(request, { env });
     const matched = this.#core.router.match(method, path);
     if (matched.length > 0) {
-      const context = new Context<E>(request, env, executionCtx, matched[0]?.params ?? {});
+      const context = new Context<E>(request, env, executionCtx, matched[0]?.params ?? {}, this.#core.notFound);
       return compose(matched, context, this.#core.notFound, this.#core.onError);
     }
     const legacy = await this.#legacy(request);
     if (legacy) return legacy;
     if (this.#core.routes.length > 0 || this.#core.notFoundCustom) {
-      const context = new Context<E>(request, env, executionCtx, {});
+      const context = new Context<E>(request, env, executionCtx, {}, this.#core.notFound);
       return compose([], context, this.#core.notFound, this.#core.onError);
     }
     return new Response("Not Found", { status: 404 });
