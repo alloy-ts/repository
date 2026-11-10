@@ -1,0 +1,24 @@
+name: net
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsqlite3-dev
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Build the native module
+        run: npm run build:native
+      - name: Run net and package tests
+        run: npx vp -C . test --run --maxWorkers=1 sources/repository/src/net packages/net/src

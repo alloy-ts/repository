@@ -195,14 +195,33 @@ describe("Server routing", () => {
 
     const downstream = new Server();
     downstream.onError((err, c) => c.text(`caught ${err.message}`, 500));
-    downstream.use(async (_c, next) => {
+    downstream.use(async (c, next) => {
       await next();
-      throw new Error("after");
+      c.header("x-outer", "1");
+      throw new Error("outer");
+    });
+    downstream.use(async (c, next) => {
+      await next();
+      c.header("x-inner", "1");
     });
     downstream.get("/boom", (c) => c.text("ok"));
     const thrown = await downstream.request("/boom");
     expect(thrown.status).toBe(500);
-    expect(await thrown.text()).toBe("caught after");
+    expect(await thrown.text()).toBe("caught outer");
+    expect(thrown.headers.get("x-outer")).toBe("1");
+    expect(thrown.headers.get("x-inner")).toBe("1");
+
+    const unfinished = new Server();
+    unfinished.get("/bare", () => undefined);
+    const bare = await unfinished.request("/bare");
+    expect(bare.status).toBe(500);
+    expect(await bare.text()).toBe("Internal Server Error");
+    const explained = new Server();
+    explained.onError((err, c) => c.text(err.message, 500));
+    explained.get("/bare", () => undefined);
+    const explainedResponse = await explained.request("/bare");
+    expect(explainedResponse.status).toBe(500);
+    expect(await explainedResponse.text()).toMatch(/not finalized/);
 
     const missing = new Server();
     missing.notFound((c) => c.text("Custom 404 Message", 404));

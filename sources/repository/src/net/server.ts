@@ -326,8 +326,9 @@ export class Context<E extends ServerEnv = EmptyEnv> {
 /**
  * HTTP server with Hono-style routing.
  *
- * `fetch` and `request` dispatch in-process. `start` serves the same dispatcher
- * on a Node HTTP server so custom methods such as QUERY and PURGE are accepted.
+ * `fetch` and `request` dispatch in-process. `start` serves that dispatcher
+ * through `http-transport.ts`, because Rocket 0.5 cannot route QUERY, PURGE,
+ * or other methods outside its `Method` enum.
  */
 export class Server<E extends ServerEnv = EmptyEnv> {
   readonly host: string;
@@ -782,16 +783,31 @@ async function compose<E extends ServerEnv>(
     let result: unknown;
     try {
       if (route) {
+        let calledNext = false;
         context.req.assignParams(route.params);
-        result = await route.handler(context, () => run(position + 1));
-      } else result = await notFound(context);
+        result = await route.handler(context, async () => {
+          calledNext = true;
+          await run(position + 1);
+        });
+        if (result instanceof globalThis.Response && !context.finalized) context.finalize(result);
+        // A handler that neither returns a response nor continues the chain is
+        // not a 404. Do not call the next handler automatically.
+        if (!context.finalized && !calledNext) {
+          throw new Error("Context is not finalized. Return a Response or await next().");
+        }
+      } else {
+        result = await notFound(context);
+        if (result instanceof globalThis.Response && !context.finalized) context.finalize(result);
+      }
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       const recovered = await onError(error, context);
       if (recovered instanceof globalThis.Response) context.replace(recovered);
+      else if (!context.finalized) {
+        context.finalize(new Response("Internal Server Error", { status: 500 }));
+      }
       return;
     }
-    if (result instanceof globalThis.Response && !context.finalized) context.finalize(result);
   };
   await run(0);
   if (!context.finalized) context.finalize(await notFound(context));

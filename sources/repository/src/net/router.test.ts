@@ -58,6 +58,12 @@ describe("routers", () => {
     ]);
     expect(router.match("GET", "/post/12").map((route) => route.handler)).toEqual(["star", "before"]);
     expect(router.match("GET", "/post/ab").map((route) => route.handler)).toEqual(["star", "after"]);
+    router.add("GET", "/wild/blue/card", "later");
+    expect(router.match("GET", "/wild/blue/card").map((route) => route.handler)).toEqual([
+      "wild",
+      "star",
+      "later",
+    ]);
   });
 
   test("SmartRouter stays on RegExpRouter until a pattern cannot be combined", () => {

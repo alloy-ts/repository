@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 import { connect, createServer } from "node:net";
 import { once } from "node:events";
-import { attachHttpSocket, HttpSession, MAX_HTTP_BODY } from "./http-transport.ts";
+import { attachHttpSocket, HttpSession, MAX_HTTP_BODY, MAX_HTTP_HEADERS } from "./http-transport.ts";
 import { Server } from "./server.ts";
 
 function text(chunks: Array<Buffer | string>): string {
@@ -45,6 +45,19 @@ describe("HTTP transport", () => {
       Buffer.from("POST /gzip HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"),
     );
     expect(gzip[0]).toMatchObject({ type: "error", status: 501 });
+
+    const oversizedChunk = new HttpSession().push(
+      Buffer.from(
+        `POST /chunk-big HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n${(MAX_HTTP_BODY + 1).toString(16)}\r\n`,
+      ),
+    );
+    expect(oversizedChunk[0]).toMatchObject({ type: "error", status: 413 });
+
+    const headerValue = "h".repeat(MAX_HTTP_HEADERS);
+    const completeHeaders = Buffer.from(`GET /wide HTTP/1.1\r\nX-Wide: ${headerValue}\r\n\r\n`);
+    expect(completeHeaders.indexOf("\r\n\r\n")).toBeGreaterThan(MAX_HTTP_HEADERS);
+    const wide = new HttpSession().push(completeHeaders);
+    expect(wide[0]).toMatchObject({ type: "error", status: 431 });
   });
 
   test("answers 100-continue, keep-alive, close, HEAD, and custom methods", async () => {
@@ -98,20 +111,19 @@ describe("HTTP transport", () => {
     query.write("QUERY /search HTTP/1.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     await once(query, "end");
     expect(text(queryChunks)).toContain("x-method: QUERY");
+
+    const purge = connect(port, "127.0.0.1");
+    const purgeChunks: Buffer[] = [];
+    purge.on("data", (chunk: Buffer | string) => purgeChunks.push(Buffer.from(chunk)));
+    purge.write("PURGE /cache HTTP/1.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    await once(purge, "end");
+    expect(text(purgeChunks)).toContain("x-method: PURGE");
     socketServer.close();
   });
 
-  test("the live server decodes chunked bodies and keeps request() in process", async () => {
+  test("a listening server decodes a chunked POST", async () => {
     const server = new Server({ port: 0 });
-    let calls = 0;
-    server.post("/chunk", async (c) => {
-      calls += 1;
-      return c.text(await c.req.raw.text());
-    });
-    server.get("/local", (c) => {
-      calls += 1;
-      return c.text(new URL(c.req.url).pathname);
-    });
+    server.post("/chunk", async (c) => c.text(await c.req.raw.text()));
     const port = await server.start();
     try {
       const client = connect(port, "127.0.0.1");
@@ -122,9 +134,21 @@ describe("HTTP transport", () => {
       );
       await once(client, "end");
       expect(text(chunks)).toContain("hello");
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
+describe("in-process dispatch", () => {
+  test("request() routes an absolute URL without using the listener", async () => {
+    const server = new Server({ port: 0 });
+    server.get("/local", (c) => c.text(new URL(c.req.url).pathname));
+    const port = await server.start();
+    try {
       const local = await server.request("http://example.com/local");
       expect(await local.text()).toBe("/local");
-      expect(calls).toBe(2);
+      expect(server.port).toBe(port);
     } finally {
       await server.stop();
     }

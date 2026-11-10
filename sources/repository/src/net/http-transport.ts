@@ -1,7 +1,23 @@
 import type { Socket } from "node:net";
 
+/**
+ * HTTP/1 listener for `Server.start()`.
+ *
+ * Rocket 0.5's `Method` is a closed enum (Get, Put, Post, Delete, Options,
+ * Head, Trace, Connect, Patch). `Route::new` cannot register QUERY, PURGE, or
+ * the arbitrary methods accepted by `server.on`. Node's `http` parser has the
+ * same kind of allow-list (`http.METHODS`): it includes QUERY and PURGE, and
+ * rejects other tokens before user code runs. This module is the only place
+ * that reads those bytes. `Server.start()` calls `attachHttpSocket` and then
+ * dispatches through `server.fetch()`; it does not implement HTTP itself.
+ * `RocketServer` remains exported for callers that want the native listener.
+ */
+
 /** Bytes of a request body, not counting the header block. */
 export const MAX_HTTP_BODY = 16 * 1024 * 1024;
+
+/** Request header block, excluding the blank line that ends it. */
+export const MAX_HTTP_HEADERS = 65_536;
 
 export interface HttpRequestMessage {
   method: string;
@@ -29,8 +45,8 @@ export type HttpEvent =
 
 /**
  * Incremental HTTP/1 parser used by `Server.start()`.
- * Node's built-in parser rejects methods outside its list, so arbitrary methods
- * such as QUERY and PURGE are read here. One session may hold pipelined bytes.
+ * One session may hold pipelined bytes. See the module comment for why this
+ * parser exists instead of Rocket or `node:http`.
  */
 export class HttpSession {
   #buffer = Buffer.alloc(0);
@@ -172,8 +188,15 @@ function scanHeaders(buffer: Buffer):
   | { kind: "ok"; preface: Preface; headerEnd: number } {
   const headerEnd = buffer.indexOf("\r\n\r\n");
   if (headerEnd < 0) {
-    if (buffer.length > 65_536) return { kind: "error", status: 431, reason: "Request Header Fields Too Large" };
+    if (buffer.length > MAX_HTTP_HEADERS) {
+      return { kind: "error", status: 431, reason: "Request Header Fields Too Large" };
+    }
     return { kind: "partial" };
+  }
+  // A complete block can arrive in one chunk, so the limit also applies after
+  // the terminator is found. `headerEnd` is the header bytes before `\r\n\r\n`.
+  if (headerEnd > MAX_HTTP_HEADERS) {
+    return { kind: "error", status: 431, reason: "Request Header Fields Too Large" };
   }
   const header = buffer.subarray(0, headerEnd).toString("latin1");
   const [start, ...lines] = header.split("\r\n");
