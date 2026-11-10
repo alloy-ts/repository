@@ -1354,7 +1354,10 @@ fn belongs_to(record_base: &str, app_base: &str) -> bool {
 }
 
 fn try_decode_query(value: &str) -> String {
-    super::router::try_decode(value)
+    // application/x-www-form-urlencoded treats + as a space. Percent-decoding
+    // happens after that replacement, so %2B stays a literal plus. Path
+    // parameters use router::try_decode and leave + unchanged.
+    super::router::try_decode(&value.replace('+', " "))
 }
 
 fn promise_of(env: &Env, value: Unknown) -> Result<Unknown<'static>> {
@@ -1646,7 +1649,7 @@ fn match_legacy(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
             return None;
         };
         if let Some(name) = part.strip_prefix(':') {
-            params.insert(name.to_owned(), try_decode_query(segment));
+            params.insert(name.to_owned(), super::router::try_decode(segment));
         } else if part != segment {
             return None;
         }
@@ -2113,6 +2116,17 @@ mod dispatch_tests {
         let finalized = false;
         let outcome = if !finalized && !called_next { "error" } else { "missing" };
         assert_eq!(outcome, "error");
+    }
+
+    #[test]
+    fn query_decodes_plus_as_space_without_touching_paths() {
+        assert_eq!(super::try_decode_query("hello+world"), "hello world");
+        assert_eq!(super::try_decode_query("a+b"), "a b");
+        assert_eq!(super::try_decode_query("1%2B1"), "1+1");
+        assert_eq!(super::try_decode_query("%2B"), "+");
+        assert_eq!(super::router::try_decode("hello+world"), "hello+world");
+        let params = super::match_legacy("/files/:name", "/files/hello+world").unwrap();
+        assert_eq!(params.get("name").map(String::as_str), Some("hello+world"));
     }
 
     #[test]

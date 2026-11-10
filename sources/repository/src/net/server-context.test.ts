@@ -112,6 +112,23 @@ describe("Context and request helpers", () => {
     expect(seen).toBe(marker);
   });
 
+  test("c.req.query decodes + as a space and keeps %2B and path plus signs", async () => {
+    const server = new Server();
+    server.get("/search", (c) => {
+      const all = c.req.query();
+      return c.json({
+        q: c.req.query("q"),
+        x: c.req.query("x"),
+        key: all["a b"],
+      });
+    });
+    server.get("/files/:name", (c) => c.text(c.req.param("name") ?? ""));
+
+    const found = await server.request("/search?q=hello+world&a+b=c&x=1%2B1");
+    expect(await found.json()).toEqual({ q: "hello world", x: "1+1", key: "c" });
+    expect(await (await server.request("/files/hello+world")).text()).toBe("hello+world");
+  });
+
   test("patch, options, and head are first-class methods", async () => {
     const server = new Server();
     server.patch("/item", (c) => c.text("patched"));
