@@ -357,6 +357,56 @@ describe("Rocket Server", () => {
     expect((await badRoot.request("/two/three/hi")).status).toBe(404);
   });
 
+  test("regression: after-next header mutation, HEAD body normalization and explicit HEAD route precedence", async () => {
+    // 1. After-next middleware header mutation
+    const app = new Server();
+    app.use(async (c, next) => {
+      await next();
+      c.header("x-after", "1");
+      c.header("x-appended", "part1");
+      c.header("x-appended", "part2", { append: true });
+    });
+    app.get("/hello", (c) => c.text("ok"));
+
+    const res = await app.request("/hello");
+    expect(res.headers.get("x-after")).toBe("1");
+    expect(res.headers.get("x-appended")).toContain("part1");
+    expect(await res.text()).toBe("ok");
+
+    // 2. HEAD fallback on GET route strips body
+    const headRes = await app.request("/hello", { method: "HEAD" });
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("x-after")).toBe("1");
+    expect(await headRes.text()).toBe("");
+
+    // 3. Explicit HEAD route registered after GET route takes precedence for HEAD
+    const app2 = new Server();
+    app2.get("/test", (c) => c.text("get", 200));
+    app2.head("/test", (c) => c.text("head", 202));
+
+    const headRes2 = await app2.request("/test", { method: "HEAD" });
+    expect(headRes2.status).toBe(202);
+    expect(await headRes2.text()).toBe("");
+
+    const getRes2 = await app2.request("/test", { method: "GET" });
+    expect(getRes2.status).toBe(200);
+    expect(await getRes2.text()).toBe("get");
+
+    // 4. request() dispatch remains independent of listening state
+    const app3 = new Server({ port: 0 });
+    app3.get("/same", (c) => c.text("app-handler"));
+    const beforeStart = await app3.request("http://localhost/same");
+    expect(await beforeStart.text()).toBe("app-handler");
+
+    try {
+      await app3.start();
+      const afterStart = await app3.request("http://localhost/same");
+      expect(await afterStart.text()).toBe("app-handler");
+    } finally {
+      await app3.stop();
+    }
+  });
+
   test("bind failure rejects and stop releases the port", async () => {
     const first = new Server({ port: 0 });
     await first.start();

@@ -153,10 +153,25 @@ export class Context<
     } else {
       this.#headers.set(name, value);
     }
+    if (this.#res) {
+      if (options?.append) {
+        this.#res.headers.append(name, value);
+      } else {
+        this.#res.headers.set(name, value);
+      }
+    }
   }
 
   status(status: number): void {
     this.#status = status;
+    if (this.#res) {
+      // Recreate response with updated status
+      this.#res = new Response(this.#res.body, {
+        status,
+        statusText: this.#res.statusText,
+        headers: this.#res.headers,
+      });
+    }
   }
 
   get res(): Response | undefined {
@@ -474,24 +489,6 @@ export class Server<
     input: string | URL | globalThis.Request,
     options?: RequestInit,
   ): Promise<Response> {
-    if (this.listening) {
-      let targetUrl: string;
-      if (typeof input === "string" || input instanceof URL) {
-        const urlStr = typeof input === "string" ? input : input.toString();
-        if (urlStr.startsWith("http://") || urlStr.startsWith("https://")) {
-          targetUrl = urlStr;
-        } else {
-          targetUrl = `http://127.0.0.1:${this.port}${urlStr.startsWith("/") ? "" : "/"}${urlStr}`;
-        }
-      } else {
-        const parsed = new URL(input.url);
-        targetUrl = `http://127.0.0.1:${this.port}${parsed.pathname}${parsed.search}`;
-      }
-      const init =
-        options ?? (typeof input === "object" && !(input instanceof URL) ? input : undefined);
-      return await globalThis.fetch(targetUrl, init as any);
-    }
-
     let req: Request;
     if (typeof input === "string" || input instanceof URL) {
       const urlStr = typeof input === "string" ? input : input.toString();
@@ -525,14 +522,26 @@ export class Server<
     const matched: { handler: Handler<E>; params: Record<string, string> }[] = [];
     const method = req.method.toUpperCase();
 
-    for (const r of this.#routes) {
-      if (r.method !== "ALL" && r.method !== method) {
-        if (method === "HEAD" && r.method === "GET") {
-          // HEAD can match GET routes
-        } else {
-          continue;
+    let hasExplicitHeadMatch = false;
+    if (method === "HEAD") {
+      for (const r of this.#routes) {
+        if (r.method === "HEAD" && !r.isMiddleware && r.matcher(pathname) !== undefined) {
+          hasExplicitHeadMatch = true;
+          break;
         }
       }
+    }
+
+    for (const r of this.#routes) {
+      const isMatchMethod =
+        r.method === "ALL" ||
+        r.method === method ||
+        (method === "HEAD" && r.method === "GET" && !hasExplicitHeadMatch);
+
+      if (!isMatchMethod) {
+        continue;
+      }
+
       const params = r.matcher(pathname);
       if (params !== undefined) {
         for (const h of r.handlers) {
@@ -580,12 +589,30 @@ export class Server<
     };
 
     try {
-      return await dispatch(0);
-    } catch (err) {
-      if (this.#errorHandler) {
-        return await this.#errorHandler(err, c);
+      const res = await dispatch(0);
+      if (method === "HEAD") {
+        return new Response(null, {
+          status: res.status,
+          statusText: res.statusText,
+          headers: res.headers,
+        });
       }
-      return new Response("Internal Server Error", { status: 500 });
+      return res;
+    } catch (err) {
+      let errRes: Response;
+      if (this.#errorHandler) {
+        errRes = await this.#errorHandler(err, c);
+      } else {
+        errRes = new Response("Internal Server Error", { status: 500 });
+      }
+      if (method === "HEAD") {
+        return new Response(null, {
+          status: errRes.status,
+          statusText: errRes.statusText,
+          headers: errRes.headers,
+        });
+      }
+      return errRes;
     }
   };
 
