@@ -6,6 +6,7 @@ The `shell` module provides a cross-platform, Bun-compatible shell scripting env
 
 - **Bun-Compatible Shell (`$`)**: Tagged template literal syntax for executing commands with built-in escaping, redirections, and pipes.
 - **Built-in Commands**: Native cross-platform implementations for:
+  - `awk`: Column/field extraction supporting `-F` separator, `{print $N, ...}`, `$0`, `$NF`, `NR`, `NF`.
   - `cat`: Output file or stdin streams.
   - `grep`: Line filtering supporting `-i` (case-insensitive) and `-v` (invert-match).
   - `wc`: Word, line (`-l`), byte (`-c`), and word (`-w`) counting.

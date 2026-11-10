@@ -20,6 +20,7 @@ pub(crate) use task::process;
 pub mod engine;
 pub use engine::*;
 
+#[path = "../sources/shell/src/mod.rs"]
 pub mod shell;
 pub use shell::{
     ChildProcessOptions, ExecResult, Shell, ShellConfig, ShellPromiseResult, braces, escape, exec,
