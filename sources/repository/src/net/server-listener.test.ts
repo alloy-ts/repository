@@ -93,13 +93,15 @@ describe("Rocket listener", () => {
         `GET /wide HTTP/1.1\r\nHost: localhost\r\nX-Wide: ${"h".repeat(300 * 1024)}\r\nConnection: close\r\n\r\n`,
       );
       expect(statusOf(accepted)).toBe(200);
-      // Hyper's HTTP/1 buffer is about 408 KiB. Past that the socket closes
-      // with no status line; Rocket does not expose a smaller header cap.
+      // Hyper's HTTP/1 buffer is about 408 KiB. Past that it answers 431, or
+      // the socket closes before the status line is read. Rocket has no
+      // smaller header cap.
       const wide = await exchangeHeaders(
         port,
         `GET /wide HTTP/1.1\r\nHost: localhost\r\nX-Wide: ${"h".repeat(450 * 1024)}\r\nConnection: close\r\n\r\n`,
       );
-      expect(wide).toBe("");
+      const wideStatus = statusOf(wide);
+      expect(wideStatus === 431 || wide === "").toBe(true);
     } finally {
       await server.stop();
     }
