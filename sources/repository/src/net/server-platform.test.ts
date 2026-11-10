@@ -53,6 +53,15 @@ describe("Server platform surface", () => {
     const server = new Server({ port: 0 });
     server.query("/search", (c) => c.text("QUERY"));
     server.on("PURGE", "/cache", (c) => c.text("PURGE"));
+    server.on("HEAD", "/both", (c) => {
+      c.header("x-who", "head");
+      return c.text("head-body");
+    });
+    server.get("/both", (c) => {
+      c.header("x-who", "get");
+      return c.text("get-body");
+    });
+    server.get("/get-only", (c) => c.text("visible"));
     server.on("FOO", "/custom", (c) => c.text(`FOO ${c.req.query("q")}`));
     const port = await server.start();
     try {
@@ -60,6 +69,14 @@ describe("Server platform surface", () => {
       expect(await (await fetch(`${base}/search`, { method: "QUERY" })).text()).toBe("QUERY");
       expect(await (await fetch(`${base}/cache`, { method: "PURGE" })).text()).toBe("PURGE");
       expect(await (await fetch(`${base}/custom?q=1`, { method: "FOO" })).text()).toBe("FOO 1");
+      const head = await fetch(`${base}/both`, { method: "HEAD" });
+      expect(head.headers.get("x-who")).toBe("head");
+      expect(head.headers.get("content-length")).toBe(String(Buffer.byteLength("head-body")));
+      expect(await head.text()).toBe("");
+      const getOnly = await fetch(`${base}/get-only`, { method: "HEAD" });
+      expect(getOnly.headers.get("content-length")).toBe(String(Buffer.byteLength("visible")));
+      expect(await getOnly.text()).toBe("");
+      expect(await (await fetch(`${base}/get-only`)).text()).toBe("visible");
     } finally {
       await server.stop();
     }

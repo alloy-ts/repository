@@ -1,5 +1,6 @@
 import { createServer, type Server as NetServer, type Socket } from "node:net";
 import { File } from "../fs/file.ts";
+import { attachHttpSocket, type HttpRequestMessage } from "./http-transport.ts";
 import { Request, Response } from "./request.ts";
 import { RegExpRouter, SmartRouter, TrieRouter, type Router } from "./router.ts";
 
@@ -196,6 +197,16 @@ export class Context<E extends ServerEnv = EmptyEnv> {
 
   get<Key extends keyof VariablesOf<E> & string>(key: Key): VariablesOf<E>[Key] {
     return this.#vars.get(key) as VariablesOf<E>[Key];
+  }
+
+  /**
+   * Install `response` even when a downstream handler already finalized one.
+   * `onError` uses this so a throw after `await next()` can replace that response.
+   */
+  replace(response: Response): void {
+    this.#finalized = false;
+    this.#res = undefined;
+    this.finalize(response);
   }
 
   /** @internal */
@@ -415,17 +426,35 @@ export class Server<E extends ServerEnv = EmptyEnv> {
     });
   }
 
-  /** Dispatch a Fetch request. This is the programmatic entry point. */
-  fetch(request: globalThis.Request, env?: BindingsOf<E>, executionCtx?: unknown): Promise<Response> {
+  /**
+   * Dispatch one request in this process. This is the application entry point.
+   * It never opens a socket and never performs a network fetch, whether or not
+   * `start()` is listening.
+   *
+   * `HEAD` uses a HEAD handler when one matches. Otherwise it runs the GET handler
+   * and still returns a response with no body. In both cases the body is omitted
+   * and `content-length` describes the handler's body.
+   */
+  async fetch(
+    request: globalThis.Request,
+    env?: BindingsOf<E>,
+    executionCtx?: unknown,
+  ): Promise<Response> {
     if (request.method === "HEAD") {
-      return this.#dispatch(request, env, executionCtx, "GET").then(
-        (response) => new Response(null, response),
-      );
+      const path = this.#core.getPath(request, { env });
+      const specific = this.#core.router.match("HEAD", path).some((route) => route.method === "HEAD");
+      const response = await this.#dispatch(request, env, executionCtx, specific ? "HEAD" : "GET");
+      return emptyHead(response);
     }
     return this.#dispatch(request, env, executionCtx, request.method.toUpperCase());
   }
 
-  /** Test helper. A string is a path or absolute URL; a GET is the default. */
+  /**
+   * In-process test helper. A string or URL becomes a Request aimed at
+   * `http://localhost` and is passed to `fetch()`. An absolute URL is only the
+   * request URL used for routing. This method does not contact the network and
+   * does not send the request to the socket opened by `start()`.
+   */
   request(
     input: globalThis.Request | string | URL,
     requestInit?: RequestInit,
@@ -445,7 +474,7 @@ export class Server<E extends ServerEnv = EmptyEnv> {
     const server = createServer((socket) => {
       this.#core.sockets.add(socket);
       socket.on("close", () => this.#core.sockets.delete(socket));
-      serveSocket(this, socket);
+      attachHttpSocket(socket, (message) => dispatchSocket(this, message));
     });
     try {
       await new Promise<void>((resolve, reject) => {
@@ -567,105 +596,33 @@ export class Server<E extends ServerEnv = EmptyEnv> {
 
 }
 
-const MAX_BODY = 16 * 1024 * 1024;
-
-/** Node's HTTP parser only accepts its built-in method list, so the listener reads the request line itself. */
-function serveSocket<E extends ServerEnv>(server: Server<E>, socket: Socket): void {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  let settled = false;
-  const fail = (status: number, text: string) => {
-    if (settled || socket.destroyed) return;
-    settled = true;
-    socket.end(`HTTP/1.1 ${status} ${text}\r\nconnection: close\r\ncontent-length: ${Buffer.byteLength(text)}\r\n\r\n${text}`);
+async function dispatchSocket<E extends ServerEnv>(
+  server: Server<E>,
+  message: HttpRequestMessage,
+): Promise<{ status: number; statusText: string; headers: Iterable<[string, string]>; body: Uint8Array }> {
+  const host = server.host.includes(":") ? `[${server.host}]` : server.host;
+  const target = message.target.startsWith("/") ? message.target : `/${message.target}`;
+  const request = new Request(`http://${host}:${server.port}${target}`, {
+    method: message.method,
+    headers: message.headers,
+    body: message.method === "GET" || message.method === "HEAD" ? undefined : message.body,
+  });
+  const result = await server.fetch(request);
+  return {
+    status: result.status || 500,
+    statusText: result.statusText,
+    headers: result.headers,
+    body: new Uint8Array(await result.arrayBuffer()),
   };
-  const onData = (chunk: Buffer) => {
-    total += chunk.length;
-    if (total > MAX_BODY + 65_536) {
-      socket.off("data", onData);
-      fail(413, "Payload Too Large");
-      return;
-    }
-    chunks.push(chunk);
-    const buffered = Buffer.concat(chunks);
-    const headerEnd = buffered.indexOf("\r\n\r\n");
-    if (headerEnd < 0) return;
-    const header = buffered.subarray(0, headerEnd).toString("latin1");
-    const [start, ...lines] = header.split("\r\n");
-    const parsed = /^([!#$%&'*+\-.^_`|~0-9A-Za-z]+) (\S+) HTTP\/\d(?:\.\d)?$/.exec(start ?? "");
-    if (!parsed?.[1] || !parsed[2]) {
-      socket.off("data", onData);
-      fail(400, "Bad Request");
-      return;
-    }
-    let length = 0;
-    const headers: [string, string][] = [];
-    for (const line of lines) {
-      const split = line.indexOf(":");
-      if (split <= 0) continue;
-      const name = line.slice(0, split).trim();
-      const value = line.slice(split + 1).trim();
-      headers.push([name, value]);
-      if (name.toLowerCase() === "content-length") length = Number(value);
-    }
-    if (!Number.isFinite(length) || length < 0) {
-      socket.off("data", onData);
-      fail(400, "Bad Request");
-      return;
-    }
-    if (length > MAX_BODY) {
-      socket.off("data", onData);
-      fail(413, "Payload Too Large");
-      return;
-    }
-    const needed = headerEnd + 4 + length;
-    if (buffered.length < needed) return;
-    socket.off("data", onData);
-    settled = true;
-    const body = length === 0 ? undefined : buffered.subarray(headerEnd + 4, needed);
-    void respond(server, socket, parsed[1], parsed[2], headers, body).catch(() => {
-      if (!socket.destroyed) {
-        socket.end(
-          "HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\ncontent-length: 21\r\n\r\nInternal Server Error",
-        );
-      }
-    });
-  };
-  socket.on("data", onData);
-  socket.on("error", () => socket.destroy());
 }
 
-async function respond<E extends ServerEnv>(
-  server: Server<E>,
-  socket: Socket,
-  method: string,
-  path: string,
-  headers: [string, string][],
-  body: Buffer | undefined,
-): Promise<void> {
-  const host = server.host.includes(":") ? `[${server.host}]` : server.host;
-  const request = new Request(`http://${host}:${server.port}${path.startsWith("/") ? path : `/${path}`}`, {
-    method,
-    headers,
-    body: method === "GET" || method === "HEAD" ? undefined : body,
-  });
-  let result: Response;
-  try {
-    result = await server.fetch(request);
-  } catch {
-    socket.end("HTTP/1.1 500 Internal Server Error\r\nconnection: close\r\ncontent-length: 21\r\n\r\nInternal Server Error");
-    return;
+async function emptyHead(response: Response): Promise<Response> {
+  const headers = new Headers(response.headers);
+  if (!headers.has("content-length")) {
+    const bytes = await response.arrayBuffer();
+    headers.set("content-length", String(bytes.byteLength));
   }
-  const payload = Buffer.from(await result.arrayBuffer());
-  const status = result.status || 500;
-  const reason = result.statusText || "OK";
-  const lines = [`HTTP/1.1 ${status} ${reason}`, "connection: close", `content-length: ${payload.length}`];
-  for (const [key, value] of result.headers) {
-    const name = key.toLowerCase();
-    if (name === "content-length" || name === "transfer-encoding" || name === "connection") continue;
-    lines.push(`${key}: ${value}`);
-  }
-  socket.end(Buffer.concat([Buffer.from(`${lines.join("\r\n")}\r\n\r\n`), payload]));
+  return new Response(null, { status: response.status, statusText: response.statusText, headers });
 }
 
 type FetchListener = (event: {
@@ -717,8 +674,10 @@ async function compose<E extends ServerEnv>(
         result = await route.handler(context, () => run(position + 1));
       } else result = await notFound(context);
     } catch (error) {
-      if (error instanceof Error) result = await onError(error, context);
-      else throw error;
+      if (!(error instanceof Error)) throw error;
+      const recovered = await onError(error, context);
+      if (recovered instanceof globalThis.Response) context.replace(recovered);
+      return;
     }
     if (result instanceof globalThis.Response && !context.finalized) context.finalize(result);
   };

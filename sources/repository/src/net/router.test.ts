@@ -34,6 +34,32 @@ describe("routers", () => {
     );
   });
 
+  test("optional parameters, wildcards, and routes around fallback stay in registration order", () => {
+    const router = new SmartRouter<string>();
+    router.add("GET", "/wild/*/card", "wild");
+    router.add("GET", "/api/animal/:type?", "animal");
+    router.add("GET", "*", "star");
+    expect(router.active).toBe("RegExpRouter");
+    expect(router.match("GET", "/wild/blue/card").map((route) => route.handler)).toEqual([
+      "wild",
+      "star",
+    ]);
+    expect(router.match("GET", "/api/animal").map((route) => route.handler)).toEqual([
+      "animal",
+      "star",
+    ]);
+    expect(router.match("GET", "/api/animal/cat")[0]?.params).toEqual({ type: "cat" });
+    router.add("GET", "/post/:id{[0-9]+}", "before");
+    router.add("GET", "/post/:name{[a-z]+}", "after");
+    expect(router.active).toBe("TrieRouter");
+    expect(router.match("GET", "/wild/blue/card").map((route) => route.handler)).toEqual([
+      "wild",
+      "star",
+    ]);
+    expect(router.match("GET", "/post/12").map((route) => route.handler)).toEqual(["star", "before"]);
+    expect(router.match("GET", "/post/ab").map((route) => route.handler)).toEqual(["star", "after"]);
+  });
+
   test("SmartRouter stays on RegExpRouter until a pattern cannot be combined", () => {
     const router = new SmartRouter<string>();
     router.add("GET", "/hello", "hello");

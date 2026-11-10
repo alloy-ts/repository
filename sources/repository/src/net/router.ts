@@ -1,15 +1,29 @@
 /** Registration-order routers for Server.
  *
- * `RegExpRouter` compiles every route into one expression of lookaheads and
- * refuses sibling parameter patterns that use different expressions.
- * `TrieRouter` walks a segment trie and allows those patterns.
- * `SmartRouter` keeps the regexp router while it accepts every route, then
- * falls back to the trie. Handlers still run in registration order.
+ * Overlapping patterns do not compete by specificity. Every match runs in the
+ * order it was registered, and the first handler that returns a response
+ * without calling `next()` stops the chain. A later static route does not
+ * override an earlier wildcard.
+ *
+ * `RegExpRouter` compiles every compatible route into one lookahead expression.
+ * It refuses a new parameter pattern when that segment already has a different
+ * parameter expression, when the expression matches the empty string, or when
+ * it contains a capturing group.
+ *
+ * `TrieRouter` walks a segment trie and still matches those conflicting
+ * parameter expressions, again in registration order.
+ *
+ * `SmartRouter` is the default. It records routes on both routers and matches
+ * with `RegExpRouter` until one `add()` is rejected. After that fallback, the
+ * trie matches every route, including routes registered before the conflict.
+ * Router choice never reorders handlers.
  */
 
 export interface MatchedRoute<T> {
   handler: T;
   params: Record<string, string>;
+  /** `ALL` for middleware and `all()`, otherwise the registered method. */
+  method: string;
 }
 
 export interface Router<T> {
@@ -74,7 +88,7 @@ export class RegExpRouter<T = unknown> implements Router<T> {
         const value = group === undefined ? undefined : found[group];
         if (value !== undefined) params[key] = tryDecode(value);
       });
-      matched.push({ handler: item.route.handler, params });
+      matched.push({ handler: item.route.handler, params, method: item.route.method });
     }
     return matched;
   }
@@ -138,10 +152,10 @@ export class TrieRouter<T = unknown> implements Router<T> {
 
   match(method: string, path: string): MatchedRoute<T>[] {
     const verb = method.toUpperCase();
-    const found: { index: number; handler: T; params: Record<string, string> }[] = [];
+    const found: { index: number; handler: T; params: Record<string, string>; method: string }[] = [];
     walkTrie(this.#root, splitPath(path), 0, {}, verb, found);
     found.sort((left, right) => left.index - right.index);
-    return found.map(({ handler, params }) => ({ handler, params }));
+    return found.map(({ handler, params, method }) => ({ handler, params, method }));
   }
 }
 
@@ -266,12 +280,17 @@ function walkTrie<T>(
   index: number,
   params: Record<string, string>,
   method: string,
-  found: { index: number; handler: T; params: Record<string, string> }[],
+  found: { index: number; handler: T; params: Record<string, string>; method: string }[],
 ): void {
   const collect = (handlers: TrieHandler<T>[], captured: Record<string, string>) => {
     for (const handler of handlers) {
       if (handler.method !== "ALL" && handler.method !== method) continue;
-      found.push({ index: handler.index, handler: handler.handler, params: { ...captured } });
+      found.push({
+        index: handler.index,
+        handler: handler.handler,
+        params: { ...captured },
+        method: handler.method,
+      });
     }
   };
   if (node.rest) collect(node.rest.handlers, params);

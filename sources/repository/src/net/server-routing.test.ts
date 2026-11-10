@@ -183,6 +183,27 @@ describe("Server routing", () => {
     expect(loggedResponse.headers.get("x-after")).toBe("1");
     expect(seen).toEqual(["before", "handler", "after"]);
 
+    const after = new Server();
+    after.use(async (c, next) => {
+      await next();
+      c.header("x-after", "1");
+    });
+    after.get("/", (c) => c.text("ok"));
+    const afterResponse = await after.request("/");
+    expect(await afterResponse.text()).toBe("ok");
+    expect(afterResponse.headers.get("x-after")).toBe("1");
+
+    const downstream = new Server();
+    downstream.onError((err, c) => c.text(`caught ${err.message}`, 500));
+    downstream.use(async (_c, next) => {
+      await next();
+      throw new Error("after");
+    });
+    downstream.get("/boom", (c) => c.text("ok"));
+    const thrown = await downstream.request("/boom");
+    expect(thrown.status).toBe(500);
+    expect(await thrown.text()).toBe("caught after");
+
     const missing = new Server();
     missing.notFound((c) => c.text("Custom 404 Message", 404));
     const missingResponse = await missing.request("/nope");
