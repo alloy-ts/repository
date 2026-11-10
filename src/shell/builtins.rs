@@ -36,6 +36,7 @@ pub fn is_builtin(name: &str) -> bool {
                 | "seq"
                 | "dirname"
                 | "basename"
+                | "awk"
         )
 }
 
@@ -74,6 +75,7 @@ pub fn run_builtin(
         "seq" => Some(builtin_seq(args)),
         "dirname" => Some(builtin_dirname(args)),
         "basename" => Some(builtin_basename(args)),
+        "awk" => Some(builtin_awk(args, stdin_data, cwd)),
         _ => None,
     }
 }
@@ -92,6 +94,216 @@ fn builtin_echo(args: &[String]) -> BuiltinResult {
     let mut stdout = text.into_bytes();
     if !no_newline {
         stdout.push(b'\n');
+    }
+
+    BuiltinResult {
+        exit_code: 0,
+        stdout,
+        stderr: Vec::new(),
+    }
+}
+
+enum AwkPrintItem {
+    Field(usize),
+    FieldNF,
+    StringLiteral(String),
+    VarNR,
+    VarNF,
+}
+
+fn parse_awk_print_action(body: &str) -> Option<Vec<AwkPrintItem>> {
+    let trimmed = body.trim();
+    let action_str = if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    }
+    .trim();
+
+    if !action_str.starts_with("print") {
+        return None;
+    }
+
+    let args_str = action_str[5..].trim();
+    if args_str.is_empty() {
+        return Some(vec![AwkPrintItem::Field(0)]); // print with no args defaults to print $0
+    }
+
+    // Split args by comma respecting quotes
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+
+    for c in args_str.chars() {
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                current.push(c);
+            }
+            ',' if !in_quote => {
+                items.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+
+    let mut print_items = Vec::new();
+    for item in items {
+        if item.starts_with('"') && item.ends_with('"') && item.len() >= 2 {
+            let lit = item[1..item.len() - 1].to_string();
+            print_items.push(AwkPrintItem::StringLiteral(lit));
+        } else if let Some(field_num_str) = item.strip_prefix('$') {
+            if let Ok(idx) = field_num_str.trim().parse::<usize>() {
+                print_items.push(AwkPrintItem::Field(idx));
+            } else if field_num_str.trim() == "NF" {
+                print_items.push(AwkPrintItem::FieldNF);
+            } else {
+                return None;
+            }
+        } else if item == "NR" {
+            print_items.push(AwkPrintItem::VarNR);
+        } else if item == "NF" {
+            print_items.push(AwkPrintItem::VarNF);
+        } else if let Ok(idx) = item.parse::<usize>() {
+            print_items.push(AwkPrintItem::StringLiteral(idx.to_string()));
+        } else {
+            return None;
+        }
+    }
+
+    Some(print_items)
+}
+
+fn builtin_awk(args: &[String], stdin_data: &[u8], cwd: &Path) -> BuiltinResult {
+    let mut field_sep: Option<String> = None;
+    let mut script: Option<String> = None;
+    let mut files = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-F" {
+            if i + 1 < args.len() {
+                field_sep = Some(args[i + 1].clone());
+                i += 2;
+                continue;
+            } else {
+                return BuiltinResult {
+                    exit_code: 2,
+                    stdout: Vec::new(),
+                    stderr: b"awk: option requires an argument: -F\n".to_vec(),
+                };
+            }
+        } else if arg.starts_with("-F") && arg.len() > 2 {
+            field_sep = Some(arg[2..].to_string());
+            i += 1;
+            continue;
+        } else if script.is_none() {
+            script = Some(arg.clone());
+            i += 1;
+        } else {
+            files.push(arg.clone());
+            i += 1;
+        }
+    }
+
+    let script = match script {
+        Some(s) => s,
+        None => {
+            return BuiltinResult {
+                exit_code: 2,
+                stdout: Vec::new(),
+                stderr: b"awk: no program given\n".to_vec(),
+            };
+        }
+    };
+
+    let print_items = match parse_awk_print_action(&script) {
+        Some(items) => items,
+        None => {
+            return BuiltinResult {
+                exit_code: 2,
+                stdout: Vec::new(),
+                stderr: format!("awk: unsupported awk script: {}\n", script).into_bytes(),
+            };
+        }
+    };
+
+    let mut inputs = Vec::new();
+    if files.is_empty() || (files.len() == 1 && files[0] == "-") {
+        inputs.push(String::from_utf8_lossy(stdin_data).to_string());
+    } else {
+        for file in &files {
+            if file == "-" {
+                inputs.push(String::from_utf8_lossy(stdin_data).to_string());
+            } else {
+                let path = cwd.join(file);
+                match fs::read_to_string(&path) {
+                    Ok(content) => inputs.push(content),
+                    Err(e) => {
+                        return BuiltinResult {
+                            exit_code: 1,
+                            stdout: Vec::new(),
+                            stderr: format!("awk: {}: {}\n", file, e).into_bytes(),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    let mut stdout = Vec::new();
+    let mut nr = 0;
+
+    for content in inputs {
+        for line in content.lines() {
+            nr += 1;
+            let fields: Vec<&str> = if let Some(ref sep) = field_sep {
+                line.split(sep.as_str()).collect()
+            } else {
+                line.split_whitespace().collect()
+            };
+            let nf = fields.len();
+
+            let mut out_parts = Vec::new();
+            for item in &print_items {
+                match item {
+                    AwkPrintItem::Field(0) => {
+                        out_parts.push(line.to_string());
+                    }
+                    AwkPrintItem::Field(idx) => {
+                        if *idx >= 1 && *idx <= nf {
+                            out_parts.push(fields[*idx - 1].to_string());
+                        } else {
+                            out_parts.push(String::new());
+                        }
+                    }
+                    AwkPrintItem::FieldNF => {
+                        if nf >= 1 {
+                            out_parts.push(fields[nf - 1].to_string());
+                        } else {
+                            out_parts.push(String::new());
+                        }
+                    }
+                    AwkPrintItem::StringLiteral(lit) => {
+                        out_parts.push(lit.clone());
+                    }
+                    AwkPrintItem::VarNR => {
+                        out_parts.push(nr.to_string());
+                    }
+                    AwkPrintItem::VarNF => {
+                        out_parts.push(nf.to_string());
+                    }
+                }
+            }
+
+            stdout.extend_from_slice(out_parts.join(" ").as_bytes());
+            stdout.push(b'\n');
+        }
     }
 
     BuiltinResult {

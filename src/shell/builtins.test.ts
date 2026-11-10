@@ -111,6 +111,20 @@ describe("Shell Builtin Commands", () => {
     expect(nodePath.trim().length).toBeGreaterThan(0);
   });
 
+  test("awk builtin field extraction, -F separator, NR and NF", async () => {
+    const basic = await $`echo "first second third" | awk '{print $1, $3}'`.text();
+    expect(basic).toBe("first third\n");
+
+    const customDelim = await $`echo "foo:bar:baz" | awk -F: '{print $2}'`.text();
+    expect(customDelim).toBe("bar\n");
+
+    const nrAndWhole = await $`echo "alpha\nbeta" | awk '{print NR, $0}'`.text();
+    expect(nrAndWhole).toBe("1 alpha\n2 beta\n");
+
+    const lastField = await $`echo "one two three four" | awk '{print NF, $NF}'`.text();
+    expect(lastField).toBe("4 four\n");
+  });
+
   test("repo and git builtin", async () => {
     const repoHelp = await $`repo`.text();
     expect(repoHelp).toContain("Usage: repo <subcommand>");
