@@ -1,0 +1,30 @@
+name: net
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsqlite3-dev
+      - name: Use the npm version required by package.json
+        working-directory: ${{ runner.temp }}
+        run: npm install -g npm@11.11.0
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Test the Rust router and dispatch
+        run: "cargo test -p repository --lib net:: -- --test-threads=8"
+      - name: Build the native module
+        run: npm run build:native
+      - name: Run net tests
+        run: npx vp -C . test --run --maxWorkers=1 sources/repository/src/net
+      - name: Smoke the server example
+        run: EXAMPLE_SMOKE=1 node --import @oxc-node/core/register examples/server.ts

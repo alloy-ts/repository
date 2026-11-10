@@ -24,13 +24,20 @@ export async function fetch(
   request.signal.throwIfAborted();
   const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
   request.signal.throwIfAborted();
+  const flag = new native.AbortFlag();
+  if (request.signal.aborted) flag.abort();
+  else request.signal.addEventListener("abort", () => flag.abort(), { once: true });
   const operation = native
-    .fetch(request.url, {
-      method: request.method,
-      headers: Object.fromEntries(request.headers),
-      body,
-      redirect: request.redirect,
-    })
+    .fetch(
+      request.url,
+      {
+        method: request.method,
+        headers: Object.fromEntries(request.headers),
+        body,
+        redirect: request.redirect,
+      },
+      flag,
+    )
     .then(async (result) => {
       const bytes = await result.bytes();
       const response = new Response(

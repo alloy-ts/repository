@@ -8,8 +8,12 @@ use napi::Status;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
+
+use crate::fs::{Blob, BlobPropertyBag};
 
 /// Options for constructing a [`Response`].
 #[napi(object)]
@@ -66,7 +70,10 @@ impl Response {
 
         let status_text = match init.status_text {
             Some(st) => {
-                if !st.bytes().all(|b| matches!(b, b'\t' | b' '..=b'~' | 0x80..=0xff)) {
+                if !st
+                    .bytes()
+                    .all(|b| matches!(b, b'\t' | b' '..=b'~' | 0x80..=0xff))
+                {
                     return Err(napi::Error::new(
                         Status::InvalidArg,
                         "statusText contains invalid characters",
@@ -182,7 +189,10 @@ impl Response {
         };
         let s = String::from_utf8_lossy(slice);
         serde_json::from_str(&s).map_err(|e| {
-            napi::Error::new(Status::InvalidArg, format!("SyntaxError: failed to parse json: {e}"))
+            napi::Error::new(
+                Status::InvalidArg,
+                format!("SyntaxError: failed to parse json: {e}"),
+            )
         })
     }
 
@@ -224,7 +234,12 @@ impl Response {
             napi::Error::new(Status::GenericFailure, format!("json serialize: {e}"))
         })?;
         let mut resp_init = init.unwrap_or_default();
-        let mut headers = resp_init.headers.unwrap_or_default();
+        let mut headers = HashMap::new();
+        if let Some(existing) = resp_init.headers.take() {
+            for (key, value) in existing {
+                headers.insert(key.to_lowercase(), value);
+            }
+        }
         headers
             .entry("content-type".to_string())
             .or_insert_with(|| "application/json".to_string());
@@ -273,6 +288,53 @@ impl Response {
             body_used: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    /// `response.body` — a `ReadableStream` of the buffered body, or `null`.
+    ///
+    /// Each access builds a stream over the same bytes. The body becomes disturbed when the
+    /// stream is read, which is what `bodyUsed` and `clone()` observe.
+    #[napi(getter)]
+    pub fn body<'env>(&self, env: &'env Env) -> napi::Result<Option<ReadableStream<'env, Buffer>>> {
+        let Some(bytes) = self.body.clone() else {
+            return Ok(None);
+        };
+        let stream = BodyStream {
+            flag: Arc::clone(&self.body_used),
+            data: Some(bytes),
+        };
+        Ok(Some(ReadableStream::new(env, stream)?))
+    }
+
+    /// `response.blob()` — `Blob` view of the body, using the `Content-Type` essence.
+    #[napi]
+    pub async fn blob(&self) -> napi::Result<Blob> {
+        let bytes = self.consume_body()?;
+        let mime = self
+            .headers
+            .get("content-type")
+            .map(|value| mime_essence(value))
+            .unwrap_or_default();
+        Ok(Blob::new(
+            Some(vec![Either::B(bytes.into())]),
+            Some(BlobPropertyBag {
+                r#type: Some(mime),
+                endings: None,
+            }),
+        ))
+    }
+
+    /// `response.formData()` — parse `application/x-www-form-urlencoded` or `multipart/form-data`.
+    ///
+    /// Returns a platform `FormData` promise. The body is disturbed even when parsing fails.
+    #[napi(ts_return_type = "Promise<FormData>")]
+    pub fn form_data(&self, env: Env) -> napi::Result<Unknown<'_>> {
+        let bytes = self.consume_body()?;
+        let content_type = self.headers.get("content-type").map(String::as_str);
+        let entries = parse_form_entries(content_type, &bytes)?;
+        let payload = serde_json::Value::Array(entries).to_string();
+        let factory: Function<String, Unknown> = env.run_script(FORM_DATA_FACTORY)?;
+        factory.call(payload)
+    }
 }
 
 pub fn response_from_http_response(hr: http_request::HttpResponse, url: String) -> Response {
@@ -308,4 +370,200 @@ impl Response {
     pub fn internal_body(&self) -> Option<&[u8]> {
         self.body.as_deref()
     }
+}
+
+/// One-shot stream over a buffered body. Reading it marks the response disturbed.
+struct BodyStream {
+    flag: Arc<AtomicBool>,
+    data: Option<Vec<u8>>,
+}
+
+impl futures::Stream for BodyStream {
+    type Item = napi::Result<Buffer>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.data.is_none() {
+            return Poll::Ready(None);
+        }
+        if this.flag.swap(true, Ordering::SeqCst) {
+            this.data = None;
+            return Poll::Ready(Some(Err(napi::Error::new(
+                Status::InvalidArg,
+                "TypeError: body already consumed",
+            ))));
+        }
+        let bytes = this.data.take().unwrap_or_default();
+        Poll::Ready(Some(Ok(bytes.into())))
+    }
+}
+
+const FORM_DATA_FACTORY: &str = r#"(function (payload) {
+  const entries = JSON.parse(payload);
+  const form = new FormData();
+  for (const entry of entries) {
+    if (entry.file) {
+      const bytes = Buffer.from(entry.data, "base64");
+      form.append(
+        entry.name,
+        new File([bytes], entry.filename || "blob", { type: entry.type || "" }),
+      );
+    } else {
+      form.append(entry.name, entry.value);
+    }
+  }
+  return Promise.resolve(form);
+})"#;
+
+fn mime_essence(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn parse_form_entries(
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> napi::Result<Vec<serde_json::Value>> {
+    let Some(content_type) = content_type else {
+        return Err(napi::Error::new(
+            Status::InvalidArg,
+            "TypeError: response formData requires a form content type",
+        ));
+    };
+    let mime = mime_essence(content_type);
+    if mime == "application/x-www-form-urlencoded" {
+        return Ok(url::form_urlencoded::parse(bytes)
+            .into_owned()
+            .map(|(name, value)| {
+                serde_json::json!({
+                    "name": name,
+                    "value": value,
+                    "file": false,
+                })
+            })
+            .collect());
+    }
+    if mime == "multipart/form-data" {
+        let boundary = multipart_boundary(content_type)?;
+        return parse_multipart(bytes, &boundary);
+    }
+    Err(napi::Error::new(
+        Status::InvalidArg,
+        "TypeError: response formData content type must be urlencoded or multipart",
+    ))
+}
+
+fn multipart_boundary(content_type: &str) -> napi::Result<String> {
+    for part in content_type.split(';').skip(1) {
+        let part = part.trim();
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("boundary") {
+            let boundary = value.trim().trim_matches('"').to_string();
+            if boundary.is_empty() {
+                break;
+            }
+            return Ok(boundary);
+        }
+    }
+    Err(napi::Error::new(
+        Status::InvalidArg,
+        "TypeError: multipart formData is missing a boundary",
+    ))
+}
+
+fn parse_multipart(body: &[u8], boundary: &str) -> napi::Result<Vec<serde_json::Value>> {
+    use base64::engine::general_purpose::STANDARD;
+    let marker = format!("--{boundary}").into_bytes();
+    let Some(start) = find_slice(body, &marker) else {
+        return Ok(Vec::new());
+    };
+    let mut pos = start + marker.len();
+    let mut entries = Vec::new();
+    loop {
+        if body.get(pos..pos + 2) == Some(b"--") {
+            break;
+        }
+        if body.get(pos..pos + 2) == Some(b"\r\n") {
+            pos += 2;
+        }
+        let Some(relative_header_end) = find_slice(&body[pos..], b"\r\n\r\n") else {
+            break;
+        };
+        let headers = &body[pos..pos + relative_header_end];
+        pos += relative_header_end + 4;
+        let relative_next = find_slice(&body[pos..], &marker).unwrap_or(body.len() - pos);
+        let mut part = &body[pos..pos + relative_next];
+        if part.ends_with(b"\r\n") {
+            part = &part[..part.len() - 2];
+        }
+        entries.push(multipart_entry(headers, part, &STANDARD)?);
+        pos += relative_next + marker.len();
+        if pos > body.len() {
+            break;
+        }
+    }
+    Ok(entries)
+}
+
+fn multipart_entry(
+    headers: &[u8],
+    body: &[u8],
+    encoder: &impl base64::Engine,
+) -> napi::Result<serde_json::Value> {
+    let header_text = String::from_utf8_lossy(headers);
+    let mut name = None;
+    let mut filename = None;
+    let mut mime = String::new();
+    for line in header_text.split("\r\n") {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("content-disposition") {
+            for param in value.split(';').skip(1) {
+                let Some((param_name, param_value)) = param.split_once('=') else {
+                    continue;
+                };
+                let param_value = param_value.trim().trim_matches('"').to_string();
+                match param_name.trim().to_ascii_lowercase().as_str() {
+                    "name" => name = Some(param_value),
+                    "filename" => filename = Some(param_value),
+                    _ => {}
+                }
+            }
+        } else if key.trim().eq_ignore_ascii_case("content-type") {
+            mime = value.trim().to_string();
+        }
+    }
+    let Some(name) = name else {
+        return Err(napi::Error::new(
+            Status::InvalidArg,
+            "TypeError: multipart part is missing a name",
+        ));
+    };
+    if let Some(filename) = filename {
+        return Ok(serde_json::json!({
+            "name": name,
+            "file": true,
+            "filename": filename,
+            "type": mime,
+            "data": encoder.encode(body),
+        }));
+    }
+    Ok(serde_json::json!({
+        "name": name,
+        "file": false,
+        "value": String::from_utf8_lossy(body),
+    }))
+}
+
+fn find_slice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }

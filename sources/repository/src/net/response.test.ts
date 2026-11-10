@@ -271,4 +271,66 @@ describe("Native NAPI Response class", () => {
     expect(res.statusText).toBe("");
     expect(res.headers["location"]).toBe("https://example.com/dest?key=val#frag");
   });
+
+  test("native body stream, blob, and formData", async () => {
+    const streamed = new native.Response("streamed content");
+    expect(streamed.bodyUsed).toBe(false);
+    const reader = streamed.body?.getReader();
+    expect(reader).toBeTruthy();
+    const first = await reader!.read();
+    expect(first.done).toBe(false);
+    expect(Buffer.from(first.value as Uint8Array).toString()).toBe("streamed content");
+    expect(streamed.bodyUsed).toBe(true);
+    expect(() => streamed.clone()).toThrow();
+
+    const empty = new native.Response();
+    expect(empty.body).toBeNull();
+    expect(await empty.text()).toBe("");
+    expect(empty.bodyUsed).toBe(false);
+
+    const blobRes = new native.Response("blob content", {
+      headers: { "content-type": "text/custom" },
+    });
+    const blob = await blobRes.blob();
+    expect(blob.size).toBe(12);
+    expect(blob.type).toBe("text/custom");
+    expect(await blob.text()).toBe("blob content");
+    expect(blobRes.bodyUsed).toBe(true);
+
+    const encoded = new native.Response("foo=bar&baz=a%20b", {
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+    });
+    const form = await encoded.formData();
+    expect(form).toBeInstanceOf(FormData);
+    expect(form.get("foo")).toBe("bar");
+    expect(form.get("baz")).toBe("a b");
+
+    const boundary = "----testboundary";
+    const multipart = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="title"',
+      "",
+      "hello",
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="file"; filename="a.txt"',
+      "Content-Type: text/plain",
+      "",
+      "file-body",
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+    const multipartRes = new native.Response(multipart, {
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+    });
+    const multipartForm = await multipartRes.formData();
+    expect(multipartForm.get("title")).toBe("hello");
+    const file = multipartForm.get("file");
+    expect(file).toBeInstanceOf(globalThis.File);
+    expect((file as globalThis.File).name).toBe("a.txt");
+    expect(await (file as globalThis.File).text()).toBe("file-body");
+
+    expect(() => new native.Response("plain").formData()).toThrow(/formData/);
+    const customType = native.Response.json({ ok: true }, { headers: { "Content-Type": "application/problem+json" } });
+    expect(customType.headers["content-type"]).toBe("application/problem+json");
+  });
 });
