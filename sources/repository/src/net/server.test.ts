@@ -71,6 +71,498 @@ describe("Rocket Server", () => {
     await server.serve();
     await server.stop();
   });
+  test("routing methods, context helpers, and middleware matching Hono style Server API", async () => {
+    const server = new Server({ port: 0 });
+
+    server.get("/", (c) => {
+      return c.text("Hello World!");
+    });
+
+    server.get("/api/hello", (c) => {
+      return c.json({
+        ok: true,
+        message: "Hello!",
+      });
+    });
+
+    server.get("/posts/:id", (c) => {
+      const page = c.req.query("page");
+      const id = c.req.param("id");
+      c.header("X-Message", "Hi!");
+      return c.text(`You want to see ${page} of ${id}`);
+    });
+
+    server.post("/posts", (c) => c.text("Created!", 201));
+    server.delete("/posts/:id", (c) => c.text(`${c.req.param("id")} is deleted!`));
+
+    // Test c.req methods
+    server.get("/req-test", (c) => {
+      return c.json({
+        method: c.req.method,
+        url: c.req.url,
+        header: c.req.header("x-custom"),
+        allHeaders: typeof c.req.header(),
+        allQuery: c.req.query(),
+      });
+    });
+
+    // Test server.request()
+    const res1 = await server.request("/");
+    expect(res1.status).toBe(200);
+    expect(await res1.text()).toBe("Hello World!");
+
+    const res2 = await server.request("/api/hello");
+    expect(res2.status).toBe(200);
+    expect(await res2.json()).toEqual({ ok: true, message: "Hello!" });
+    expect(res2.headers.get("content-type")).toContain("application/json");
+
+    const res3 = await server.request("/posts/123?page=5");
+    expect(res3.status).toBe(200);
+    expect(res3.headers.get("x-message")).toBe("Hi!");
+    expect(await res3.text()).toBe("You want to see 5 of 123");
+
+    const res4 = await server.request("/posts", { method: "POST" });
+    expect(res4.status).toBe(201);
+    expect(await res4.text()).toBe("Created!");
+
+    const res5 = await server.request(
+      new Request("http://localhost/posts/abc", { method: "DELETE" }),
+    );
+    expect(res5.status).toBe(200);
+    expect(await res5.text()).toBe("abc is deleted!");
+
+    const resReq = await server.request("/req-test?a=1&b=2", {
+      headers: { "x-custom": "tested" },
+    });
+    expect(await resReq.json()).toEqual({
+      method: "GET",
+      url: "http://localhost/req-test?a=1&b=2",
+      header: "tested",
+      allHeaders: "object",
+      allQuery: { a: "1", b: "2" },
+    });
+
+    // Over HTTP via RocketServer
+    try {
+      const port = await server.start();
+      const base = `http://127.0.0.1:${port}`;
+
+      const httpRes1 = await globalThis.fetch(`${base}/`);
+      expect(await httpRes1.text()).toBe("Hello World!");
+
+      const httpRes2 = await globalThis.fetch(`${base}/posts/99?page=3`);
+      expect(httpRes2.headers.get("x-message")).toBe("Hi!");
+      expect(await httpRes2.text()).toBe("You want to see 3 of 99");
+
+      const httpRes3 = await globalThis.fetch(`${base}/posts`, { method: "POST" });
+      expect(httpRes3.status).toBe(201);
+      expect(await httpRes3.text()).toBe("Created!");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("middleware, routing hierarchy, notFound, onError, strict mode and mount", async () => {
+    type ServerVars = {
+      Variables: {
+        admin: boolean;
+      };
+    };
+    const server = new Server<ServerVars>();
+
+    // Middleware
+    server.use("/admin/*", async (c, next) => {
+      c.set("admin", true);
+      c.header("X-Admin", "true");
+      await next();
+    });
+
+    server.get("/admin/dashboard", (c) => {
+      return c.text(`Admin status: ${c.get("admin")}`);
+    });
+
+    // Sub-route
+    const sub = new Server();
+    sub.get("/item", (c) => c.text("sub item"));
+    sub.onError((err, c) => c.text(`Sub error: ${err.message}`, 500));
+    sub.get("/crash", () => {
+      throw new Error("sub exploded");
+    });
+    server.route("/api", sub);
+
+    // basePath
+    const v1 = server.basePath("/v1");
+    v1.get("/users", (c) => c.text("v1 users"));
+
+    // notFound and onError
+    server.notFound((c) => c.text("Custom 404", 404));
+    server.onError((err, c) => c.text(`Handled: ${err.message}`, 500));
+    server.get("/throw", () => {
+      throw new Error("top exploded");
+    });
+
+    // mount
+    server.mount("/mounted", (req) => new Response(`Mounted: ${new URL(req.url).pathname}`));
+
+    // Test middleware
+    const adminRes = await server.request("/admin/dashboard");
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.headers.get("x-admin")).toBe("true");
+    expect(await adminRes.text()).toBe("Admin status: true");
+
+    // Test sub-route
+    const subRes = await server.request("/api/item");
+    expect(await subRes.text()).toBe("sub item");
+
+    // Test sub-route onError priority
+    const subErrRes = await server.request("/api/crash");
+    expect(subErrRes.status).toBe(500);
+    expect(await subErrRes.text()).toBe("Sub error: sub exploded");
+
+    // Test top-level onError
+    const topErrRes = await server.request("/throw");
+    expect(topErrRes.status).toBe(500);
+    expect(await topErrRes.text()).toBe("Handled: top exploded");
+
+    // Test basePath
+    const v1Res = await server.request("/v1/users");
+    expect(await v1Res.text()).toBe("v1 users");
+
+    // Test notFound
+    const notFoundRes = await server.request("/does-not-exist");
+    expect(notFoundRes.status).toBe(404);
+    expect(await notFoundRes.text()).toBe("Custom 404");
+
+    // Test mount
+    const mountedRes = await server.request("/mounted/hello/world");
+    expect(await mountedRes.text()).toBe("Mounted: /hello/world");
+
+    // Test strict mode
+    const strictServer = new Server({ strict: true });
+    strictServer.get("/strict", (c) => c.text("strict"));
+    expect((await strictServer.request("/strict")).status).toBe(200);
+    expect((await strictServer.request("/strict/")).status).toBe(404);
+
+    const looseServer = new Server({ strict: false });
+    looseServer.get("/loose", (c) => c.text("loose"));
+    expect((await looseServer.request("/loose")).status).toBe(200);
+    expect((await looseServer.request("/loose/")).status).toBe(200);
+  });
+
+  test("advanced routing: query method, chained routes, regex, optional params, getPath and grouping order", async () => {
+    const server = new Server();
+
+    // query method
+    server.query("/", (c) => c.text("QUERY /"));
+
+    // wildcard
+    server.get("/wild/*/card", (c) => c.text("GET /wild/*/card"));
+
+    // multiple method & multiple path
+    server.on(["PUT", "DELETE"], "/post-multi", (c) => c.text("PUT or DELETE /post-multi"));
+    server.on("GET", ["/hello-a", "/hello-b"], (c) => c.text("Hello"));
+
+    // path parameter all
+    server.get("/posts/:id/comment/:comment_id", (c) => {
+      const { id, comment_id } = c.req.param();
+      return c.json({ id, comment_id });
+    });
+
+    // optional parameter
+    server.get("/api/animal/:type?", (c) => c.text(c.req.param("type") ?? "Animal!"));
+
+    // regex parameter
+    server.get("/post/:date{[0-9]+}/:title{[a-z]+}", (c) => {
+      const { date, title } = c.req.param();
+      return c.json({ date, title });
+    });
+
+    // regex parameter including slashes
+    server.get("/files/:filename{.+\\.png}", (c) => {
+      return c.text(c.req.param("filename")!);
+    });
+
+    // chained route
+    server
+      .get("/endpoint", (c) => c.text("GET /endpoint"))
+      .post((c) => c.text("POST /endpoint"))
+      .delete((c) => c.text("DELETE /endpoint"));
+
+    // test query method
+    const queryRes = await server.request("/", { method: "QUERY" });
+    expect(await queryRes.text()).toBe("QUERY /");
+
+    // test wildcard
+    const wildRes = await server.request("/wild/foo/card");
+    expect(await wildRes.text()).toBe("GET /wild/*/card");
+
+    // test multi methods and paths
+    const putRes = await server.request("/post-multi", { method: "PUT" });
+    expect(await putRes.text()).toBe("PUT or DELETE /post-multi");
+    const delRes = await server.request("/post-multi", { method: "DELETE" });
+    expect(await delRes.text()).toBe("PUT or DELETE /post-multi");
+    const helloARes = await server.request("/hello-a");
+    expect(await helloARes.text()).toBe("Hello");
+    const helloBRes = await server.request("/hello-b");
+    expect(await helloBRes.text()).toBe("Hello");
+
+    // test path parameter all
+    const commentRes = await server.request("/posts/12/comment/34");
+    expect(await commentRes.json()).toEqual({ id: "12", comment_id: "34" });
+
+    // test optional parameter
+    const anim1 = await server.request("/api/animal");
+    expect(await anim1.text()).toBe("Animal!");
+    const anim2 = await server.request("/api/animal/dog");
+    expect(await anim2.text()).toBe("dog");
+
+    // test regex parameter
+    const dateTitleRes = await server.request("/post/20260101/update");
+    expect(await dateTitleRes.json()).toEqual({ date: "20260101", title: "update" });
+    const invalidDateRes = await server.request("/post/abc/update");
+    expect(invalidDateRes.status).toBe(404);
+
+    // test regex including slashes
+    const fileRes = await server.request("/files/images/sub/photo.png");
+    expect(await fileRes.text()).toBe("images/sub/photo.png");
+
+    // test chained route
+    expect(await (await server.request("/endpoint")).text()).toBe("GET /endpoint");
+    expect(await (await server.request("/endpoint", { method: "POST" })).text()).toBe(
+      "POST /endpoint",
+    );
+    expect(await (await server.request("/endpoint", { method: "DELETE" })).text()).toBe(
+      "DELETE /endpoint",
+    );
+
+    // test getPath with host header routing
+    const hostServer = new Server({
+      getPath: (req) =>
+        "/" + req.headers.get("host") + req.url.replace(/^https?:\/\/[^/]+(\/[^?]*).*/, "$1"),
+    });
+    hostServer.get("/www1.example.com/hello", (c) => c.text("hello www1"));
+    const hostReq = new Request("http://localhost/hello", {
+      headers: { host: "www1.example.com" },
+    });
+    expect(await (await hostServer.request(hostReq)).text()).toBe("hello www1");
+
+    // test grouping ordering
+    const three = new Server();
+    const two = new Server();
+    const root = new Server();
+    three.get("/hi", (c) => c.text("hi"));
+    two.route("/three", three);
+    root.route("/two", two);
+    expect(await (await root.request("/two/three/hi")).text()).toBe("hi");
+
+    const badTwo = new Server();
+    const badRoot = new Server();
+    badRoot.route("/two", badTwo);
+    badTwo.route("/three", three);
+    expect((await badRoot.request("/two/three/hi")).status).toBe(404);
+  });
+
+  test("regression: after-next header mutation, HEAD body normalization and explicit HEAD route precedence", async () => {
+    // 1. After-next middleware header mutation
+    const app = new Server();
+    app.use(async (c, next) => {
+      await next();
+      c.header("x-after", "1");
+      c.header("x-appended", "part1");
+      c.header("x-appended", "part2", { append: true });
+    });
+    app.get("/hello", (c) => c.text("ok"));
+
+    const res = await app.request("/hello");
+    expect(res.headers.get("x-after")).toBe("1");
+    expect(res.headers.get("x-appended")).toContain("part1");
+    expect(await res.text()).toBe("ok");
+
+    // 2. HEAD fallback on GET route strips body
+    const headRes = await app.request("/hello", { method: "HEAD" });
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("x-after")).toBe("1");
+    expect(await headRes.text()).toBe("");
+
+    // 3. Explicit HEAD route registered after GET route takes precedence for HEAD
+    const app2 = new Server();
+    app2.get("/test", (c) => c.text("get", 200));
+    app2.head("/test", (c) => c.text("head", 202));
+
+    const headRes2 = await app2.request("/test", { method: "HEAD" });
+    expect(headRes2.status).toBe(202);
+    expect(await headRes2.text()).toBe("");
+
+    const getRes2 = await app2.request("/test", { method: "GET" });
+    expect(getRes2.status).toBe(200);
+    expect(await getRes2.text()).toBe("get");
+
+    // 4. request() dispatch remains independent of listening state
+    const app3 = new Server({ port: 0 });
+    app3.get("/same", (c) => c.text("app-handler"));
+    const beforeStart = await app3.request("http://localhost/same");
+    expect(await beforeStart.text()).toBe("app-handler");
+
+    try {
+      await app3.start();
+      const afterStart = await app3.request("http://localhost/same");
+      expect(await afterStart.text()).toBe("app-handler");
+    } finally {
+      await app3.stop();
+    }
+  });
+
+  test("custom router integration and router calls recording", async () => {
+    const recordedAdds: { method: string; path: string }[] = [];
+    const recordedMatches: { method: string; path: string }[] = [];
+
+    const customRouter = {
+      name: "CustomRouter",
+      add(method: string, path: string, _handler: any) {
+        recordedAdds.push({ method, path });
+      },
+      match(method: string, path: string): [any, Record<string, string>][] {
+        recordedMatches.push({ method, path });
+        if (path === "/custom") {
+          return [[[(c: any) => c.text("custom router matched")], {}]];
+        }
+        return [];
+      },
+    };
+
+    const server = new Server({ router: customRouter as any });
+    server.get("/custom", (c) => c.text("hello"));
+    expect(recordedAdds.length).toBeGreaterThan(0);
+    expect(recordedAdds[0]).toEqual({ method: "GET", path: "/custom" });
+
+    const res = await server.request("/custom");
+    expect(await res.text()).toBe("custom router matched");
+    expect(recordedMatches.length).toBeGreaterThan(0);
+    expect(recordedMatches[0]).toEqual({ method: "GET", path: "/custom" });
+  });
+
+  test("HEAD preserves content-length and respects precedence", async () => {
+    const app = new Server();
+    app.get("/hello", (c) => c.text("Hello World!"));
+
+    const headRes = await app.request("/hello", { method: "HEAD" });
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("content-length")).toBe("12");
+    expect(await headRes.text()).toBe("");
+  });
+
+  test("onError response replacing downstream response in middleware", async () => {
+    const app = new Server();
+    app.use(async (c, next) => {
+      await next();
+      c.header("x-outer", "applied");
+    });
+    app.onError((_err, c) => c.text("error-handled", 500));
+    app.get("/throw", () => {
+      throw new Error("fail");
+    });
+
+    const res = await app.request("/throw");
+    expect(res.status).toBe(500);
+    expect(res.headers.get("x-outer")).toBe("applied");
+    expect(await res.text()).toBe("error-handled");
+  });
+
+  test("regression: basePath isolation, chaining with mw, notFound in mw/c.notFound, unfinalized context, onError in chain, quantifiers/inner groups, defensive decode, and env forwarding", async () => {
+    // 1. basePath isolation and app.route("/", api)
+    const api = new Server().basePath("/api");
+    api.get("/book", (c) => c.text("book"));
+    expect((await api.request("/api/book")).status).toBe(200);
+    expect(await (await api.request("/api/book")).text()).toBe("book");
+    expect((await api.request("/book")).status).toBe(404);
+
+    const app = new Server();
+    app.route("/", api);
+    expect((await app.request("/api/book")).status).toBe(200);
+
+    // 2. Chained registration with multiple handlers
+    const chainApp = new Server();
+    const mw = async (_c: any, next: any) => {
+      await next();
+    };
+    chainApp.get("/x", (c) => c.text("x")).post(mw, (c) => c.text("post-x"));
+    expect((await chainApp.request("/x", { method: "POST" })).status).toBe(200);
+    expect((await chainApp.request("/other", { method: "POST" })).status).toBe(404);
+
+    // 3. notFound with middleware
+    const nfApp = new Server();
+    nfApp.use(async (_c, next) => {
+      await next();
+    });
+    nfApp.notFound(() => new Response("custom-nf", { status: 404 }));
+    const nfRes = await nfApp.request("/nope");
+    expect(await nfRes.text()).toBe("custom-nf");
+
+    // 4. c.notFound() delegates to custom notFound
+    const cNfApp = new Server();
+    cNfApp.notFound((c) => c.text("custom-from-c", 404));
+    cNfApp.get("/u/:id", (c) => c.notFound());
+    const cNfRes = await cNfApp.request("/u/1");
+    expect(await cNfRes.text()).toBe("custom-from-c");
+
+    // 5. unfinalized context throws error to onError
+    const unfinApp = new Server();
+    unfinApp.onError((err, c) => c.text(`caught: ${err.message}`, 500));
+    unfinApp.get("/unfin", () => {});
+    const unfinRes = await unfinApp.request("/unfin");
+    expect(unfinRes.status).toBe(500);
+    expect(await unfinRes.text()).toContain("Context is not finalized");
+
+    // 6. onError inside chain preserves outer headers and runs on throw after next()
+    const errApp = new Server();
+    errApp.use(async (c, next) => {
+      await next();
+      c.header("x-cors", "1");
+    });
+    errApp.onError((_e, c) => c.text("handled", 500));
+    errApp.get("/throw", () => {
+      throw new Error("x");
+    });
+    const errRes = await errApp.request("/throw");
+    expect(errRes.status).toBe(500);
+    expect(errRes.headers.get("x-cors")).toBe("1");
+    expect(await errRes.text()).toBe("handled");
+
+    // 7. Regex parameter with quantifiers and inner groups
+    const regexApp = new Server();
+    regexApp.get("/y/:year{[0-9]{4}}", (c) => c.text(c.req.param("year")!));
+    regexApp.get("/f/:ext{(png|jpg)}/:name", (c) => c.json(c.req.param()));
+    const rRes1 = await regexApp.request("/y/2026");
+    expect(await rRes1.text()).toBe("2026");
+    expect((await regexApp.request("/y/99")).status).toBe(404);
+    const rRes2 = await regexApp.request("/f/png/cat");
+    expect(await rRes2.json()).toEqual({ ext: "png", name: "cat" });
+
+    // 8. Defensive URI decode
+    const uriApp = new Server();
+    uriApp.get("/p/:val", (c) => c.text(c.req.param("val")!));
+    const uriRes = await uriApp.request("/p/%E0%A4%A");
+    expect(await uriRes.text()).toBe("%E0%A4%A");
+
+    // 9. Middleware /admin/* matches /admin
+    const adminApp = new Server();
+    let adminRan = false;
+    adminApp.use("/admin/*", async (_c, next) => {
+      adminRan = true;
+      await next();
+    });
+    adminApp.get("/admin", (c) => c.text("admin page"));
+    await adminApp.request("/admin");
+    expect(adminRan).toBe(true);
+
+    // 10. app.request env forwarding
+    type Bindings = { TOKEN: string };
+    const envApp = new Server<{ Bindings: Bindings }>();
+    envApp.get("/env", (c) => c.text(c.env.TOKEN));
+    const envRes = await envApp.request("/env", {}, { TOKEN: "secret-token" });
+    expect(await envRes.text()).toBe("secret-token");
+  });
+
   test("bind failure rejects and stop releases the port", async () => {
     const first = new Server({ port: 0 });
     await first.start();
