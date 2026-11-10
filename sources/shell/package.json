@@ -1,0 +1,16 @@
+{
+  "name": "@alloy-ts/shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/main.ts"
+  },
+  "scripts": {
+    "build": "cargo build -p repository-shell",
+    "test": "vp -C ../.. test --run --maxWorkers=1 sources/shell/src"
+  },
+  "dependencies": {
+    "@alloy-ts/repository-source": "*"
+  }
+}
