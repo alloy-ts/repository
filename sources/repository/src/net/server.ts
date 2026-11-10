@@ -1,6 +1,9 @@
 import { RocketServer } from "../../../../dist/index.js";
 import { File } from "../fs/file.ts";
 import { Request, Response } from "./request.ts";
+import type { Router } from "./router/reg-exp-router.ts";
+
+export { SmartRouter, RegExpRouter, type Router } from "./router/reg-exp-router.ts";
 
 export type Next = () => Promise<void>;
 
@@ -17,6 +20,14 @@ type ResponseBodyInit =
   | URLSearchParams
   | ReadableStream<Uint8Array>
   | string;
+
+function tryDecode(str: string): string {
+  try {
+    return decodeURIComponent(str);
+  } catch {
+    return str;
+  }
+}
 
 export class HonoRequest {
   readonly raw: Request;
@@ -111,8 +122,13 @@ export class HonoRequest {
   }
 }
 
+type EnvConstraint = {
+  Bindings?: Record<string, unknown>;
+  Variables?: Record<string, unknown>;
+};
+
 export class Context<
-  E extends { Bindings?: Record<string, unknown>; Variables?: Record<string, unknown> } = {
+  E extends EnvConstraint = {
     Bindings: Record<string, unknown>;
     Variables: Record<string, unknown>;
   },
@@ -121,6 +137,7 @@ export class Context<
   readonly env: E["Bindings"];
   readonly executionCtx?: any;
   readonly #varMap = new Map<string, unknown>();
+  readonly #notFoundHandler?: NotFoundHandler<E>;
   #status: number = 200;
   #headers: Headers;
   #res?: Response;
@@ -131,19 +148,25 @@ export class Context<
       params?: Record<string, string>;
       env?: any;
       executionCtx?: any;
+      notFoundHandler?: NotFoundHandler<E>;
     } = {},
   ) {
     this.req = new HonoRequest(req, options.params);
     this.env = options.env ?? ({} as any);
     this.executionCtx = options.executionCtx;
+    this.#notFoundHandler = options.notFoundHandler;
     this.#headers = new Headers();
   }
 
-  set<Key extends string>(key: Key, value: unknown): void {
+  set<Key extends keyof E["Variables"] & string>(key: Key, value: E["Variables"][Key]): void;
+  set<Key extends string>(key: Key, value: unknown): void;
+  set(key: string, value: unknown): void {
     this.#varMap.set(key, value);
   }
 
-  get<Key extends string>(key: Key): any {
+  get<Key extends keyof E["Variables"] & string>(key: Key): E["Variables"][Key];
+  get<Key extends string>(key: Key): any;
+  get(key: string): any {
     return this.#varMap.get(key);
   }
 
@@ -165,7 +188,6 @@ export class Context<
   status(status: number): void {
     this.#status = status;
     if (this.#res) {
-      // Recreate response with updated status
       this.#res = new Response(this.#res.body, {
         status,
         statusText: this.#res.statusText,
@@ -244,7 +266,18 @@ export class Context<
     return res;
   }
 
-  notFound(): Response {
+  notFound(): Response | Promise<Response> {
+    if (this.#notFoundHandler) {
+      const res = this.#notFoundHandler(this);
+      if (res instanceof globalThis.Response) {
+        this.#res = res instanceof Response ? res : new Response(res.body, res);
+        return this.#res;
+      }
+      return Promise.resolve(res).then((r) => {
+        this.#res = r instanceof Response ? r : new Response(r.body, r);
+        return this.#res;
+      });
+    }
     const res = new Response("404 Not Found", {
       status: 404,
       headers: this.#headers,
@@ -253,11 +286,6 @@ export class Context<
     return res;
   }
 }
-
-type EnvConstraint = {
-  Bindings?: Record<string, unknown>;
-  Variables?: Record<string, unknown>;
-};
 
 export type Handler<E extends EnvConstraint = any> = (
   c: Context<E>,
@@ -284,7 +312,7 @@ export interface ServerOptions<_E extends EnvConstraint = any> {
   port?: number;
   host?: string;
   strict?: boolean;
-  router?: any;
+  router?: Router<any>;
   getPath?: (req: Request | globalThis.Request) => string;
   routes?: Record<string, LegacyRoute>;
   fetch?: LegacyHandler;
@@ -299,7 +327,7 @@ interface RouteEntry {
 }
 
 export class Server<
-  E extends { Bindings?: Record<string, unknown>; Variables?: Record<string, unknown> } = {
+  E extends EnvConstraint = {
     Bindings: Record<string, unknown>;
     Variables: Record<string, unknown>;
   },
@@ -308,11 +336,12 @@ export class Server<
   readonly host: string;
   readonly portOption?: number;
   readonly strict: boolean;
+  readonly router?: Router<any>;
   readonly getPath?: (req: Request | globalThis.Request) => string;
   #keepAlive?: ReturnType<typeof setInterval>;
 
   readonly #routes: RouteEntry[] = [];
-  #lastRegisteredPath: string = "/";
+  #lastRegisteredPath?: string;
   #notFoundHandler?: NotFoundHandler<E>;
   #errorHandler?: ErrorHandler<E>;
   #basePath = "";
@@ -324,6 +353,7 @@ export class Server<
     this.host = options.host ?? "127.0.0.1";
     this.portOption = options.port;
     this.strict = options.strict ?? true;
+    this.router = options.router;
     this.getPath = options.getPath;
     this.#legacyRoutes = options.routes;
     this.#legacyFetch = options.fetch;
@@ -341,6 +371,7 @@ export class Server<
     const cleaned = ("/" + path.replace(/^\/+|\/+$/g, "")).replace(/\/+$/, "");
     const sub = new Server<E>({
       strict: this.strict,
+      router: this.router,
       getPath: this.getPath,
     });
     sub.#basePath = this.#basePath + (cleaned === "/" ? "" : cleaned);
@@ -418,7 +449,14 @@ export class Server<
     if (!subServer) return this;
     const prefix = ("/" + path.replace(/^\/+|\/+$/g, "")).replace(/\/+$/, "");
     for (const r of subServer.#routes) {
-      const combinedPath = r.path === "*" ? prefix + "/*" : prefix + (r.path === "/" ? "" : r.path);
+      const combinedPath =
+        r.path === "*"
+          ? prefix === ""
+            ? "/*"
+            : prefix + "/*"
+          : prefix === ""
+            ? r.path
+            : prefix + (r.path === "/" ? "" : r.path);
       this.#routes.push({
         method: r.method,
         path: combinedPath,
@@ -430,7 +468,9 @@ export class Server<
               return await h(c, next);
             } catch (err) {
               if (subServer.#errorHandler) {
-                return await subServer.#errorHandler(err, c);
+                const errRes = await subServer.#errorHandler(err, c);
+                c.res = errRes instanceof Response ? errRes : new Response(errRes.body, errRes);
+                return c.res;
               }
               throw err;
             }
@@ -488,6 +528,8 @@ export class Server<
   async request(
     input: string | URL | globalThis.Request,
     options?: RequestInit,
+    env?: any,
+    executionCtx?: any,
   ): Promise<Response> {
     let req: Request;
     if (typeof input === "string" || input instanceof URL) {
@@ -500,95 +542,132 @@ export class Server<
     } else {
       req = new Request(input, options);
     }
-    return await this.fetch(req);
+    return await this.fetch(req, env, executionCtx);
   }
 
   fetch = async (request: globalThis.Request, env?: any, executionCtx?: any): Promise<Response> => {
     const req = request instanceof Request ? request : new Request(request);
-    let pathname: string;
-    if (this.getPath) {
-      pathname = this.getPath(req);
-    } else {
-      pathname = new URL(req.url).pathname;
-    }
-
-    // First check legacy options.routes if present
-    if (this.#legacyRoutes) {
-      const legacyResult = await this.#dispatchLegacy(req);
-      if (legacyResult) return legacyResult;
-    }
-
-    // Match routes
-    const matched: { handler: Handler<E>; params: Record<string, string> }[] = [];
     const method = req.method.toUpperCase();
 
-    let hasExplicitHeadMatch = false;
-    if (method === "HEAD") {
-      for (const r of this.#routes) {
-        if (r.method === "HEAD" && !r.isMiddleware && r.matcher(pathname) !== undefined) {
-          hasExplicitHeadMatch = true;
-          break;
-        }
-      }
-    }
-
-    for (const r of this.#routes) {
-      const isMatchMethod =
-        r.method === "ALL" ||
-        r.method === method ||
-        (method === "HEAD" && r.method === "GET" && !hasExplicitHeadMatch);
-
-      if (!isMatchMethod) {
-        continue;
-      }
-
-      const params = r.matcher(pathname);
-      if (params !== undefined) {
-        for (const h of r.handlers) {
-          matched.push({ handler: h, params });
-        }
-      }
-    }
-
-    const c = new Context<E>(req, { env, executionCtx });
-
-    const dispatch = async (index: number): Promise<Response> => {
-      if (index >= matched.length) {
-        if (c.res) return c.res;
-        if (this.#legacyFetch) {
-          const routedReq = req as unknown as LegacyRoutedRequest;
-          routedReq.params = {};
-          return await this.#legacyFetch(routedReq);
-        }
-        if (this.#notFoundHandler) {
-          return await this.#notFoundHandler(c);
-        }
-        return c.notFound();
-      }
-
-      const { handler, params } = matched[index]!;
-      // Update req params
-      c.req._setParams(params);
-
-      let nextCalled = false;
-      const next: Next = async () => {
-        nextCalled = true;
-        await dispatch(index + 1);
-      };
-
-      const result = await handler(c, next);
-      if (result instanceof globalThis.Response) {
-        c.res = result instanceof Response ? result : new Response(result.body, result);
-        return c.res;
-      }
-      if (!nextCalled && index + 1 < matched.length) {
-        // Automatically proceed if return wasn't a Response and next wasn't explicitly called
-        await dispatch(index + 1);
-      }
-      return c.res ?? c.notFound();
-    };
+    const c = new Context<E>(req, {
+      env,
+      executionCtx,
+      notFoundHandler: this.#notFoundHandler,
+    });
 
     try {
+      let pathname: string;
+      if (this.getPath) {
+        pathname = this.getPath(req);
+      } else {
+        pathname = new URL(req.url).pathname;
+      }
+
+      // First check legacy options.routes if present
+      if (this.#legacyRoutes) {
+        const legacyResult = await this.#dispatchLegacy(req);
+        if (legacyResult) {
+          if (method === "HEAD") {
+            return new Response(null, {
+              status: legacyResult.status,
+              statusText: legacyResult.statusText,
+              headers: legacyResult.headers,
+            });
+          }
+          return legacyResult;
+        }
+      }
+
+      // Match routes
+      const matched: { handler: Handler<E>; params: Record<string, string> }[] = [];
+
+      let hasExplicitHeadMatch = false;
+      if (method === "HEAD") {
+        for (const r of this.#routes) {
+          if (r.method === "HEAD" && !r.isMiddleware && r.matcher(pathname) !== undefined) {
+            hasExplicitHeadMatch = true;
+            break;
+          }
+        }
+      }
+
+      for (const r of this.#routes) {
+        const isMatchMethod =
+          r.method === "ALL" ||
+          r.method === method ||
+          (method === "HEAD" && r.method === "GET" && !hasExplicitHeadMatch);
+
+        if (!isMatchMethod) {
+          continue;
+        }
+
+        const params = r.matcher(pathname);
+        if (params !== undefined) {
+          for (const h of r.handlers) {
+            matched.push({ handler: h, params });
+          }
+        }
+      }
+
+      const dispatch = async (index: number): Promise<Response> => {
+        if (index >= matched.length) {
+          if (c.res) return c.res;
+          if (this.#legacyFetch) {
+            const routedReq = req as unknown as LegacyRoutedRequest;
+            routedReq.params = {};
+            const res = await this.#legacyFetch(routedReq);
+            c.res = res instanceof Response ? res : new Response(res.body, res);
+            return c.res;
+          }
+          if (this.#notFoundHandler) {
+            const res = await this.#notFoundHandler(c);
+            c.res = res instanceof Response ? res : new Response(res.body, res);
+            return c.res;
+          }
+          const res = await c.notFound();
+          c.res = res instanceof Response ? res : new Response(res.body, res);
+          return c.res;
+        }
+
+        const { handler, params } = matched[index]!;
+        c.req._setParams(params);
+
+        let nextCalled = false;
+        const next: Next = async () => {
+          nextCalled = true;
+          await dispatch(index + 1);
+        };
+
+        try {
+          const result = await handler(c, next);
+          if (result instanceof globalThis.Response) {
+            c.res = result instanceof Response ? result : new Response(result.body, result);
+            return c.res;
+          }
+        } catch (err) {
+          if (this.#errorHandler) {
+            const errRes = await this.#errorHandler(err, c);
+            c.res = errRes instanceof Response ? errRes : new Response(errRes.body, errRes);
+            return c.res;
+          }
+          throw err;
+        }
+
+        if (!nextCalled && !c.res) {
+          const unfinalizedErr = new Error(
+            "Context is not finalized. Did you forget to return a Response object or `await next()`?",
+          );
+          if (this.#errorHandler) {
+            const errRes = await this.#errorHandler(unfinalizedErr, c);
+            c.res = errRes instanceof Response ? errRes : new Response(errRes.body, errRes);
+            return c.res;
+          }
+          throw unfinalizedErr;
+        }
+
+        return c.res ?? (await c.notFound());
+      };
+
       const res = await dispatch(0);
       if (method === "HEAD") {
         return new Response(null, {
@@ -738,9 +817,16 @@ export class Server<
 
   #addRoute(method: string, path: string, handlers: Handler<E>[], isMiddleware: boolean): void {
     let normalized = path;
-    if (normalized !== "*" && !normalized.startsWith("/")) {
-      normalized = "/" + normalized;
+    if (this.#basePath) {
+      const p =
+        normalized === "*" ? "/*" : normalized.startsWith("/") ? normalized : "/" + normalized;
+      normalized = this.#basePath + (p === "/" ? "" : p);
+    } else {
+      if (normalized !== "*" && !normalized.startsWith("/")) {
+        normalized = "/" + normalized;
+      }
     }
+
     this.#lastRegisteredPath = normalized;
     const matcher = buildMatcher(normalized, this.strict, isMiddleware);
     this.#routes.push({
@@ -751,11 +837,13 @@ export class Server<
       handlers,
     });
     if (this.#parentServer) {
-      const combinedPath =
-        normalized === "*"
-          ? this.#basePath + "/*"
-          : this.#basePath + (normalized === "/" ? "" : normalized);
-      this.#parentServer.#addRoute(method, combinedPath, handlers, isMiddleware);
+      this.#parentServer.#routes.push({
+        method,
+        path: normalized,
+        isMiddleware,
+        matcher: buildMatcher(normalized, this.#parentServer.strict, isMiddleware),
+        handlers,
+      });
     }
   }
 
@@ -767,11 +855,7 @@ export class Server<
     if (typeof pathOrHandler === "string") {
       this.#addRoute(method, pathOrHandler, handlers, false);
     } else {
-      // Chained route: reuse the last registered route path if available, or fallback to "*"
-      const path =
-        handlers.length === 0 && typeof pathOrHandler === "function" && this.#routes.length > 0
-          ? this.#lastRegisteredPath
-          : "*";
+      const path = this.#lastRegisteredPath ?? "*";
       this.#addRoute(method, path, [pathOrHandler, ...handlers], false);
     }
     return this;
@@ -793,72 +877,97 @@ function matchLegacy(pattern: string, path: string): Record<string, string> | un
     const segment = actual[i];
     if (part === "*") return params;
     if (segment === undefined) return;
-    if (part.startsWith(":")) params[part.slice(1)] = decodeURIComponent(segment);
+    if (part.startsWith(":")) params[part.slice(1)] = tryDecode(segment);
     else if (part !== segment) return;
   }
   return parts.length === actual.length ? params : undefined;
 }
 
+function extractBracedParams(pattern: string): {
+  transformed: string;
+  custom: { ph: string; name: string; regex: string }[];
+} {
+  let result = "";
+  let i = 0;
+  const custom: { ph: string; name: string; regex: string }[] = [];
+  while (i < pattern.length) {
+    if (pattern[i] === ":" && /[a-zA-Z0-9_]/.test(pattern[i + 1] || "")) {
+      const nameStart = i + 1;
+      let nameEnd = nameStart;
+      while (nameEnd < pattern.length && /[a-zA-Z0-9_]/.test(pattern[nameEnd]!)) {
+        nameEnd++;
+      }
+      const name = pattern.slice(nameStart, nameEnd);
+      if (pattern[nameEnd] === "{") {
+        let depth = 1;
+        const regexStart = nameEnd + 1;
+        let j = regexStart;
+        while (j < pattern.length && depth > 0) {
+          if (pattern[j] === "{") depth++;
+          else if (pattern[j] === "}") depth--;
+          j++;
+        }
+        if (depth === 0) {
+          const regex = pattern.slice(regexStart, j - 1);
+          const ph = `__PARAM_CUSTOM_${custom.length}__`;
+          custom.push({ ph, name, regex });
+          result += ph;
+          i = j;
+          continue;
+        }
+      }
+    }
+    result += pattern[i];
+    i++;
+  }
+  return { transformed: result, custom };
+}
+
 function buildMatcher(
   pattern: string,
   strict: boolean,
-  isMiddleware: boolean,
+  _isMiddleware: boolean,
 ): (pathname: string) => Record<string, string> | undefined {
   if (pattern === "*") {
     return () => ({});
   }
 
-  // Parse pattern into regex
-  // Patterns can have:
-  // - :name{[regex]} (e.g. :date{[0-9]+}, :filename{.+\\.png})
-  // - :name? (optional param)
-  // - :name (standard param)
-  // - * (wildcard)
-  // - static segments
+  const { transformed, custom } = extractBracedParams(pattern);
 
-  const paramNames: string[] = [];
-  let regexStr = "^";
-
-  // Replace :name{pattern} first by placeholders
-  const customRegExps: { placeholder: string; name: string; pattern: string }[] = [];
-  let transformedPattern = pattern.replace(
-    /:([a-zA-Z0-9_]+)\{([^}]+)\}/g,
-    (_match, name, regex) => {
-      const placeholder = `__PARAM_CUSTOM_${customRegExps.length}__`;
-      customRegExps.push({ placeholder, name, pattern: regex });
-      return placeholder;
-    },
-  );
-
-  // Handle optional parameters: /path/:param?
-  const optionalParams: { placeholder: string; name: string }[] = [];
-  transformedPattern = transformedPattern.replace(/\/:([a-zA-Z0-9_]+)\?/g, (_match, name) => {
-    const placeholder = `/__PARAM_OPTIONAL_${optionalParams.length}__`;
-    optionalParams.push({ placeholder, name });
-    return placeholder;
+  const optionalParams: { ph: string; name: string }[] = [];
+  let transformedPattern = transformed.replace(/\/:([a-zA-Z0-9_]+)\?/g, (_match, name) => {
+    const ph = `/__PARAM_OPTIONAL_${optionalParams.length}__`;
+    optionalParams.push({ ph, name });
+    return ph;
   });
 
+  const isTrailingWildcard = transformedPattern.endsWith("/*");
+  if (isTrailingWildcard) {
+    transformedPattern = transformedPattern.slice(0, -2);
+  }
+
   const parts = transformedPattern.split("/").filter(Boolean);
+  let regexStr = "^";
+  const paramNames: string[] = [];
 
   if (parts.length === 0) {
-    // Root path "/"
     regexStr += "\\/";
   } else {
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i]!;
-      const opt = optionalParams.find((o) => o.placeholder === `/${part}`);
+      const opt = optionalParams.find((o) => o.ph === `/${part}`);
       if (opt) {
         paramNames.push(opt.name);
-        regexStr += `(?:\\/([^/]+))?`;
+        regexStr += `(?:\\/(?<p_${opt.name}>[^/]+))?`;
         continue;
       }
 
       regexStr += "\\/";
 
-      const custom = customRegExps.find((c) => c.placeholder === part);
-      if (custom) {
-        paramNames.push(custom.name);
-        regexStr += `(${custom.pattern})`;
+      const cust = custom.find((c) => c.ph === part);
+      if (cust) {
+        paramNames.push(cust.name);
+        regexStr += `(?<p_${cust.name}>${cust.regex})`;
       } else if (part === "*") {
         if (i === parts.length - 1) {
           regexStr += "(?:.*)";
@@ -868,17 +977,21 @@ function buildMatcher(
       } else if (part.startsWith(":")) {
         const name = part.slice(1);
         paramNames.push(name);
-        regexStr += "([^/]+)";
+        regexStr += `(?<p_${name}>[^/]+)`;
       } else {
         regexStr += escapeRegex(part);
       }
     }
   }
 
-  if (isMiddleware) {
-    regexStr += "(?:\\/.*)?$";
+  if (isTrailingWildcard) {
+    if (parts.length === 0) {
+      regexStr += "(?:.*)?$";
+    } else {
+      regexStr += "(?:|/.*)$";
+    }
   } else if (!strict) {
-    if (pattern === "/") {
+    if (parts.length === 0) {
       regexStr += "?$";
     } else {
       regexStr += "\\/?$";
@@ -893,10 +1006,12 @@ function buildMatcher(
     const m = regex.exec(pathname);
     if (!m) return undefined;
     const params: Record<string, string> = {};
-    for (let i = 0; i < paramNames.length; i++) {
-      const val = m[i + 1];
-      if (val !== undefined) {
-        params[paramNames[i]!] = decodeURIComponent(val);
+    if (m.groups) {
+      for (const name of paramNames) {
+        const val = m.groups[`p_${name}`];
+        if (val !== undefined) {
+          params[name] = tryDecode(val);
+        }
       }
     }
     return params;

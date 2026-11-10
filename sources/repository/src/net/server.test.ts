@@ -163,7 +163,12 @@ describe("Rocket Server", () => {
   });
 
   test("middleware, routing hierarchy, notFound, onError, strict mode and mount", async () => {
-    const server = new Server();
+    type ServerVars = {
+      Variables: {
+        admin: boolean;
+      };
+    };
+    const server = new Server<ServerVars>();
 
     // Middleware
     server.use("/admin/*", async (c, next) => {
@@ -405,6 +410,101 @@ describe("Rocket Server", () => {
     } finally {
       await app3.stop();
     }
+  });
+
+  test("regression: basePath isolation, chaining with mw, notFound in mw/c.notFound, unfinalized context, onError in chain, quantifiers/inner groups, defensive decode, and env forwarding", async () => {
+    // 1. basePath isolation and app.route("/", api)
+    const api = new Server().basePath("/api");
+    api.get("/book", (c) => c.text("book"));
+    expect((await api.request("/api/book")).status).toBe(200);
+    expect(await (await api.request("/api/book")).text()).toBe("book");
+    expect((await api.request("/book")).status).toBe(404);
+
+    const app = new Server();
+    app.route("/", api);
+    expect((await app.request("/api/book")).status).toBe(200);
+
+    // 2. Chained registration with multiple handlers
+    const chainApp = new Server();
+    const mw = async (_c: any, next: any) => {
+      await next();
+    };
+    chainApp.get("/x", (c) => c.text("x")).post(mw, (c) => c.text("post-x"));
+    expect((await chainApp.request("/x", { method: "POST" })).status).toBe(200);
+    expect((await chainApp.request("/other", { method: "POST" })).status).toBe(404);
+
+    // 3. notFound with middleware
+    const nfApp = new Server();
+    nfApp.use(async (_c, next) => {
+      await next();
+    });
+    nfApp.notFound(() => new Response("custom-nf", { status: 404 }));
+    const nfRes = await nfApp.request("/nope");
+    expect(await nfRes.text()).toBe("custom-nf");
+
+    // 4. c.notFound() delegates to custom notFound
+    const cNfApp = new Server();
+    cNfApp.notFound((c) => c.text("custom-from-c", 404));
+    cNfApp.get("/u/:id", (c) => c.notFound());
+    const cNfRes = await cNfApp.request("/u/1");
+    expect(await cNfRes.text()).toBe("custom-from-c");
+
+    // 5. unfinalized context throws error to onError
+    const unfinApp = new Server();
+    unfinApp.onError((err, c) => c.text(`caught: ${err.message}`, 500));
+    unfinApp.get("/unfin", () => {});
+    const unfinRes = await unfinApp.request("/unfin");
+    expect(unfinRes.status).toBe(500);
+    expect(await unfinRes.text()).toContain("Context is not finalized");
+
+    // 6. onError inside chain preserves outer headers and runs on throw after next()
+    const errApp = new Server();
+    errApp.use(async (c, next) => {
+      await next();
+      c.header("x-cors", "1");
+    });
+    errApp.onError((_e, c) => c.text("handled", 500));
+    errApp.get("/throw", () => {
+      throw new Error("x");
+    });
+    const errRes = await errApp.request("/throw");
+    expect(errRes.status).toBe(500);
+    expect(errRes.headers.get("x-cors")).toBe("1");
+    expect(await errRes.text()).toBe("handled");
+
+    // 7. Regex parameter with quantifiers and inner groups
+    const regexApp = new Server();
+    regexApp.get("/y/:year{[0-9]{4}}", (c) => c.text(c.req.param("year")!));
+    regexApp.get("/f/:ext{(png|jpg)}/:name", (c) => c.json(c.req.param()));
+    const rRes1 = await regexApp.request("/y/2026");
+    expect(await rRes1.text()).toBe("2026");
+    expect((await regexApp.request("/y/99")).status).toBe(404);
+    const rRes2 = await regexApp.request("/f/png/cat");
+    expect(await rRes2.json()).toEqual({ ext: "png", name: "cat" });
+
+    // 8. Defensive URI decode
+    const uriApp = new Server();
+    uriApp.get("/p/:val", (c) => c.text(c.req.param("val")!));
+    const uriRes = await uriApp.request("/p/%E0%A4%A");
+    expect(await uriRes.text()).toBe("%E0%A4%A");
+
+    // 9. Middleware /admin/* matches /admin
+    const adminApp = new Server();
+    let adminRan = false;
+    adminApp.use("/admin/*", async (_c, next) => {
+      adminRan = true;
+      await next();
+    });
+    adminApp.get("/admin", (c) => c.text("admin page"));
+    await adminApp.request("/admin");
+    expect(adminRan).toBe(true);
+
+    // 10. app.request env forwarding
+    type Bindings = { TOKEN: string };
+    const envApp = new Server<{ Bindings: Bindings }>();
+    envApp.get("/env", (c) => c.text(c.env.TOKEN));
+    const envRes = await envApp.request("/env", {}, { TOKEN: "secret-token" });
+    expect(await envRes.text()).toBe("secret-token");
   });
 
   test("bind failure rejects and stop releases the port", async () => {
