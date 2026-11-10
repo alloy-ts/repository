@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cloner, Repository } from "../sources/repository/src/main.ts";
+import { Cloner, Repository } from "../src/main.ts";
 
 // This example clones a throwaway repository that lives entirely on local disk, so
 // it needs no network. We build a bare "origin", push a commit to it, then use both

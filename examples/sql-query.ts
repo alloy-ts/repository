@@ -1,4 +1,4 @@
-import { SqlConnection } from "../sources/repository/src/main.ts";
+import { SqlConnection } from "../src/main.ts";
 
 function main() {
   console.log("=== Diesel QueryDsl and RunQueryDsl Example (examples/sql-query.ts) ===");

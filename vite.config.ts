@@ -2,7 +2,7 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   pack: {
-    entry: { index: "./sources/repository/src/main.ts" },
+    entry: ["./dist/index.js"],
     format: "esm",
     outDir: "dist",
     clean: false,
@@ -15,7 +15,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["sources/*/src/**/*.{test,spec}.ts"],
+    include: ["src/**/*.{test,spec}.ts"],
     hookTimeout: 180_000,
     testTimeout: 60_000,
   },
@@ -29,7 +29,6 @@ export default defineConfig({
     options: { typeAware: true, typeCheck: true },
   },
   run: {
-    // Cargo manages incremental native builds; preserve Rust toolchain environment variables.
-    cache: { scripts: false, tasks: true },
+    cache: true,
   },
 });

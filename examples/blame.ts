@@ -1,4 +1,4 @@
-import { Repository } from "../sources/repository/src/main.ts";
+import { Repository } from "../src/main.ts";
 
 // Demonstrates the blame bindings in src/blame.rs:
 //   - Repository.blame(file, commitId?) -> BlameOutcome        (whole-file, default options)
