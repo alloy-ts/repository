@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 import { connect } from "node:net";
 import { once } from "node:events";
-import { Server } from "./server.ts";
+import { Server } from "../main.ts";
 
 const MAX_BODY = 16 * 1024 * 1024;
 

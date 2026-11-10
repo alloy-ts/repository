@@ -3,6 +3,7 @@ pub mod http;
 pub mod protocol;
 pub mod request;
 pub mod response;
+pub mod router;
 pub mod server;
 pub mod socket;
 

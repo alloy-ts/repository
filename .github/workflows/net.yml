@@ -20,9 +20,11 @@ jobs:
         run: npm install -g npm@11.11.0
       - name: Install JavaScript dependencies
         run: npm ci
+      - name: Test the Rust router and dispatch
+        run: cargo test -p repository --lib net:: -- --test-threads=8
       - name: Build the native module
         run: npm run build:native
-      - name: Run net and package tests
-        run: npx vp -C . test --run --maxWorkers=1 sources/repository/src/net packages/net/src
+      - name: Run net tests
+        run: npx vp -C . test --run --maxWorkers=1 sources/repository/src/net
       - name: Smoke the server example
         run: EXAMPLE_SMOKE=1 node --import @oxc-node/core/register examples/server.ts

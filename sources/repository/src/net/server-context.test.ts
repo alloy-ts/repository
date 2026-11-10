@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 import { Response } from "./response.ts";
-import { Server } from "./server.ts";
+import { Server } from "../main.ts";
 
 describe("Context and request helpers", () => {
   test("c.notFound uses the registered handler, including under middleware and a raw Response", async () => {

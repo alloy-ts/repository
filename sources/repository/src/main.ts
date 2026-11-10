@@ -19,16 +19,6 @@ export { Request, Headers, fetch } from "./net/request.ts";
 export type { RequestOpts, RequestInit } from "./net/request.ts";
 export { Response } from "./net/response.ts";
 export type { ResponseInit } from "./net/response.ts";
-export { Server, RegExpRouter, SmartRouter, TrieRouter } from "./net/server.ts";
-export type {
-  ServerOptions,
-  Router,
-  Handler,
-  Context,
-  HonoRequest,
-  ServerEnv,
-  EmptyEnv,
-} from "./net/server.ts";
 export { File, Blob } from "./fs/file.ts";
 // Node's adapters preserve EventEmitter, stream, callback, and error semantics.
 export * as net from "node:net";

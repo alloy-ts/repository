@@ -1,15 +1,13 @@
 import { describe, expect, test } from "vite-plus/test";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { Server } from "../main.ts";
-import { Server as PackageServer } from "@alloy-ts/net/server";
-import { RegExpRouter } from "@alloy-ts/net/server/router/reg-exp-router";
+import { RegExpRouter, Server } from "../main.ts";
 import * as native from "../../../../dist/index.js";
 import { fetch } from "../main.ts";
 
 describe("Server platform surface", () => {
-  test("the @alloy-ts/net/server entry points construct a router and a server", async () => {
-    const server = new PackageServer({ router: new RegExpRouter() });
+  test("RegExpRouter can be selected for a native server", async () => {
+    const server = new Server({ router: new RegExpRouter() });
     server.get("/from-package", (c) => c.text("packaged"));
     expect(await (await server.request("/from-package")).text()).toBe("packaged");
     expect(server).toBeInstanceOf(Server);

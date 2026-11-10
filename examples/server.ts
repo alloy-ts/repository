@@ -12,16 +12,10 @@
  */
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
-import { Server } from "@alloy-ts/net/server";
-import { RegExpRouter } from "@alloy-ts/net/server/router/reg-exp-router";
+import { RegExpRouter, Server } from "../sources/repository/src/main.ts";
 
-interface AppEnv {
-  Bindings: { TOKEN: string };
-  Variables: { user: string };
-}
-
-export function createApp(port = Number(process.env.PORT ?? 3000)): Server<AppEnv> {
-  const app = new Server<AppEnv>({
+export function createApp(port = Number(process.env.PORT ?? 3000)) {
+  const app = new Server({
     router: new RegExpRouter(),
     port,
     host: "127.0.0.1",
@@ -35,7 +29,8 @@ export function createApp(port = Number(process.env.PORT ?? 3000)): Server<AppEn
 
   // Path middleware. `c.env` is Bindings and `c.set` / `c.get` are Variables.
   app.use("/admin/*", async (c, next) => {
-    if (c.env.TOKEN !== "secret") return c.text("unauthorized", 401);
+    const token = (c.env as { TOKEN?: string } | undefined)?.TOKEN;
+    if (token !== "secret") return c.text("unauthorized", 401);
     c.set("user", "ada");
     await next();
   });
@@ -58,7 +53,7 @@ export function createApp(port = Number(process.env.PORT ?? 3000)): Server<AppEn
   });
   app.get("/raw", () => new Response("raw", { status: 200 }));
 
-  const books = new Server<AppEnv>();
+  const books = new Server();
   books.get("/:id", (c) => c.text(`book ${c.req.param("id")}`));
   app.route("/books", books);
 
@@ -78,7 +73,7 @@ export function createApp(port = Number(process.env.PORT ?? 3000)): Server<AppEn
 }
 
 /** Calls the routes above without opening a socket. */
-export async function demonstrate(app: Server<AppEnv>): Promise<void> {
+export async function demonstrate(app: Server): Promise<void> {
   const env = { TOKEN: "secret" };
   const ping = await app.request("/ping");
   console.log("GET /ping", ping.status, await ping.text(), ping.headers.get("x-after"));
