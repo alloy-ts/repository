@@ -1,7 +1,7 @@
 import { RocketServer } from "../../../../dist/index.js";
 import { File } from "../fs/file.ts";
 import { Request, Response } from "./request.ts";
-import type { Router } from "./router/reg-exp-router.ts";
+import { SmartRouter, type Router } from "./router/reg-exp-router.ts";
 
 export { SmartRouter, RegExpRouter, type Router } from "./router/reg-exp-router.ts";
 
@@ -336,11 +336,12 @@ export class Server<
   readonly host: string;
   readonly portOption?: number;
   readonly strict: boolean;
-  readonly router?: Router<any>;
+  readonly router: Router<Handler<E>[]>;
   readonly getPath?: (req: Request | globalThis.Request) => string;
   #keepAlive?: ReturnType<typeof setInterval>;
 
   readonly #routes: RouteEntry[] = [];
+  #hasCustomRouter = false;
   #lastRegisteredPath?: string;
   #notFoundHandler?: NotFoundHandler<E>;
   #errorHandler?: ErrorHandler<E>;
@@ -353,7 +354,12 @@ export class Server<
     this.host = options.host ?? "127.0.0.1";
     this.portOption = options.port;
     this.strict = options.strict ?? true;
-    this.router = options.router;
+    if (options.router) {
+      this.router = options.router as unknown as Router<Handler<E>[]>;
+      this.#hasCustomRouter = true;
+    } else {
+      this.router = new SmartRouter<Handler<E>[]>();
+    }
     this.getPath = options.getPath;
     this.#legacyRoutes = options.routes;
     this.#legacyFetch = options.fetch;
@@ -581,30 +587,48 @@ export class Server<
       // Match routes
       const matched: { handler: Handler<E>; params: Record<string, string> }[] = [];
 
-      let hasExplicitHeadMatch = false;
-      if (method === "HEAD") {
-        for (const r of this.#routes) {
-          if (r.method === "HEAD" && !r.isMiddleware && r.matcher(pathname) !== undefined) {
-            hasExplicitHeadMatch = true;
-            break;
+      if (this.#hasCustomRouter) {
+        let routerMatches = this.router.match(method, pathname);
+        if (method === "HEAD") {
+          const explicitHeadMatches = routerMatches.filter(
+            ([handlers]) => (handlers as any)._method === "HEAD",
+          );
+          if (explicitHeadMatches.length === 0) {
+            const getMatches = this.router.match("GET", pathname);
+            routerMatches = [...routerMatches, ...getMatches];
           }
         }
-      }
-
-      for (const r of this.#routes) {
-        const isMatchMethod =
-          r.method === "ALL" ||
-          r.method === method ||
-          (method === "HEAD" && r.method === "GET" && !hasExplicitHeadMatch);
-
-        if (!isMatchMethod) {
-          continue;
+        for (const [handlers, params] of routerMatches) {
+          for (const h of handlers) {
+            matched.push({ handler: h, params });
+          }
+        }
+      } else {
+        let hasExplicitHeadMatch = false;
+        if (method === "HEAD") {
+          for (const r of this.#routes) {
+            if (r.method === "HEAD" && !r.isMiddleware && r.matcher(pathname) !== undefined) {
+              hasExplicitHeadMatch = true;
+              break;
+            }
+          }
         }
 
-        const params = r.matcher(pathname);
-        if (params !== undefined) {
-          for (const h of r.handlers) {
-            matched.push({ handler: h, params });
+        for (const r of this.#routes) {
+          const isMatchMethod =
+            r.method === "ALL" ||
+            r.method === method ||
+            (method === "HEAD" && r.method === "GET" && !hasExplicitHeadMatch);
+
+          if (!isMatchMethod) {
+            continue;
+          }
+
+          const params = r.matcher(pathname);
+          if (params !== undefined) {
+            for (const h of r.handlers) {
+              matched.push({ handler: h, params });
+            }
           }
         }
       }
@@ -670,10 +694,19 @@ export class Server<
 
       const res = await dispatch(0);
       if (method === "HEAD") {
+        const headers = new Headers(res.headers);
+        if (!headers.has("content-length")) {
+          const bodyBytes = (res as any).body
+            ? Buffer.from(await res.clone().arrayBuffer()).length
+            : undefined;
+          if (bodyBytes !== undefined) {
+            headers.set("content-length", String(bodyBytes));
+          }
+        }
         return new Response(null, {
           status: res.status,
           statusText: res.statusText,
-          headers: res.headers,
+          headers,
         });
       }
       return res;
@@ -685,10 +718,19 @@ export class Server<
         errRes = new Response("Internal Server Error", { status: 500 });
       }
       if (method === "HEAD") {
+        const headers = new Headers(errRes.headers);
+        if (!headers.has("content-length")) {
+          const bodyBytes = (errRes as any).body
+            ? Buffer.from(await errRes.clone().arrayBuffer()).length
+            : undefined;
+          if (bodyBytes !== undefined) {
+            headers.set("content-length", String(bodyBytes));
+          }
+        }
         return new Response(null, {
           status: errRes.status,
           statusText: errRes.statusText,
-          headers: errRes.headers,
+          headers,
         });
       }
       return errRes;
@@ -836,6 +878,10 @@ export class Server<
       matcher,
       handlers,
     });
+    const taggedHandlers = [...handlers] as any;
+    taggedHandlers._method = method;
+    this.router.add(method, normalized, taggedHandlers);
+
     if (this.#parentServer) {
       this.#parentServer.#routes.push({
         method,
@@ -844,6 +890,7 @@ export class Server<
         matcher: buildMatcher(normalized, this.#parentServer.strict, isMiddleware),
         handlers,
       });
+      this.#parentServer.router.add(method, normalized, taggedHandlers);
     }
   }
 

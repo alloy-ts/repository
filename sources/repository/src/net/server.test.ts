@@ -412,6 +412,62 @@ describe("Rocket Server", () => {
     }
   });
 
+  test("custom router integration and router calls recording", async () => {
+    const recordedAdds: { method: string; path: string }[] = [];
+    const recordedMatches: { method: string; path: string }[] = [];
+
+    const customRouter = {
+      name: "CustomRouter",
+      add(method: string, path: string, _handler: any) {
+        recordedAdds.push({ method, path });
+      },
+      match(method: string, path: string): [any, Record<string, string>][] {
+        recordedMatches.push({ method, path });
+        if (path === "/custom") {
+          return [[[(c: any) => c.text("custom router matched")], {}]];
+        }
+        return [];
+      },
+    };
+
+    const server = new Server({ router: customRouter as any });
+    server.get("/custom", (c) => c.text("hello"));
+    expect(recordedAdds.length).toBeGreaterThan(0);
+    expect(recordedAdds[0]).toEqual({ method: "GET", path: "/custom" });
+
+    const res = await server.request("/custom");
+    expect(await res.text()).toBe("custom router matched");
+    expect(recordedMatches.length).toBeGreaterThan(0);
+    expect(recordedMatches[0]).toEqual({ method: "GET", path: "/custom" });
+  });
+
+  test("HEAD preserves content-length and respects precedence", async () => {
+    const app = new Server();
+    app.get("/hello", (c) => c.text("Hello World!"));
+
+    const headRes = await app.request("/hello", { method: "HEAD" });
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get("content-length")).toBe("12");
+    expect(await headRes.text()).toBe("");
+  });
+
+  test("onError response replacing downstream response in middleware", async () => {
+    const app = new Server();
+    app.use(async (c, next) => {
+      await next();
+      c.header("x-outer", "applied");
+    });
+    app.onError((_err, c) => c.text("error-handled", 500));
+    app.get("/throw", () => {
+      throw new Error("fail");
+    });
+
+    const res = await app.request("/throw");
+    expect(res.status).toBe(500);
+    expect(res.headers.get("x-outer")).toBe("applied");
+    expect(await res.text()).toBe("error-handled");
+  });
+
   test("regression: basePath isolation, chaining with mw, notFound in mw/c.notFound, unfinalized context, onError in chain, quantifiers/inner groups, defensive decode, and env forwarding", async () => {
     // 1. basePath isolation and app.route("/", api)
     const api = new Server().basePath("/api");
