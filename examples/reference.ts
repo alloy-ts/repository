@@ -13,7 +13,7 @@ import {
   RefStore,
   refStoreTypeName,
   Repository,
-} from "../sources/repository/src/main.ts";
+} from "../src/main.ts";
 
 // References are the named pointers Git keeps in `refs/` (branches, tags,
 // remote-tracking branches, notes) plus the special `HEAD`. This example walks

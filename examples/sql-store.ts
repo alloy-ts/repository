@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MemoryObjectStore, SqlObjectStore } from "../sources/repository/src/main.ts";
+import { MemoryObjectStore, SqlObjectStore } from "../src/main.ts";
 
 const short = (id: string) => id.slice(0, 8);
 

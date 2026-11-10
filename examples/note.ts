@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Repository } from "../sources/repository/src/main.ts";
+import { Repository } from "../src/main.ts";
 
 // Run in an isolated temp repository so the example has no side effects on any
 // real repo. A note can annotate *any* git object, so we annotate a freshly
