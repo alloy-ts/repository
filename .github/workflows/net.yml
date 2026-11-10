@@ -21,7 +21,7 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
       - name: Test the Rust router and dispatch
-        run: cargo test -p repository --lib net:: -- --test-threads=8
+        run: "cargo test -p repository --lib net:: -- --test-threads=8"
       - name: Build the native module
         run: npm run build:native
       - name: Run net tests
