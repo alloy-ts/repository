@@ -1,0 +1,6 @@
+name = "alloy-rust-example"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-18"
+
+[build]
+command = "worker-build --release"

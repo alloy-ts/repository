@@ -24,6 +24,7 @@
   "type": "module",
   "exports": {
     ".": "./dist/index.mjs",
+    "./cloud": "./dist/cloud.mjs",
     "./package.json": "./package.json"
   },
   "scripts": {

@@ -1,0 +1,11 @@
+[package]
+name = "alloy-local-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+alloy-server-local = { path = "../../../sources/server-local" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+alloy-server-core = { path = "../../../sources/server-core" }
+cloud-example-app = { path = "../app" }
