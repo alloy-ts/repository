@@ -8,6 +8,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+alloy-server-core = { path = "../server-core" }
 libloading = "0.8.9"
 gix = { version = "0.89.0", features = [
   "revision",
@@ -68,6 +69,7 @@ tokio = { version = "1", features = [
   "process",
   "io-util",
   "sync",
+  "net",
 ] }
 ring = "0.17.14"
 prolly = { package = "prolly-map", version = "0.7.2" }
@@ -87,13 +89,15 @@ itertools = "0.13.0"
 rustls-native-certs = "0.8"
 url = "2.5"
 http-request = "22.2.0"
-rocket = "0.5.2"
+axum = "0.8.9"
+tower-mcp = { version = "0.24", features = ["http", "websocket"], optional = true }
 
 [build-dependencies]
 napi-build = "2.6.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.31.3"
@@ -111,6 +115,7 @@ windows-sys = { version = "0.52", features = [
 
 [features]
 default = ["crypto", "jit"]
+mcp = ["dep:tower-mcp"]
 jit = ["fusevm/jit"]
 # SSH recipient-key sharing via ed25519 keys.
 ssh = ["dep:multi-codec"]

@@ -1,0 +1,15 @@
+[package]
+name = "alloy-lambda-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+alloy-server-core = { path = "../../../sources/server-core" }
+lambda_http = { version = "1.3.2", default-features = false, features = ["apigw_http", "apigw_rest", "alb"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+cloud-example-app = { path = "../app" }

@@ -12,7 +12,7 @@ are included when `npm run build` packs the package.
 | Request, Response, Headers and fetch | `net/request.ts` uses the runtime's Web implementations for header, body, cloning, form-data and validation semantics. `fetch` and `Request.start()` call the N-API transport, including bounded relative redirects and cross-origin credential stripping. |
 | Repository fetch separation | `sources/repo/src/fetch.rs` retains Git remote/ref/object operations. It contained no generic reqwest HTTP operation to extract. HTTP fetch lives in `net/fetch.rs`. |
 | Node net/http API | Public `net`/`http` namespaces and `Socket`, `NetServer`, `HttpServer`, `createNetServer`, `connectSocket`, `createHttpServer` use Node's actual streams, events, callbacks and error handling. Native TCP primitives remain in `net/socket.rs`; the fixed-response HTTP placeholder was removed. |
-| Rocket server and routing | `net/server.rs` launches Rocket and bridges requests to JS through N-API. `net/server.ts` implements static Response/File routes, named parameters, method handlers (including async handlers), wildcard routes and fallback. `start`/`serve` await socket binding; `stop` awaits shutdown. |
+| Axum server and routing | `net/server.rs` launches Axum and bridges requests to JS through N-API. Its ordered matcher compiles static, named, optional, wildcard and constrained route patterns. `net/server.ts` owns JS handlers and response streams. `start`/`serve` await socket binding; `stop` awaits bounded shutdown. |
 | Node fs API | Public `fs` is the Node fs namespace, including `fs.promises`; existing `fsReadFile` and other N-API primitives remain available. |
 | File and Blob | Public Blob is the Web Blob implementation. File is a lazy disk-backed extension with URL/path construction, metadata, exists/exist, write/delete, text/json/bytes/arrayBuffer, incremental ReadableStream and slice. It uses native file operations; File routes and Response(File) stream/read the disk content. |
 | Git object names | Git Blob remains available as `GitBlob` and `Object.Blob`. The native class is named GitBlob to avoid a constructor-registry collision with Web Blob. Existing Commit/Tree/Tag exports are retained and also mounted on Object, with generated TypeScript types. |
@@ -56,7 +56,7 @@ Browser CORS enforcement, cookie storage, HTTP cache, integrity verification,
 and streaming upload/download transport are not implemented. The upstream
 header map also collapses repeated response headers, including Set-Cookie.
 
-The Rocket bridge buffers each request up to 16 MiB and each response in memory.
+The Axum bridge buffers each request up to 16 MiB and streams response bodies.
 It accepts IP literals for host, provides HTTP, and does not implement WebSocket
 upgrades or Node-specific server events (use `http` for Node HTTP behavior).
 

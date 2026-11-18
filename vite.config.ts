@@ -2,7 +2,10 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   pack: {
-    entry: { index: "./sources/repository/src/main.ts" },
+    entry: {
+      index: "./sources/repository/src/main.ts",
+      cloud: "./sources/repository/src/net/cloud.ts",
+    },
     format: "esm",
     outDir: "dist",
     clean: false,

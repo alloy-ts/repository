@@ -66,7 +66,10 @@ impl Response {
 
         let status_text = match init.status_text {
             Some(st) => {
-                if !st.bytes().all(|b| matches!(b, b'\t' | b' '..=b'~' | 0x80..=0xff)) {
+                if !st
+                    .bytes()
+                    .all(|b| matches!(b, b'\t' | b' '..=b'~' | 0x80..=0xff))
+                {
                     return Err(napi::Error::new(
                         Status::InvalidArg,
                         "statusText contains invalid characters",
@@ -182,7 +185,10 @@ impl Response {
         };
         let s = String::from_utf8_lossy(slice);
         serde_json::from_str(&s).map_err(|e| {
-            napi::Error::new(Status::InvalidArg, format!("SyntaxError: failed to parse json: {e}"))
+            napi::Error::new(
+                Status::InvalidArg,
+                format!("SyntaxError: failed to parse json: {e}"),
+            )
         })
     }
 

@@ -1,0 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["app", "worker", "lambda", "local"]
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

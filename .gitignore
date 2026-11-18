@@ -7,4 +7,6 @@ node_modules/
 # Generated artifacts
 target/
 dist/
+.wrangler/
+examples/cloud-rust/worker/build/
 
